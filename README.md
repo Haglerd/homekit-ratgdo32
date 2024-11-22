@@ -1,3 +1,19 @@
+> [!IMPORTANT]
+> This firmware is for the new ESP32-based RATGDO v32 (disco) series device. It does not work on the original ESP8266-based RATGDO v2.5 devices.
+>
+> **THIS IS PRE-RELEASE FIRMWARE for testing purposes.
+> Future updates MAY include breaking changes reqiring a flash erase and re-upload.**
+>
+> Firmware for the new DISCO device is under development. The following features, documented in this README, are not currently available in this version
+> and may never be implemented
+> 
+> * Crashlog display and download.
+> * Locking WiFi to specific WiFi access point.
+> * Setting WiFi protocol version.
+> * Setting WiFi transmitters power.
+>
+> New features provided in the DISCO hardware (e.g. parking assist laser) are not currently implemented.
+
 # What is HomeKit-RATGDO?
 
 HomeKit-RATGDO is an alternative firmware for the RATGDO v2.5-series WiFi control boards that works
@@ -27,7 +43,7 @@ planned features, or to suggest your own.
 > The installation process is still being improved. You may need to reload the flasher tool page
 > after each of the following steps in order to proceed.
 
-For each of the following steps, use the [online browser-based flash tool](https://ratgdo.github.io/homekit-ratgdo/flash.html):
+For each of the following steps, use the [online browser-based flash tool](https://ratgdo.github.io/homekit-ratgdo32/flash.html):
 
 * Install the HomeKit-RATGDO firmware, and then *wait 20 seconds*.
 * Connect the RATGDO to WiFi

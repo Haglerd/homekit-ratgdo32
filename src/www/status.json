@@ -13,6 +13,7 @@
   "macAddress": "02:23:45:AB:CD:EF",
   "syslogEn": true,
   "syslogIP": "192.168.99.2",
+  "syslogPort": 514,
   "wifiSSID": "Test",
   "wifiRSSI": "-55 dBm, Channel 6",
   "wifiBSSID": "AA:BB:CC:DD:EE:FF",

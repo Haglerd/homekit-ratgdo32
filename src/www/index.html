@@ -85,6 +85,7 @@
               <td>Gateway IP:</td>
               <td id="gatewayIP"></td>
             </tr>
+            <!-- TODO find and display HomeKit Accessory ID
             <tr style="height: 10px">
               <td colspan="2"></td>
             </tr>
@@ -93,6 +94,7 @@
               <td><span id="accessoryID"></span><br><sup style="font-size: 0.6em;">HomeKit connected: <span
                     id="clients">No</span></sup></td>
             </tr>
+             -->
           </table>
         </div>
         <div class="qrcode">
@@ -170,6 +172,10 @@
                   <input type="button" value="Save User/Password" onclick="changePassword()">
                 </td>
               </tr>
+              <tr>
+                <td></td>
+                <td id="matchMsg" style="font-size: 0.6em;"><br></td>
+              </tr>
             </table>
           </div>
         </div>
@@ -203,10 +209,14 @@
                 </td>
               </tr>
               <tr>
-                <td class="label">LED on when idle:</td>
+                <td class="label">LED activity:</td>
                 <td>&nbsp;
-                  <input type="checkbox" id="LEDidle" name="LEDidle" value="yes">
-                  <span style="font-size: 0.8em;">LED will flash on activity</span>
+                  <input type="radio" id="LEDidle0" name="LEDidle" value="0">
+                  <label for="LEDidle0">Idle on</label>
+                  <input type="radio" id="LEDidle1" name="LEDidle" value="1">
+                  <label for="LEDidle1">Flash on</label>
+                  <input type="radio" id="LEDidle2" name="LEDidle" value="2">
+                  <label for="LEDidle2">Disable</label>
                 </td>
               </tr>
               <tr>
@@ -221,19 +231,23 @@
                 <td>
                   <table class="settings" id="syslogTable" style="display: none;">
                     <tr>
-                      <td class="IPlabel">Syslog Server:</td>
+                      <td class="IPlabel">Server IP/Port:</td>
                       <td>&nbsp;
                         <input class="syslogIPinput IPinput" id="syslogIP" type="text" placeholder="0.0.0.0"
-                          minlength="7" maxlength="15" size="15">
+                          minlength="7" maxlength="15" size="15">&nbsp;:
+                        <input class="syslogIPinput IPinput" id="syslogPort" type="text" placeholder="514" minlength="1"
+                          maxlength="5" size="5">
                       </td>
                     </tr>
                   </table>
                 </td>
               </tr>
+              <!-- Setting motion triggers no longer reboots, even initializing first time.
               <tr>
                 <td style="font-size: 0.65em;"><br><u>Reboot may be required:</u></td>
                 <td></td>
               </tr>
+              -->
               <tr>
                 <td class="label">Motion Triggers:</td>
                 <td>&nbsp;
@@ -266,6 +280,7 @@
                   <label for="gdosec2">Sec+ 2.0</label>
                 </td>
               </tr>
+              <!-- TODO add support for selecting WiFi PhyMode and WiFi TX Power
               <tr>
                 <td class="label">WiFi Version:</td>
                 <td>&nbsp;
@@ -287,6 +302,7 @@
                   <span style="vertical-align: middle; font-size: 0.8em"><span id="wifiPowerValue"></span> dBm</span>
                 </td>
               </tr>
+              -->
               <tr>
                 <td class="label">Static IP:</td>
                 <td>&nbsp;
@@ -367,14 +383,19 @@
                 <td></td>
               </tr>
               <tr>
-                <td colspan="2" style="text-align: center;">
-                  <input type="button" value="Save Settings" onclick="saveSettings()">&nbsp;
-                  <input type="button" value="Reset Door" onclick="resetDoor()">&nbsp;
-                  <input type="button" value="Set WiFi SSID" onclick="setSSID()">
+                <td></td>
+                <td>&nbsp;
+                  <input type="button" value="Save Settings" onclick="saveSettings()">
                 </td>
               </tr>
             </table>
           </div>
+        </div>
+        <div class="fullwidth" style="padding-left: 20px;padding-right: 20px; display: flex; justify-content: space-evenly;">
+            <input type="button" value="Reset Door" onclick="resetDoor()">
+            <input type="button" value="Set WiFi SSID" onclick="setSSID()">
+            <input type="button" value="Boot Soft AP" onclick="bootSoftAP()">
+            <input type="button" value="Factory Reset" onclick="factoryReset()">
         </div>
       </div>
     </main>
@@ -580,12 +601,14 @@
     });
 
     // This handles user control of sliders
+    /* TODO add support for selecting WiFi PhyMode and WiFi TX Power
     WiFiSlider = document.getElementById("wifiPower");
     WiFiText = document.getElementById("wifiPowerValue");
     WiFiText.innerHTML = WiFiSlider.value;
     WiFiSlider.oninput = function () {
       WiFiText.innerHTML = this.value;
     };
+    */
     TTCslider = document.getElementById("TTCseconds");
     TTCtext = document.getElementById("TTCsecondsValue");
     TTCtext.innerHTML = TTCslider.value;

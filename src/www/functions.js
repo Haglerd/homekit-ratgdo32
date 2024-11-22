@@ -11,7 +11,7 @@ var checkHeartbeat = undefined; // setTimeout for heartbeat timeout
 var evtSource = undefined;      // for Server Sent Events (SSE)
 var delayStatusFn = [];         // to keep track of possible checkStatus timeouts
 const clientUUID = uuidv4();    // uniquely identify this session
-const rebootSeconds = 15;       // How long to wait before reloading page after reboot
+const rebootSeconds = 10;       // How long to wait before reloading page after reboot
 
 // https://stackoverflow.com/questions/7995752/detect-desktop-browser-not-mobile-with-javascript
 // const isTouchDevice = function () { return 'ontouchstart' in window || 'onmsgesturechange' in window; };
@@ -203,7 +203,9 @@ function setElementsFromStatus(status) {
                 document.getElementById("pwreq").checked = value;
                 break;
             case "LEDidle":
-                document.getElementById("LEDidle").checked = (value == 1);
+                document.getElementById("LEDidle0").checked = (value == 0) ? true : false;
+                document.getElementById("LEDidle1").checked = (value == 1) ? true : false;
+                document.getElementById("LEDidle2").checked = (value == 2) ? true : false;
                 break;
             case "rebootSeconds":
                 document.getElementById("rebootHours").value = value / 60 / 60;
@@ -216,6 +218,7 @@ function setElementsFromStatus(status) {
                 document.getElementById(key).innerHTML = value;
                 document.getElementById("firmwareVersion2").innerHTML = value;
                 break;
+            /* TODO add support for selecting WiFi PhyMode and WiFi TX Power
             case "wifiPhyMode":
                 document.getElementById("wifiPhyMode0").checked = (value == 0) ? true : false;
                 document.getElementById("wifiPhyMode1").checked = (value == 1) ? true : false;
@@ -232,6 +235,7 @@ function setElementsFromStatus(status) {
             case "clients":
                 document.getElementById(key).innerHTML = (value > 0) ? `Yes (${value})` : 'No';
                 break;
+            */
             case "localIP":
                 document.getElementById(key).innerHTML = value;
                 document.getElementById("IPaddress").placeholder = value;
@@ -254,6 +258,10 @@ function setElementsFromStatus(status) {
             case "syslogIP":
                 document.getElementById(key).innerHTML = value;
                 document.getElementById("syslogIP").placeholder = value;
+                break;
+            case "syslogPort":
+                document.getElementById(key).innerHTML = value;
+                document.getElementById("syslogPort").placeholder = value;
                 break;
             case "syslogEn":
                 document.getElementById(key).checked = value;
@@ -293,7 +301,7 @@ function setElementsFromStatus(status) {
                 try {
                     document.getElementById(key).innerHTML = value;
                 } catch (error) {
-                    console.error(`Server sent unrecognized status key: ${key}`);
+                    console.warn(`Server sent unrecognized status key: ${key}`);
                 }
         }
     }
@@ -396,7 +404,8 @@ async function checkVersion(progress) {
     versionElem2.innerHTML = "Checking";
     const spanDots = document.getElementById(progress);
     const aniDots = dotDotDot(spanDots);
-    const response = await fetch("https://api.github.com/repos/ratgdo/homekit-ratgdo/releases", {
+    // TODO check this is correct URL for ratgdo32 releases
+    const response = await fetch("https://api.github.com/repos/ratgdo/homekit-ratgdo32/releases", {
         method: "GET",
         cache: "no-cache",
         redirect: "follow"
@@ -757,7 +766,8 @@ async function changePassword() {
     // await setGDO("credentials", passwordHash);
     await setGDO("credentials", JSON.stringify({
         username: www_username,
-        credentials: passwordHash
+        credentials: passwordHash,
+        password: newPW.value
     }));
     clearTimeout(checkHeartbeat);
     // On success, go to home page.
@@ -793,22 +803,28 @@ async function saveSettings() {
     const gdoSec = (document.getElementById("gdosec1").checked) ? '1' : '2';
     const pwReq = (document.getElementById("pwreq").checked) ? '1' : '0';
     const motionTriggers = getMotionTriggers();
-    const LEDidle = (document.getElementById("LEDidle").checked) ? 1 : 0;
+    const LEDidle = (document.getElementById("LEDidle2").checked) ? 2
+        : (document.getElementById("LEDidle1").checked) ? 1 : 0;
     let rebootHours = Math.max(Math.min(parseInt(document.getElementById("rebootHours").value), 72), 0);
     if (isNaN(rebootHours)) rebootHours = 0;
     let newDeviceName = document.getElementById("newDeviceName").value.substring(0, 30).trim();
     if (newDeviceName.length == 0) newDeviceName = serverStatus.deviceName;
+    /* TODO add support for selecting WiFi PhyMode and WiFi TX Power
     const wifiPhyMode = (document.getElementById("wifiPhyMode3").checked) ? '3'
         : (document.getElementById("wifiPhyMode2").checked) ? '2'
             : (document.getElementById("wifiPhyMode1").checked) ? '1'
                 : '0';
     const wifiPower = Math.max(Math.min(parseInt(document.getElementById("wifiPower").value), 20), 0);
+    */
     let TTCseconds = Math.max(Math.min(parseInt(document.getElementById("TTCseconds").value), 60), 0);
     if (isNaN(TTCseconds)) TTCseconds = 0;
 
     const syslogEn = (document.getElementById("syslogEn").checked) ? '1' : '0';
     let syslogIP = document.getElementById("syslogIP").value.substring(0, 15);
     if (syslogIP.length == 0) syslogIP = serverStatus.syslogIP;
+
+    let syslogPort = document.getElementById("syslogPort").value.substring(0, 5);
+    if (syslogPort.length == 0 || Number(syslogPort) == 0) syslogPort = serverStatus.syslogPort;
 
     const staticIP = (document.getElementById("staticIP").checked) ? '1' : '0';
     let localIP = document.getElementById("IPaddress").value.substring(0, 15);
@@ -835,8 +851,10 @@ async function saveSettings() {
         "passwordRequired", pwReq,
         "rebootSeconds", (rebootHours * 60 * 60),
         "deviceName", newDeviceName,
+        /* TODO add support for selecting WiFi PhyMode and WiFi TX Power
         "wifiPhyMode", wifiPhyMode,
         "wifiPower", wifiPower,
+        */
         "TTCseconds", TTCseconds,
         "motionTriggers", motionTriggers,
         "LEDidle", LEDidle,
@@ -848,7 +866,8 @@ async function saveSettings() {
         "enableNTP", enableNTP,
         "timeZone", timeZone,
         "syslogEn", syslogEn,
-        "syslogIP", syslogIP
+        "syslogIP", syslogIP,
+        "syslogPort", syslogPort
     );
     if (reboot) {
         countdown(rebootSeconds, "Settings saved, RATGDO device rebooting...&nbsp;");
@@ -869,12 +888,31 @@ async function resetDoor() {
 }
 
 async function setSSID() {
+    if (confirm('This will scan for available WiFi networks from where you can '
+        + 'select a network SSID.\n\nAre you sure?')) {
+        location.href = "/wifiap.html";
+    }
+    return;
+}
+
+async function bootSoftAP() {
     if (confirm('This will reboot RATGDO device into Soft Access Point mode from where you can '
         + 'select a WiFi network SSID.\n\nYou must connect your laptop or mobile device to '
         + 'WiFi Network: "' + document.getElementById("deviceName").innerHTML.replace(/\s/g, '-') + '" and then connect your browser to IP address: '
         + '192.168.4.1\n\nAre you sure?')) {
         await setGDO("softAPmode", true);
         countdown(rebootSeconds, "RATGDO device rebooting...&nbsp;");
+    }
+    return;
+}
+
+async function factoryReset() {
+    if (confirm('-- WARNING -- WARNING --\n\nThis will erase ALL settings and factory reset your device.  It will delete the HomeKit accessory. '
+        + 'You must delete the accessory from Apple Home and re-pair the device.\n\nYou will LOSE ALL AUTOMATIONS associated with this device\n\nAre you sure?')) {
+        if (confirm('ARE YOU REALLY SURE?')) {
+            await setGDO("factoryReset", true);
+            countdown(rebootSeconds, "RATGDO device rebooting...&nbsp;");
+        }
     }
     return;
 }
