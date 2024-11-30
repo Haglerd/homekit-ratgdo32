@@ -34,7 +34,7 @@ ESP8266-based hardware.
 * Obstruction sensor reporting
 * Motion sensor reporting, if you have a "smart" wall-mounted control panel.
 
-That's it, for now. Check the [GitHub Issues](https://github.com/ratgdo/homekit-ratgdo/issues) for
+That's it, for now. Check the [GitHub Issues](https://github.com/ratgdo/homekit-ratgdo32/issues) for
 planned features, or to suggest your own.
 
 ## How do I install it?
@@ -217,7 +217,7 @@ Over-the-Air (OTA) updates are supported, either directly from GitHub or by sele
     Select the _Include pre-releases_ box to include pre- or beta-release versions in the check. 
   * If update is available, Click `Update`.
 * Update from local file.
-  * Download the latest release, by download the `.bin` file from the [latest release](https://github.com/ratgdo/homekit-ratgdo/releases) page.
+  * Download the latest release, by download the `.bin` file from the [latest release](https://github.com/ratgdo/homekit-ratgdo32/releases) page.
 [![firmware](docs/ota/firmware.png)](#firmware)
   * Upload the firmware that was downloaded in step 1, by clicking `Choose File` under `Update from local file`.
   * Click `Update` to proceed with upgrading.
@@ -238,7 +238,7 @@ When displaying the firmware update dialog, the integrity of the ratgdo device i
 
 [![updatecrc](docs/ota/updatecrc.png)](#updatecrc)
 
-If you encounter a flash CRC error then please [open an issue](https://github.com/ratgdo/homekit-ratgdo/issues) on GitHub so that developers can assist with debugging.  Recovering from a flash CRC error will require flashing new firmware using a USB cable, but it may be possible to capture valuable information using esptool to assist with debugging.
+If you encounter a flash CRC error then please [open an issue](https://github.com/ratgdo/homekit-ratgdo32/issues) on GitHub so that developers can assist with debugging.  Recovering from a flash CRC error will require flashing new firmware using a USB cable, but it may be possible to capture valuable information using esptool to assist with debugging.
 
 ### esptool
 
@@ -353,7 +353,7 @@ select after adding it.
 
 ### Unable to Pair
 
-I get a message [Unable to Add Accessory: The setup code is incorrect.](https://github.com/ratgdo/homekit-ratgdo/issues/97)
+I get a message [Unable to Add Accessory: The setup code is incorrect.](https://github.com/ratgdo/homekit-ratgdo32/issues/97)
 
 > [!WARNING]
 We have had a number of users that have encountered this error that was a result of running HomeBridge with the Bounjour-HAP mDNS backend. You can find
@@ -378,9 +378,9 @@ Now that you've signed up, go here to join the discussion:
 
 [![the Discord logo](docs/discord-logo.png)](https://discord.com/channels/432663330281226270/1184710180563329115).
 
-Please also feel free to open a [GitHub Issue](https://github.com/ratgdo/homekit-ratgdo/issues) if
+Please also feel free to open a [GitHub Issue](https://github.com/ratgdo/homekit-ratgdo32/issues) if
 you don't already see your concern listed. Don't forget to check the [closed
-issues](https://github.com/ratgdo/homekit-ratgdo/issues?q=is%3Aissue+is%3Aclosed) to see if someone
+issues](https://github.com/ratgdo/homekit-ratgdo32/issues?q=is%3Aissue+is%3Aclosed) to see if someone
 has already found a fix.
 
 ## Troubleshooting
@@ -418,7 +418,7 @@ git submodule init lib/secplus/
 git submodule update
 ```
 
-The [`x.sh`](https://github.com/ratgdo/homekit-ratgdo/blob/main/x.sh) script is my lazy way of not
+The [`x.sh`](https://github.com/ratgdo/homekit-ratgdo32/blob/main/x.sh) script is my lazy way of not
 having to remember PlatformIO-specific `pio` commands. The important ones are `run`, `upload`, and
 `monitor`.
 
@@ -435,4 +435,4 @@ this firmware would never have been necessary.
 
 [Garage icons](https://www.flaticon.com/free-icons/garage) created by Creative Squad - Flaticon
 
-Copyright (c) 2023-24 HomeKit-RATGDO [contributors](https://github.com/ratgdo/homekit-ratgdo/graphs/contributors).
+Copyright (c) 2023-24 HomeKit-RATGDO [contributors](https://github.com/ratgdo/homekit-ratgdo32/graphs/contributors).
