@@ -5,18 +5,18 @@ do
     case "$1" in
         -v) VERBOSE="-vvv"
             ;;
-        upload) pio run -t upload -e ratgdo_esp8266_hV25
+        upload) pio run -t upload -e ratgdo_esp32dev
             ;;
-        monitor) pio device monitor -e ratgdo_esp8266_hV25
+        monitor) pio device monitor -e ratgdo_esp32dev
             ;;
-        run) pio run -e ratgdo_esp8266_hV25 $VERBOSE
+        run) pio run -e ratgdo_esp32dev $VERBOSE
             ;;
         test) pio test -e native $VERBOSE
             ;;
         release)
             git tag $2
             ./x.sh run
-            cp .pio/build/ratgdo_esp8266_hV25/firmware.bin docs/firmware/homekit-ratgdo-$(git describe --tag).bin
+            cp .pio/build/ratgdo_esp32dev/firmware.bin docs/firmware/homekit-ratgdo-$(git describe --tag).bin
             vi docs/manifest.json
             git add docs
             git commit -m "Release $2"
