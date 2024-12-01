@@ -98,9 +98,9 @@ jobs:
 
       - name: Rename Firmware Files
         run: |
-          mv .pio/build/ratgdo_esp32dev/firmware.bin .pio/build/ratgdo_esp32dev/homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.bin
-          mv .pio/build/ratgdo_esp32dev/firmware.elf .pio/build/ratgdo_esp32dev/homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.elf
-          mv .pio/build/ratgdo_esp32dev/firmware.md5 .pio/build/ratgdo_esp32dev/homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.md5
+          mv .pio/build/ratgdo_esp32dev/firmware.bin .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bin
+          mv .pio/build/ratgdo_esp32dev/firmware.elf .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
+          mv .pio/build/ratgdo_esp32dev/firmware.md5 .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.md5
 
       - name: Attach Bundle - Firmware.bin
         uses: AButler/upload-release-assets@v3.0
@@ -113,21 +113,21 @@ jobs:
         uses: wow-actions/download-upload@v1
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/ratgdo/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.bin
+          url: https://github.com/ratgdo/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bin
           dir: docs/firmware/
-          commit_message: "Upload Latest Firmware: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.bin"
+          commit_message: "Upload Latest Firmware: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bin"
     
       - name: Upload Firmware.bin
         uses: actions/upload-artifact@v4
         with:
-          name: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.bin
+          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bin
           path: |
             .pio/build/ratgdo_esp32dev/*.bin
 
       - name: Download Firmware.bin
         uses: actions/download-artifact@v4
         with:
-          name: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.bin
+          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bin
           path: |
             docs/firmware/
 
@@ -142,21 +142,21 @@ jobs:
         uses: wow-actions/download-upload@v1
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/ratgdo/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.md5
+          url: https://github.com/ratgdo/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.md5
           dir: docs/firmware/
-          commit_message: "Upload Latest md5: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.md5"
+          commit_message: "Upload Latest md5: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.md5"
     
       - name: Upload Firmware.bin
         uses: actions/upload-artifact@v4
         with:
-          name: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.md5
+          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.md5
           path: |
             .pio/build/ratgdo_esp32dev/*.md5
 
       - name: Download Firmware.md5
         uses: actions/download-artifact@v4
         with:
-          name: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.md5
+          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.md5
           path: |
             docs/firmware/
   
@@ -171,21 +171,21 @@ jobs:
         uses: wow-actions/download-upload@v1
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/ratgdo/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.elf 
+          url: https://github.com/ratgdo/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf 
           dir: docs/firmware/
-          commit_message: "Upload Latest Firmware: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.elf"
+          commit_message: "Upload Latest Firmware: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf"
     
       - name: Upload Firmware.elf
         uses: actions/upload-artifact@v4
         with:
-          name: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.elf
+          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
           path: |
             .pio/build/ratgdo_esp32dev/*.elf
 
       - name: Download Firmware.elf
         uses: actions/download-artifact@v4
         with:
-          name: homekit-ratgdo-${{ steps.tag.outputs.latestTag }}.elf
+          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
           path: |
             docs/firmware/
 
