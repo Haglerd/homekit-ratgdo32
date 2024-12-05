@@ -16,7 +16,7 @@ do
         release)
             git tag $2
             ./x.sh run
-            cp .pio/build/ratgdo_esp32dev/firmware.bin docs/firmware/homekit-ratgdo-$(git describe --tag).bin
+            cp .pio/build/ratgdo_esp32dev/firmware.bin docs/firmware/homekit-ratgdo32-$(git describe --tag).bin
             vi docs/manifest.json
             git add docs
             git commit -m "Release $2"
