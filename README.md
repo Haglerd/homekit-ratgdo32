@@ -1,7 +1,7 @@
 > [!IMPORTANT]
 > This firmware is for the new ESP32-based RATGDO v32 (disco) series device. It does not work on the original ESP8266-based RATGDO v2.5 devices.
 >
-> **THIS IS PRE-RELEASE FIRMWARE for testing purposes.
+> **THIS IS EARLY FIRMWARE still under test.
 > Future updates MAY include breaking changes reqiring a flash erase and re-upload.**
 >
 > Firmware for the new DISCO device is under development. The following features, documented in this README, are not currently available in this version
