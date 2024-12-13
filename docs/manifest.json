@@ -9,19 +9,19 @@
       "parts": [
         {
           "path": "firmware/homekit-ratgdo32-v3.0.0.bootloader.bin",
-          "offset": 1000
+          "offset": 0x1000
         },
         {
           "path": "firmware/homekit-ratgdo32-v3.0.0.partitions.bin",
-          "offset": 8000
+          "offset": 0x8000
         },
         {
           "path": "firmware/boot_app0.bin",
-          "offset": "e000"
+          "offset": 0xE000
         },
         {
           "path": "firmware/homekit-ratgdo32-v3.0.0.firmware.bin",
-          "offset": 10000
+          "offset": 0x10000
         }
       ]
     }
