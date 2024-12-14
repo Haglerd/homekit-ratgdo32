@@ -10,33 +10,27 @@
         }
     </style>
     <h4>HomeKit:</h4>
-    <p>This installer is for the ESP32-based RATGDO-DISCO board. It will not work with the original ESP8266-based RATGDO
-        board, for that you need to use the original
-        <a href="https://ratgdo.github.io/homekit-ratgdo/flash.html">ratgdo installer</a>
+    <p>This installer is for the ratgdo32-disco board. It will not work with the ratgdo v2.5xi boards.
+        If you have an older v2.5x board, please use <a href="https://ratgdo.github.io/homekit-ratgdo/flash.html">this installer</a>.
     </p>
-    <p>Set WiFi network SSID and Password after installation by connecting a device to the RATGDO's hotspot, named
+    <p>Set WiFi network SSID and Password after installation by connecting a device to ratgdo's hotspot, named
         <i>Garage Door ABCDEF</i> (where last six characters are unique) and connect a browser to IP address
         http://192.168.4.1
     </p>
-    <h4>MQTT:</h4>
-    <p>If you want to use <b>MQTT</b> instead of HomeKit, check out the <a href="https://paulwieland.github.io/ratgdo/"
-            target="_blank">MQTT port</a> & <a href="https://github.com/PaulWieland/ratgdo">GitHub Repo</a>.</p>
     <h4>ESP Home:</h4>
-    <p>If you want to use <b>ESPHome</b> with Home Assistant instead of HomeKit, check out the <a
-            href="https://ratgdo.github.io/esphome-ratgdo/" target="_blank">ESPHome port</a> & <a
+    <p>If you want to use <b>ESPHome</b> check out the <a
+            href="https://ratgdo.github.io/esphome-ratgdo/" target="_blank">ESPHome firmware</a> &amp; <a
             href="https://github.com/ratgdo/esphome-ratgdo">GitHub Repo</a>.</p>
 
     <p>For a comparison of available features for the different firmware options, please refer to the <a
-            href="https://paulwieland.github.io/ratgdo/01_features.html">feature matrix</a>.</p>
+            href="https://ratcloud.llc/pages/features">feature matrix</a>.</p>
 
     <h4>Drivers</h4>
     <p>If you can't connect to your ratgdo board make sure you have the right driver installed for the type of board you
         have.</p>
     <ul>
-        <li>ratgdo v2.5i uses a CH340 USB to Serial chipset. [<a
+        <li>Both ratgdo32 and ratgdo32 disco require drivers for the CH9102 USB to Serial chipset: [<a
                 href="https://www.wch-ic.com/downloads/CH341SER_EXE.html" target="_blank">driver download</a>]</li>
-        <li>Most D1 Minis use an FTDI USB to Serial chipset. [<a href="https://ftdichip.com/drivers/vcp-drivers/"
-                target="_blank">driver download</a>]</li>
     </ul>
 
     <h3>This may take a while!</h3>
