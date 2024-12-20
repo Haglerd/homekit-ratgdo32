@@ -34,7 +34,7 @@ LED::LED(uint8_t gpio_num, uint8_t state)
     pin = gpio_num;
     activeState = onState = state;
     // off is opposite of on, which can be zero or one.
-    offState = (onState == 1) ? 0 : 1;
+    currentState = offState = (onState == 1) ? 0 : 1;
     idleState = (activeState == 1) ? 0 : 1;
     LEDtimer = Ticker();
     pinMode(pin, OUTPUT);
@@ -43,11 +43,13 @@ LED::LED(uint8_t gpio_num, uint8_t state)
 void LED::on()
 {
     digitalWrite(pin, onState);
+    currentState = onState;
 }
 
 void LED::off()
 {
     digitalWrite(pin, offState);
+    currentState = offState;
 }
 
 void LED::idle()

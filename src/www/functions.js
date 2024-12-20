@@ -218,6 +218,7 @@ function setElementsFromStatus(status) {
             case "distanceSensor":
                 document.getElementById("vehicleRow").style.display = (value) ? "table-row" : "none";
                 document.getElementById("vehicleSetting").style.display = (value) ? "table-row" : "none";
+                document.getElementById("laserButton").style.display = (value) ? "inline-block" : "none";
                 break;
             case "vehicleThreshold":
                 document.getElementById(key).value = value;
@@ -297,6 +298,21 @@ function setElementsFromStatus(status) {
                 break;
             case "motionTriggers":
                 setMotionTriggers(value);
+                break;
+            case "garageLightOn":
+                document.getElementById(key).innerHTML = value;
+                document.getElementById("lightButton").value = (value == false) ? "Light On" : "Light Off";
+                break;
+            case "garageDoorState":
+                document.getElementById(key).innerHTML = value;
+                document.getElementById("doorButton").value = (value == "Closed") ? "Open Door" : "Close Door";
+                break;
+            case "garageLockState":
+                document.getElementById(key).innerHTML = value;
+                document.getElementById("lockButton").value = (value == "Unsecured") ? "Lock Door" : "Unlock Door";
+                break;
+            case "assistLaser":
+                document.getElementById("laserButton").value = (value == false) ? "Laser On" : "Laser Off";
                 break;
             case "freeIramHeap":
                 // Unused... remove this case statement when/if we add to html.

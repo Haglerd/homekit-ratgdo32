@@ -107,6 +107,7 @@ WebServer server(80);
 // Local copy of door status
 GarageDoor last_reported_garage_door;
 bool last_reported_paired = false;
+bool last_reported_assist_laser = false;
 uint32_t lastDoorUpdateAt = 0;
 GarageDoorCurrentState lastDoorState = (GarageDoorCurrentState)0xff;
 
@@ -199,10 +200,14 @@ void web_loop()
         // First time through, zero offset from upTime, which is when we last rebooted)
         ADD_INT(json, "lastDoorUpdateAt", (upTime - lastDoorUpdateAt));
     }
-    if (garage_door.has_distance_sensor && vehicleStatusChange)
+    if (garage_door.has_distance_sensor)
     {
-        vehicleStatusChange = false;
-        ADD_STR(json, "vehicleStatus", vehicleStatus);
+        if (vehicleStatusChange)
+        {
+            vehicleStatusChange = false;
+            ADD_STR(json, "vehicleStatus", vehicleStatus);
+        }
+        ADD_BOOL_C(json, "assistLaser", laser.state(), last_reported_assist_laser);
     }
     // Conditional macros, only add if value has changed
     ADD_BOOL_C(json, "paired", homekit_is_paired(), last_reported_paired);
@@ -490,6 +495,8 @@ void handle_status()
     {
         ADD_STR(json, "vehicleStatus", vehicleStatus);
         ADD_INT(json, "vehicleDist", vehicleDistance);
+        last_reported_assist_laser = laser.state();
+        ADD_BOOL(json, "assistLaser", last_reported_assist_laser);
     }
     END_JSON(json);
 
@@ -614,6 +621,16 @@ bool helperFactoryReset(const std::string &key, const std::string &value, config
     return true;
 }
 
+bool helperAssistLaser(const std::string &key, const std::string &value, configSetting *action)
+{
+    if (value == "1")
+        laser.on();
+    else
+        laser.off();
+    notify_homekit_laser(value == "1");
+    return true;
+}
+
 void handle_setgdo()
 {
     // Build-in handlers that do not set a configuration value, or if they do they set multiple values.
@@ -626,6 +643,7 @@ void handle_setgdo()
         {"credentials", {false, false, 0, helperCredentials}}, // parse out wwwUsername and credentials
         {"updateUnderway", {false, false, 0, helperUpdateUnderway}},
         {"factoryReset", {true, false, 0, helperFactoryReset}},
+        {"assistLaser", {false, false, 0, helperAssistLaser}},
     };
     bool reboot = false;
     bool error = false;

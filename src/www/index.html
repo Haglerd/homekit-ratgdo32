@@ -132,7 +132,7 @@
               <td>Motion:</td>
               <td id="garageMotion"></td>
             </tr>
-            <tr id="vehicleRow">
+            <tr id="vehicleRow" style="display:none;">
               <td>Vehicle:</td>
               <td id="vehicleStatus"></td>
               <td>Distance:</td>
@@ -141,13 +141,15 @@
           </table>
         </div>
         <div id="GDOcontrols" class="fullwidth"
-          style="padding-left: 0px; padding-right: 0px; display: flex; justify-content: space-between;">
-          <input type="button" value="Light On" onclick="setGDO('garageLightOn', '1')">
-          <input type="button" value="Light Off" onclick="setGDO('garageLightOn', '0')">
-          <input type="button" value="Door Open" onclick="setGDO('garageDoorState', '1')">
-          <input type="button" value="Door Close" onclick="setGDO('garageDoorState', '0')">
-          <input type="button" value="Door Lock" onclick="setGDO('garageLockState', '1')">
-          <input type="button" value="Door Unlock" onclick="setGDO('garageLockState', '0')">
+          style="padding-left: 20px; padding-right: 20px; display: flex; justify-content: space-evenly;">
+          <input type="button" id="lightButton" value="Light On"
+            onclick="setGDO('garageLightOn', (event.target.value === 'Light On') ? '1' : '0');">
+          <input type="button" id="doorButton" value="Open Door"
+            onclick="setGDO('garageDoorState', (event.target.value === 'Open Door') ? '1' : '0');">
+          <input type="button" id="lockButton" value="Lock Door"
+            onclick="setGDO('garageLockState', (event.target.value === 'Lock Door') ? '1' : '0');">
+          <input type="button" id="laserButton" value="Laser On" style="display:none;"
+            onclick="setGDO('assistLaser', (event.target.value === 'Laser On') ? '1' : '0');">
         </div>
       </div>
       <!-- Settings section of page ------------------------------------------------------------------>
@@ -273,7 +275,7 @@
                   <label for="motionWallPanel">Wall Panel</label>
                 </td>
               </tr>
-              <tr id="vehicleSetting">
+              <tr id="vehicleSetting" style="display:none;">
                 <td class="label">Vehicle Distance:</td>
                 <td>&nbsp;
                   <input type="range" min="5" max="300" value="180" id="vehicleThreshold" name="vehicleThreshold"
