@@ -316,7 +316,7 @@ DEV_Info::DEV_Info(const char *name) : Service::AccessoryInformation()
 boolean DEV_Info::update()
 {
     RINFO(TAG, "Request to identify accessory, flash LED, etc.");
-    // LED, Laser and Tone calls are all asyncronous.  We will iluminate LED and Laser
+    // LED, Laser and Tone calls are all asynchronous.  We will illuminate LED and Laser
     // for 2 seconds, during which we will play tone.  Function will return after 1.5 seconds.
     led.flash(2000);
     laser.flash(2000);
