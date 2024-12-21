@@ -1,6 +1,19 @@
 # Change Log
 
-All notable changes to `homekit-ratgdo` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
+**v3.x.x firmware is for ratgdo32 and ratgdo32-disco boards only**
+
+All notable changes to `homekit-ratgdo32` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
+
+## v3.0.4 (2024-12-21)
+
+### What's Changed
+
+* Feature: Add HomeKit light switch and web page button for parking assist laser
+* Feature: Change web page separated buttons for on/off, open/close, etc. to single buttons
+
+### Known Issues
+
+* Still testing... Future updates MAY include breaking changes requiring a flash erase and re-upload.
 
 ## v3.0.3 (2024-12-19)
 
@@ -15,7 +28,7 @@ All notable changes to `homekit-ratgdo` will be documented in this file. This pr
 
 ### Known Issues
 
-* Still testing... Future updates MAY include breaking changes reqiring a flash erase and re-upload.
+* Still testing... Future updates MAY include breaking changes requiring a flash erase and re-upload.
 
 ## v3.0.2 (2024-12-16)
 
@@ -28,7 +41,7 @@ All notable changes to `homekit-ratgdo` will be documented in this file. This pr
 
 ### Known Issues
 
-* Still testing... Future updates MAY include breaking changes reqiring a flash erase and re-upload.
+* Still testing... Future updates MAY include breaking changes requiring a flash erase and re-upload.
 
 ## v3.0.1 (2024-12-11)
 
@@ -43,7 +56,7 @@ All notable changes to `homekit-ratgdo` will be documented in this file. This pr
 
 ### Known Issues
 
-* Still testing... Future updates MAY include breaking changes reqiring a flash erase and re-upload.
+* Still testing... Future updates MAY include breaking changes requiring a flash erase and re-upload.
 
 ## v3.0.0 (2024-11-30)
 
@@ -53,5 +66,5 @@ All notable changes to `homekit-ratgdo` will be documented in this file. This pr
 
 ### Known Issues
 
-* THIS IS PRE-RELEASE FIRMWARE for testing purposes. Future updates MAY include breaking changes reqiring a flash erase and re-upload.
+* THIS IS PRE-RELEASE FIRMWARE for testing purposes. Future updates MAY include breaking changes requiring a flash erase and re-upload.
 

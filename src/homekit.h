@@ -23,6 +23,13 @@
 // RATGDO project includes
 #include "HomeSpan.h"
 
+
+enum Light_t : uint8_t
+{
+    GDO_LIGHT = 1,
+    ASSIST_LASER = 2,
+};
+
 void setup_homekit();
 
 extern void notify_homekit_target_door_state_change();
@@ -37,6 +44,7 @@ extern void notify_homekit_motion();
 extern void notify_homekit_vehicle_occupancy(bool vehicleDetected);
 extern void notify_homekit_vehicle_arriving(bool vehicleArriving);
 extern void notify_homekit_vehicle_departing(bool vehicleDeparting);
+extern void notify_homekit_laser(bool on);
 extern void enable_service_homekit_vehicle();
 
 extern void homekit_unpair();
@@ -78,8 +86,9 @@ struct DEV_Light : Service::LightBulb
     Characteristic::On *on;
 
     QueueHandle_t event_q;
+    Light_t type;
 
-    DEV_Light();
+    DEV_Light(Light_t type = Light_t::GDO_LIGHT);
     boolean update();
     void loop();
 };

@@ -39,6 +39,7 @@ static DEV_Motion *motion;
 static DEV_Motion *arriving;
 static DEV_Motion *departing;
 static DEV_Occupancy *vehicle;
+static DEV_Light *assistLaser;
 
 static bool isPaired = false;
 static bool rebooting = false;
@@ -71,7 +72,6 @@ void wifiCallbackAll(int count)
     }
     // beep on completing startup.
     tone(BEEPER_PIN, 2000, 500);
-    laser.off();
 }
 
 void statusCallback(HS_STATUS status)
@@ -186,6 +186,11 @@ void createVehicleAccessories()
     new SpanAccessory();
     new DEV_Info("Vehicle");
     vehicle = new DEV_Occupancy();
+
+    // Define Light accessory for parking assist laser
+    new SpanAccessory();
+    new DEV_Info("Laser");
+    assistLaser = new DEV_Light(Light_t::ASSIST_LASER);
 }
 
 void enable_service_homekit_vehicle()
@@ -311,7 +316,7 @@ DEV_Info::DEV_Info(const char *name) : Service::AccessoryInformation()
 boolean DEV_Info::update()
 {
     RINFO(TAG, "Request to identify accessory, flash LED, etc.");
-    // LED, Laser and Tone calls are all asyncronous.  We will iluminate LED and Laser
+    // LED, Laser and Tone calls are all asynchronous.  We will illuminate LED and Laser
     // for 2 seconds, during which we will play tone.  Function will return after 1.5 seconds.
     led.flash(2000);
     laser.flash(2000);
@@ -481,17 +486,47 @@ void notify_homekit_light()
     queueSendHelper(light->event_q, e, "light");
 }
 
-DEV_Light::DEV_Light() : Service::LightBulb()
+void notify_homekit_laser(bool on)
 {
-    RINFO(TAG, "Configuring HomeKit Light Service");
+    if (!isPaired || !assistLaser)
+        return;
+
+    GDOEvent e;
+    e.value.b = on;
+    queueSendHelper(assistLaser->event_q, e, "laser");
+}
+
+DEV_Light::DEV_Light(Light_t type) : Service::LightBulb()
+{
+    DEV_Light::type = type;
+    if (type == Light_t::GDO_LIGHT)
+        RINFO(TAG, "Configuring HomeKit Light Service for GDO Light");
+    else if (type == Light_t::ASSIST_LASER)
+        RINFO(TAG, "Configuring HomeKit Light Service for Laser");
     event_q = xQueueCreate(5, sizeof(GDOEvent));
-    on = new Characteristic::On(on->OFF);
+    DEV_Light::on = new Characteristic::On(DEV_Light::on->OFF);
 }
 
 boolean DEV_Light::update()
 {
-    RINFO(TAG, "Turn light %s", on->getNewVal<bool>() ? "on" : "off");
-    set_light(on->getNewVal<bool>());
+    if (this->type == Light_t::GDO_LIGHT)
+    {
+        RINFO(TAG, "Turn light %s", on->getNewVal<bool>() ? "on" : "off");
+        set_light(DEV_Light::on->getNewVal<bool>());
+    }
+    else if (this->type == Light_t::ASSIST_LASER)
+    {
+        if (on->getNewVal<bool>())
+        {
+            RINFO(TAG, "Turn parking assist laser on");
+            laser.on();
+        }
+        else
+        {
+            RINFO(TAG, "Turn parking assist laser off");
+            laser.off();
+        }
+    }
     return true;
 }
 
@@ -501,8 +536,11 @@ void DEV_Light::loop()
     {
         GDOEvent e;
         xQueueReceive(event_q, &e, 0);
-        RINFO(TAG, "Light has turned %s", e.value.b ? "on" : "off");
-        on->setVal(e.value.b);
+        if (this->type == Light_t::GDO_LIGHT)
+            RINFO(TAG, "Light has turned %s", e.value.b ? "on" : "off");
+        else if (this->type == Light_t::ASSIST_LASER)
+            RINFO(TAG, "Parking assist laster has turned %s", e.value.b ? "on" : "off");
+        DEV_Light::on->setVal(e.value.b);
     }
 }
 
@@ -555,7 +593,7 @@ DEV_Motion::DEV_Motion(const char *name) : Service::MotionSensor()
     RINFO(TAG, "Configuring HomeKit Motion Service for %s", name);
     event_q = xQueueCreate(5, sizeof(GDOEvent));
     strlcpy(this->name, name, sizeof(this->name));
-    motion = new Characteristic::MotionDetected(motion->NOT_DETECTED);
+    DEV_Motion::motion = new Characteristic::MotionDetected(motion->NOT_DETECTED);
 }
 
 void DEV_Motion::loop()
@@ -565,7 +603,7 @@ void DEV_Motion::loop()
         GDOEvent e;
         xQueueReceive(event_q, &e, 0);
         RINFO(TAG, "%s %s", name, e.value.b ? "detected" : "reset");
-        motion->setVal(e.value.b);
+        DEV_Motion::motion->setVal(e.value.b);
     }
 }
 
@@ -586,7 +624,7 @@ DEV_Occupancy::DEV_Occupancy() : Service::OccupancySensor()
 {
     RINFO(TAG, "Configuring HomeKit Occupancy Service");
     event_q = xQueueCreate(5, sizeof(GDOEvent));
-    occupied = new Characteristic::OccupancyDetected(occupied->NOT_DETECTED);
+    DEV_Occupancy::occupied = new Characteristic::OccupancyDetected(occupied->NOT_DETECTED);
 }
 
 void DEV_Occupancy::loop()
@@ -596,6 +634,6 @@ void DEV_Occupancy::loop()
         GDOEvent e;
         xQueueReceive(event_q, &e, 0);
         RINFO(TAG, "Vehicle occupancy %s", e.value.b ? "detected" : "reset");
-        occupied->setVal(e.value.b);
+        DEV_Occupancy::occupied->setVal(e.value.b);
     }
 }

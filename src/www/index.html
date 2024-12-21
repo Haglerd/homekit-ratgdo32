@@ -104,7 +104,7 @@
           </p>
         </div>
         <div class="fullwidth" style="padding: 0px;">
-          <div class="serverstatus" style="padding: 0px; padding-bottom: 5px;">
+          <div class="serverstatus" style="padding: 0px; padding-bottom: 5px; display: flex; justify-content: space-evenly;">
             <input type="button" value="Reboot RATGDO" onclick="rebootRATGDO(true)">
             <input type="button" value="Firmware Update" onclick="showUpdateDialog()">
           </div>
@@ -132,7 +132,7 @@
               <td>Motion:</td>
               <td id="garageMotion"></td>
             </tr>
-            <tr id="vehicleRow">
+            <tr id="vehicleRow" style="display:none;">
               <td>Vehicle:</td>
               <td id="vehicleStatus"></td>
               <td>Distance:</td>
@@ -141,13 +141,15 @@
           </table>
         </div>
         <div id="GDOcontrols" class="fullwidth"
-          style="padding-left: 0px; padding-right: 0px; display: flex; justify-content: space-between;">
-          <input type="button" value="Light On" onclick="setGDO('garageLightOn', '1')">
-          <input type="button" value="Light Off" onclick="setGDO('garageLightOn', '0')">
-          <input type="button" value="Door Open" onclick="setGDO('garageDoorState', '1')">
-          <input type="button" value="Door Close" onclick="setGDO('garageDoorState', '0')">
-          <input type="button" value="Door Lock" onclick="setGDO('garageLockState', '1')">
-          <input type="button" value="Door Unlock" onclick="setGDO('garageLockState', '0')">
+          style="padding-left: 20px; padding-right: 20px; display: flex; justify-content: space-evenly;">
+          <input type="button" id="lightButton" value="Light On"
+            onclick="setGDO('garageLightOn', (event.target.value === 'Light On') ? '1' : '0');">
+          <input type="button" id="doorButton" value="Open Door"
+            onclick="setGDO('garageDoorState', (event.target.value === 'Open Door') ? '1' : '0');">
+          <input type="button" id="lockButton" value="Lock Door"
+            onclick="setGDO('garageLockState', (event.target.value === 'Lock Door') ? '1' : '0');">
+          <input type="button" id="laserButton" value="Laser On" style="display:none;"
+            onclick="setGDO('assistLaser', (event.target.value === 'Laser On') ? '1' : '0');">
         </div>
       </div>
       <!-- Settings section of page ------------------------------------------------------------------>
@@ -261,19 +263,11 @@
                   <label for="motionMotion">Motion</label>
                   <input type="checkbox" id="motionObstruction" name="motionObstruction" value="no">
                   <label for="motionObstruction">Obstruction</label>
-                  <!--
-                  <input type="checkbox" id="motionLight" name="motionLight" value="no">
-                  <label for="motionLight">Light</label>
-                  <input type="checkbox" id="motionDoor" name="motionDoor" value="no">
-                  <label for="motionDoor">Door</label>
-                  <input type="checkbox" id="motionLock" name="motionLock" value="no">
-                  <label for="motionLock">Lock</label>
-                  -->
                   <input type="checkbox" id="motionWallPanel" name="motionWallPanel" value="no">
                   <label for="motionWallPanel">Wall Panel</label>
                 </td>
               </tr>
-              <tr id="vehicleSetting">
+              <tr id="vehicleSetting" style="display:none;">
                 <td class="label">Vehicle Distance:</td>
                 <td>&nbsp;
                   <input type="range" min="5" max="300" value="180" id="vehicleThreshold" name="vehicleThreshold"

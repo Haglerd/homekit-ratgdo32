@@ -29,6 +29,7 @@ private:
     uint8_t offState = 0; // opposite of on
     uint8_t activeState = 1;
     uint8_t idleState = 0; // opposite of active
+    uint8_t currentState = 0;
     Ticker LEDtimer;
 
 public:
@@ -36,6 +37,7 @@ public:
     void on();
     void off();
     void idle();
+    bool state() { return (currentState == onState); };
     void flash(unsigned long ms = FLASH_MS);
     void setIdleState(uint8_t state);
     uint8_t getIdleState() { return idleState; };

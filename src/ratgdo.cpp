@@ -85,7 +85,6 @@ void setup()
 
     // Beep on boot...
     tone(BEEPER_PIN, 1300, 500);
-    laser.on();
     led.on();
 
     load_all_config_settings();
