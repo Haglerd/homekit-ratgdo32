@@ -10,6 +10,7 @@
  * Contributions acknowledged from
  * Brandon Matthews... https://github.com/thenewwazoo
  * Jonathan Stroud...  https://github.com/jgstroud
+ * Haglerd...          https://github.com/Haglerd  (2025-26: forceClose + auto-close-timer settings storage)
  *
  */
 
