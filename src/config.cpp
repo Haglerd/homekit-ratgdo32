@@ -463,6 +463,13 @@ userSettings::userSettings()
         {cfg_useSWserial, {true, false, true, helperUseSWserial}}, // call fn to shut down GDO before switch
 #endif
         {cfg_builtInTTC, {false, false, 0, helperBuiltInTTC}},
+        // Auto-close defaults — disabled by default, 15 minutes minimum,
+        // 22:00–06:00 (10pm–6am) window. Sane for "if I left it open
+        // overnight, close it" without firing during normal daytime use.
+        {cfg_autoClose, {false, false, false, NULL}},
+        {cfg_autoCloseMinutes, {false, false, 15, NULL}},
+        {cfg_autoCloseStartHour, {false, false, 22, NULL}},
+        {cfg_autoCloseEndHour, {false, false, 6, NULL}},
 #ifndef ESP8266
         // These features not available on ESP8266
         {cfg_occupancyDuration, {false, false, 0, helperOccupancyDuration}}, // call fn to enable/disable HomeKit accessories

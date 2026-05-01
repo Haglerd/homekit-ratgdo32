@@ -162,6 +162,15 @@ static Ticker builtInTTCcountdown = Ticker();
 // stream returns to normal poll cadence.
 static Ticker forceCloseGapTimer = Ticker();
 
+// Auto-close (fork addition) — fires force-close when door has been Open
+// longer than autoCloseMinutes AND current local hour is in the user's
+// auto-close window. Recorded in wallclock seconds (time(NULL)) so it
+// survives the ~50-day rollover that affects _millis().
+static time_t doorOpenedAt = 0;
+static bool autoCloseFiredThisCycle = false;
+static Ticker autoCloseTicker = Ticker();
+static void checkAutoClose();  // forward — defined later in file
+
 void cancel_builtin_TTC_countdown()
 {
     if (builtInTTCcountdown.active())
@@ -777,6 +786,13 @@ void setup_comms()
     ESP_LOGI(TAG, "Door close history (%d): %lums, %lums, %lums, %lums, %lums, %lums; Median: %dsecs", closeHistory.count,
              closeHistory(1), closeHistory(2), closeHistory(3), closeHistory(4), closeHistory(5), closeHistory(6), garage_door.closeDuration);
 
+    // Start the auto-close periodic check. The check itself is a no-op
+    // when userConfig->autoClose is false, so attaching it unconditionally
+    // is fine — the user just toggles autoClose to enable it.
+    autoCloseTicker.detach();
+    autoCloseTicker.attach_ms(60 * 1000, checkAutoClose);
+    ESP_LOGI(TAG, "AUTO-CLOSE: periodic check started (60s interval; gated by userConfig->autoClose)");
+
     comms_setup_done = true;
 }
 
@@ -1092,6 +1108,23 @@ void update_door_state(GarageDoorCurrentState current_state)
         ESP_LOGI(TAG, "Door state changing from %s to %s (target %s)", DOOR_STATE(garage_door.current_state), DOOR_STATE(current_state), DOOR_STATE(target_state));
         notify_homekit_current_door_state_change(current_state);
         notify_homekit_target_door_state_change(target_state);
+
+        // Auto-close hook — record when door becomes Open, clear on any
+        // other state. autoCloseFiredThisCycle = false ensures the next
+        // Open cycle gets a fresh attempt even if the previous one fired.
+        if (current_state == GarageDoorCurrentState::CURR_OPEN &&
+            garage_door.current_state != GarageDoorCurrentState::CURR_OPEN)
+        {
+            time_t now = time(NULL);
+            if (now > 1000000000) doorOpenedAt = now;  // require SNTP sync
+            autoCloseFiredThisCycle = false;
+            ESP_LOGI(TAG, "AUTO-CLOSE: door opened at %lld — countdown starts", (long long)doorOpenedAt);
+        }
+        else if (current_state != GarageDoorCurrentState::CURR_OPEN && doorOpenedAt != 0)
+        {
+            doorOpenedAt = 0;
+            autoCloseFiredThisCycle = false;
+        }
     }
 
     // Update the global
@@ -2608,6 +2641,46 @@ void door_command_force_close(uint32_t hold_ms)
     ESP_LOGI(TAG, "FORCE CLOSE: starting 2-attempt sequence (hold=%lums, gap=%lums)", hold_ms, FORCE_CLOSE_GAP_MS);
     send_force_close_press();
 }
+
+// Auto-close check — runs every minute via autoCloseTicker. Fires
+// door_command_force_close if user has enabled autoClose and the door
+// has been Open longer than autoCloseMinutes AND the current local hour
+// is in [autoCloseStartHour, autoCloseEndHour). Window wraps midnight
+// when start > end. One-shot per Open cycle (autoCloseFiredThisCycle
+// resets when door state leaves Open).
+static void checkAutoClose()
+{
+    if (!userConfig->getAutoClose()) return;
+    if (garage_door.current_state != GarageDoorCurrentState::CURR_OPEN) return;
+    if (doorOpenedAt == 0 || autoCloseFiredThisCycle) return;
+
+    time_t now = time(NULL);
+    if (now < 1000000000) return;  // SNTP not yet synced
+
+    uint32_t openMinutes = (uint32_t)((now - doorOpenedAt) / 60);
+    uint32_t minMinutes = userConfig->getAutoCloseMinutes();
+    if (openMinutes < minMinutes) return;
+
+    struct tm localTime;
+    localtime_r(&now, &localTime);
+    uint32_t hour = (uint32_t)localTime.tm_hour;
+    uint32_t startHour = userConfig->getAutoCloseStartHour();
+    uint32_t endHour = userConfig->getAutoCloseEndHour();
+
+    bool inWindow;
+    if (startHour <= endHour)
+        inWindow = (hour >= startHour && hour < endHour);  // same-day window e.g. 9..17
+    else
+        inWindow = (hour >= startHour || hour < endHour);  // cross-midnight e.g. 22..6
+
+    if (!inWindow) return;
+
+    ESP_LOGW(TAG, "AUTO-CLOSE: door has been Open for %u min, current hour %u in window [%u..%u) — firing force-close",
+             openMinutes, hour, startHour, endHour);
+    autoCloseFiredThisCycle = true;
+    door_command_force_close(3500);
+}
+
 
 #endif // not USE_GDOLIB
 

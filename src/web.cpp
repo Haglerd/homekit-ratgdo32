@@ -793,6 +793,13 @@ void build_status_json(char *json)
     JSON_START(json);
     JSON_ADD_STR("gitUser", gitUser);
     JSON_ADD_STR("gitRepo", gitRepo);
+    // Auto-close (fork addition) — exposes the four config values so the
+    // plugin and web UI can show current state. autoClose toggles the
+    // feature; the rest define when/how it fires.
+    JSON_ADD_BOOL("autoClose", userConfig->getAutoClose());
+    JSON_ADD_INT("autoCloseMinutes", userConfig->getAutoCloseMinutes());
+    JSON_ADD_INT("autoCloseStartHour", userConfig->getAutoCloseStartHour());
+    JSON_ADD_INT("autoCloseEndHour", userConfig->getAutoCloseEndHour());
     JSON_ADD_INT("upTime", upTime);
     JSON_ADD_STR(cfg_deviceName, userConfig->getDeviceName());
     JSON_ADD_STR("userName", userConfig->getwwwUsername());
