@@ -799,8 +799,9 @@ void build_status_json(char *json)
     // feature; the rest define when/how it fires.
     JSON_ADD_BOOL("autoClose", userConfig->getAutoClose());
     JSON_ADD_INT("autoCloseMinutes", userConfig->getAutoCloseMinutes());
-    JSON_ADD_INT("autoCloseStartHour", userConfig->getAutoCloseStartHour());
-    JSON_ADD_INT("autoCloseEndHour", userConfig->getAutoCloseEndHour());
+    JSON_ADD_INT("autoCloseStartMinutes", userConfig->getAutoCloseStartMinutes());
+    JSON_ADD_INT("autoCloseEndMinutes", userConfig->getAutoCloseEndMinutes());
+    JSON_ADD_BOOL("autoCloseIgnoreWindow", userConfig->getAutoCloseIgnoreWindow());
     JSON_ADD_INT("upTime", upTime);
     JSON_ADD_STR(cfg_deviceName, userConfig->getDeviceName());
     JSON_ADD_STR("userName", userConfig->getwwwUsername());
