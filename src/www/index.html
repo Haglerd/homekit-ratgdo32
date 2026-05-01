@@ -185,6 +185,10 @@
               <td colspan="1"></td>
               <td id="doorCloseAt" colspan="2" style="font-size: 0.65em; text-align: left;"></td>
             </tr>
+            <tr id="autoCloseStatusRow">
+              <td colspan="2">Auto-Close:</td>
+              <td colspan="5" id="autoCloseStatus" style="font-size: 0.85em;">false</td>
+            </tr>
             <tr id="vehicleRow" style="display:none;">
               <td colspan="2">Vehicle:</td>
               <td id="vehicleStatus"></td>
@@ -373,40 +377,39 @@
                 <td colspan="2">&nbsp;</td>
               </tr>
               <!-- Auto-close (fork addition) — fires forceClose if door has been
-                   Open longer than autoCloseMinutes AND current local hour is in
-                   the configured window. Window wraps midnight when start > end. -->
-              <tr style="border-top: 1px dashed #888;">
-                <td class="label">Auto-Close (Fork):</td>
+                   Open longer than autoCloseMinutes AND in the configured time
+                   window (or always if Ignore Window is ticked). -->
+              <tr>
+                <td class="label">Auto-Close:</td>
                 <td>
                   <input type="checkbox" id="autoClose" name="autoClose">
                   <label for="autoClose">Enable firmware-side auto-close timer</label>
-                  <br>
-                  <span style="font-size: 0.75em; color: #888;">
-                    Safety timer that uses forceClose to close the door if it's been left Open
-                    too long during the configured time window. Persistent across reboots.
-                  </span>
                 </td>
               </tr>
-              <tr id="autoCloseConfigRow">
-                <td></td>
-                <td style="font-size: 0.85em;">
-                  <div style="margin-bottom: 6px;">
-                    Close after door has been Open for
-                    <input type="number" id="autoCloseMinutes" name="autoCloseMinutes" min="1" max="720"
-                           value="15" style="width: 60px;"> minutes.
-                  </div>
-                  <div style="margin-bottom: 6px;">
-                    Time window:
-                    <input type="time" id="autoCloseStart" name="autoCloseStart"
-                           value="22:00" style="width: 100px;"> to
-                    <input type="time" id="autoCloseEnd" name="autoCloseEnd"
-                           value="06:00" style="width: 100px;">
-                    <span style="color: #888;">(local time; window wraps midnight when start &gt; end)</span>
-                  </div>
-                  <div>
-                    <input type="checkbox" id="autoCloseIgnoreWindow" name="autoCloseIgnoreWindow">
-                    <label for="autoCloseIgnoreWindow">Ignore time window — auto-close at any time of day</label>
-                  </div>
+              <tr id="autoCloseMinutesRow">
+                <td class="label">Close After:</td>
+                <td>
+                  <input type="number" id="autoCloseMinutes" name="autoCloseMinutes" min="1" max="720"
+                         value="15" style="width: 70px;"> minutes door is Open
+                </td>
+              </tr>
+              <tr id="autoCloseWindowRow">
+                <td class="label">Time Window:</td>
+                <td>
+                  <input type="time" id="autoCloseStart" name="autoCloseStart"
+                         value="22:00" style="width: 110px;">
+                  <span style="margin: 0 6px;">to</span>
+                  <input type="time" id="autoCloseEnd" name="autoCloseEnd"
+                         value="06:00" style="width: 110px;">
+                  <br>
+                  <span style="font-size: 0.75em; color: #888;">Local time; wraps midnight when start &gt; end.</span>
+                </td>
+              </tr>
+              <tr id="autoCloseIgnoreRow">
+                <td class="label">Ignore Window:</td>
+                <td>
+                  <input type="checkbox" id="autoCloseIgnoreWindow" name="autoCloseIgnoreWindow">
+                  <label for="autoCloseIgnoreWindow">Auto-close any time of day (no time window check, no NTP needed)</label>
                 </td>
               </tr>
               <tr>
