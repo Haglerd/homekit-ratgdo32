@@ -390,15 +390,23 @@
               <tr id="autoCloseConfigRow">
                 <td></td>
                 <td style="font-size: 0.85em;">
-                  Close after door has been Open for
-                  <input type="number" id="autoCloseMinutes" name="autoCloseMinutes" min="1" max="720"
-                         value="15" style="width: 60px;"> minutes,
-                  but only between
-                  <input type="number" id="autoCloseStartHour" name="autoCloseStartHour" min="0" max="23"
-                         value="22" style="width: 50px;">:00 and
-                  <input type="number" id="autoCloseEndHour" name="autoCloseEndHour" min="0" max="23"
-                         value="6" style="width: 50px;">:00
-                  (24-hour, local time; window wraps midnight when start > end).
+                  <div style="margin-bottom: 6px;">
+                    Close after door has been Open for
+                    <input type="number" id="autoCloseMinutes" name="autoCloseMinutes" min="1" max="720"
+                           value="15" style="width: 60px;"> minutes.
+                  </div>
+                  <div style="margin-bottom: 6px;">
+                    Time window:
+                    <input type="time" id="autoCloseStart" name="autoCloseStart"
+                           value="22:00" style="width: 100px;"> to
+                    <input type="time" id="autoCloseEnd" name="autoCloseEnd"
+                           value="06:00" style="width: 100px;">
+                    <span style="color: #888;">(local time; window wraps midnight when start &gt; end)</span>
+                  </div>
+                  <div>
+                    <input type="checkbox" id="autoCloseIgnoreWindow" name="autoCloseIgnoreWindow">
+                    <label for="autoCloseIgnoreWindow">Ignore time window — auto-close at any time of day</label>
+                  </div>
                 </td>
               </tr>
               <tr>

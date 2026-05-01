@@ -82,13 +82,24 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           release-tag: ${{ steps.tag.outputs.latestTag }}
 
-      - name: Upload Release manifest.json
-        uses: wow-actions/download-upload@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.latestTag }}/manifest.json
-          dir: docs/
-          commit_message: "Upload Latest manifest.json for ${{ steps.tag.outputs.latestTag }}"
+      - name: Commit updated manifest.json to docs/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          git pull --rebase origin main
+          cp /home/runner/work/homekit-ratgdo32/homekit-ratgdo32/docs/manifest.json /tmp/manifest.json
+          # restore in case rebase changed it
+          mv /tmp/manifest.json docs/manifest.json
+          if ! git diff --quiet docs/manifest.json; then
+            git add docs/manifest.json
+            git commit -m "Update manifest.json for ${{ steps.tag.outputs.latestTag }}"
+            git push origin main
+          else
+            echo "manifest.json unchanged on main, skipping commit"
+          fi
+        shell: bash
 
       - uses: actions/cache@v3
         with:

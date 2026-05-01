@@ -529,9 +529,21 @@ function setElementsFromStatus(status) {
                 document.getElementById(key).checked = value;
                 break;
             case "autoCloseMinutes":
-            case "autoCloseStartHour":
-            case "autoCloseEndHour":
                 document.getElementById(key).value = value;
+                break;
+            case "autoCloseStartMinutes":
+            case "autoCloseEndMinutes": {
+                // Stored as minute-of-day (0..1439); render as HH:MM
+                const mod = parseInt(value) || 0;
+                const hh = String(Math.floor(mod / 60)).padStart(2, '0');
+                const mm = String(mod % 60).padStart(2, '0');
+                const fieldId = (key === "autoCloseStartMinutes") ? "autoCloseStart" : "autoCloseEnd";
+                const el = document.getElementById(fieldId);
+                if (el) el.value = `${hh}:${mm}`;
+                break;
+            }
+            case "autoCloseIgnoreWindow":
+                document.getElementById(key).checked = value;
                 break;
             case "dcOpenClose":
                 document.getElementById(key).checked = value;
@@ -1381,14 +1393,22 @@ async function saveSettings() {
     const useSWserial = (document.getElementById("useSWserial").checked) ? '1' : '0';
     const obstFromStatus = (document.getElementById("obstFromStatus").checked) ? '1' : '0';
 
-    // Auto-close (fork) — checkbox + 3 hour/minute inputs.
+    // Auto-close (fork) — enable checkbox, minutes-open threshold,
+    // HH:MM time window, and ignore-window override.
     const autoClose = (document.getElementById("autoClose").checked) ? '1' : '0';
     let autoCloseMinutes = Math.max(Math.min(parseInt(document.getElementById("autoCloseMinutes").value), 720), 1);
     if (isNaN(autoCloseMinutes)) autoCloseMinutes = 15;
-    let autoCloseStartHour = Math.max(Math.min(parseInt(document.getElementById("autoCloseStartHour").value), 23), 0);
-    if (isNaN(autoCloseStartHour)) autoCloseStartHour = 22;
-    let autoCloseEndHour = Math.max(Math.min(parseInt(document.getElementById("autoCloseEndHour").value), 23), 0);
-    if (isNaN(autoCloseEndHour)) autoCloseEndHour = 6;
+
+    // Convert HH:MM time pickers to minute-of-day (0..1439).
+    function hhmmToMOD(val, fallback) {
+        if (!val || typeof val !== 'string' || val.indexOf(':') < 0) return fallback;
+        const [h, m] = val.split(':').map(n => parseInt(n, 10));
+        if (isNaN(h) || isNaN(m)) return fallback;
+        return Math.max(0, Math.min(1439, h * 60 + m));
+    }
+    const autoCloseStartMinutes = hhmmToMOD(document.getElementById("autoCloseStart").value, 1320);  // 22:00
+    const autoCloseEndMinutes   = hhmmToMOD(document.getElementById("autoCloseEnd").value, 360);     // 06:00
+    const autoCloseIgnoreWindow = (document.getElementById("autoCloseIgnoreWindow").checked) ? '1' : '0';
 
     let assistDuration = Math.max(Math.min(parseInt(document.getElementById("assistDuration").value), 300), 0);
     if (isNaN(assistDuration)) assistDuration = 0;
@@ -1478,8 +1498,9 @@ async function saveSettings() {
         "obstFromStatus", obstFromStatus,
         "autoClose", autoClose,
         "autoCloseMinutes", autoCloseMinutes,
-        "autoCloseStartHour", autoCloseStartHour,
-        "autoCloseEndHour", autoCloseEndHour,
+        "autoCloseStartMinutes", autoCloseStartMinutes,
+        "autoCloseEndMinutes", autoCloseEndMinutes,
+        "autoCloseIgnoreWindow", autoCloseIgnoreWindow,
         "dcDebounceDuration", dcDebounceDuration,
         "homespanCLI", homespanCLI,
         "lightHomeKit", lightHomeKit,
