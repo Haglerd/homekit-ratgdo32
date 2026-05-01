@@ -83,15 +83,18 @@ jobs:
           release-tag: ${{ steps.tag.outputs.latestTag }}
 
       - name: Commit updated manifest.json to docs/
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Save the action-json edits before we move HEAD off the release tag
+          cp docs/manifest.json /tmp/manifest.json
           git fetch origin main
-          git checkout main
-          git pull --rebase origin main
-          cp /home/runner/work/homekit-ratgdo32/homekit-ratgdo32/docs/manifest.json /tmp/manifest.json
-          # restore in case rebase changed it
-          mv /tmp/manifest.json docs/manifest.json
+          # Force-reset working copy to origin/main, discarding the release-tag
+          # checkout. Any local mods to docs/manifest.json are intentionally lost
+          # (we'll restore the desired content from /tmp on the next line).
+          git checkout -B main origin/main
+          cp /tmp/manifest.json docs/manifest.json
           if ! git diff --quiet docs/manifest.json; then
             git add docs/manifest.json
             git commit -m "Update manifest.json for ${{ steps.tag.outputs.latestTag }}"
