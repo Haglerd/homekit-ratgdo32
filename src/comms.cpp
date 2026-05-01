@@ -2652,12 +2652,20 @@ void door_command_force_close(uint32_t hold_ms)
 // resets when door state leaves Open).
 static void checkAutoClose()
 {
-    if (!userConfig->getAutoClose()) return;
+    static uint32_t tickCount = 0;
+    tickCount++;
+    bool enabled = userConfig->getAutoClose();
+    int currentState = (int)garage_door.current_state;
+    time_t now = time(NULL);
+    bool sntpOk = (now >= 1000000000);
+    ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — enabled=%d, currentState=%d (CURR_OPEN=%d), fired=%d, sntpOk=%d, doorOpenedAt=%lld",
+             tickCount, (int)enabled, currentState, (int)GarageDoorCurrentState::CURR_OPEN,
+             (int)autoCloseFiredThisCycle, (int)sntpOk, (long long)doorOpenedAt);
+
+    if (!enabled) return;
     if (garage_door.current_state != GarageDoorCurrentState::CURR_OPEN) return;
     if (autoCloseFiredThisCycle) return;
-
-    time_t now = time(NULL);
-    if (now < 1000000000) return;  // SNTP not yet synced
+    if (!sntpOk) return;
 
     // Bootstrap: if the door was already Open when the feature was enabled
     // (or after a reboot), the state-change hook never fired and
