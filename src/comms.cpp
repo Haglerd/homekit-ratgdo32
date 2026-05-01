@@ -2679,11 +2679,14 @@ static void checkAutoClose()
     uint32_t endMOD = userConfig->getAutoCloseEndMinutes();
     bool ignoreWindow = userConfig->getAutoCloseIgnoreWindow();
 
+    // Window logic: ignoreWindow bypasses entirely; startMOD == endMOD
+    // is treated as an empty window (no auto-close unless ignoreWindow).
+    // Otherwise interpret as same-day [start..end) or cross-midnight wrap.
     bool inWindow;
     if (ignoreWindow)
         inWindow = true;
     else if (startMOD == endMOD)
-        inWindow = false;  // empty window — feature only fires if ignoreWindow is set
+        inWindow = false;
     else if (startMOD < endMOD)
         inWindow = (nowMOD >= startMOD && nowMOD < endMOD);  // e.g. 09:00..17:00
     else
