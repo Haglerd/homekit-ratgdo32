@@ -338,6 +338,30 @@ function showTTCwarning(TTCvalue, TTCremaining, TTChold) {
     }
 }
 
+// Render the home-page Auto-Close status row from current serverStatus.
+// Shows "false" when disabled, otherwise summarizes the active config.
+function updateAutoCloseStatusRow() {
+    const el = document.getElementById("autoCloseStatus");
+    if (!el) return;
+    if (!serverStatus.autoClose) {
+        el.innerText = "false";
+        return;
+    }
+    const mins = serverStatus.autoCloseMinutes;
+    const ignore = serverStatus.autoCloseIgnoreWindow;
+    if (ignore) {
+        el.innerHTML = `<strong>ON</strong> — close after ${mins} min open (any time of day)`;
+        return;
+    }
+    function modToHHMM(mod) {
+        const v = parseInt(mod) || 0;
+        return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
+    }
+    const start = modToHHMM(serverStatus.autoCloseStartMinutes);
+    const end = modToHHMM(serverStatus.autoCloseEndMinutes);
+    el.innerHTML = `<strong>ON</strong> — close after ${mins} min open, between ${start} and ${end}`;
+}
+
 // Update all elements on HTML page to reflect status
 function setElementsFromStatus(status) {
     // If this is called because we are loading the page then status will contain every serverStatus setting.
@@ -751,6 +775,15 @@ function setElementsFromStatus(status) {
             case "openHistory":
             case "closeHistory":
                 // No-op: Not displayed in UI
+                break;
+            case "autoClose":
+            case "autoCloseMinutes":
+            case "autoCloseStartMinutes":
+            case "autoCloseEndMinutes":
+            case "autoCloseIgnoreWindow":
+                // Auto-close keys flow through here as part of /status.json.
+                // Re-render the home-page status row whenever any of them change.
+                updateAutoCloseStatusRow();
                 break;
             default:
                 try {

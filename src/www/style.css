@@ -13,9 +13,10 @@ html,
 body {
     background-color: darkgray;
     overflow-x: hidden;
+    overflow-y: auto;
     font-family: Verdana, Geneva, Tahoma, sans-serif;
     font-size: 3vw;
-    scrollbar-width: none;
+    scrollbar-width: thin;
 }
 
 input,
