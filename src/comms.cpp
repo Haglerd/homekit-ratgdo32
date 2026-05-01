@@ -155,6 +155,14 @@ static Ticker checkDoorMoving = Ticker();
 static Ticker checkDoorCompleted = Ticker();
 bool TTCwasLightOn = false;
 static Ticker builtInTTCcountdown = Ticker();
+// Schedules the deferred Release packet for force-close hold. Separate from
+// TTCtimer because TTC's delayFnCall mechanism flashes the warning light
+// (sends 0x32 light-press every 250ms during the delay), which a real wall-
+// button hold would never do — and the Sec+1.0 GDO motor interprets those
+// interspersed light commands as "user is interacting with light, not door"
+// and aborts the close. Ticker.once_ms fires a single callback with no side
+// effects on the comms stream — much closer to a real button hold.
+static Ticker forceCloseReleaseTimer = Ticker();
 
 void cancel_builtin_TTC_countdown()
 {
@@ -2552,9 +2560,14 @@ void door_command_force_close(uint32_t hold_ms)
         return;
     }
 
-    // Schedule the deferred release after hold_ms.
-    // Reuses the same TTC delay timer machinery the firmware already has.
-    delayFnCall(hold_ms, send_force_close_release);
+    // Schedule the deferred release after hold_ms via a one-shot Ticker.
+    // Crucially NOT delayFnCall(), which would also spam 0x32 light-press
+    // every 250ms (its TTC light-flash side effect). Wall-button hold has
+    // NO interspersed packets — Press, silence, Release. v3.4.4-forceclose.1
+    // used delayFnCall and the resulting 0x32 spam confused Sec+1.0 motors
+    // into aborting the close on first attempt (verified in user serial logs).
+    forceCloseReleaseTimer.detach();
+    forceCloseReleaseTimer.once_ms(hold_ms, send_force_close_release);
 }
 
 #endif // not USE_GDOLIB
