@@ -359,6 +359,20 @@ function setElementsFromStatus(status) {
     }
     for (const [key, value] of Object.entries(status)) {
         switch (key) {
+            case "gitUser":
+                // Without this, gitUser stays at the "ratgdo" default and the
+                // OTA "Check for update" hits upstream's releases instead of
+                // the fork that built this firmware. The firmware reports
+                // gitUser via /status.json (web.cpp JSON_ADD_STR("gitUser")),
+                // but the original switch had no setter for it. Forks that
+                // set -D GITUSER=<name> at build time silently fell through
+                // to upstream's release feed.
+                gitUser = value;
+                if (gitRepo) {
+                    document.getElementById("docsLink").href = "https://github.com/" + gitUser + "/" + gitRepo;
+                    document.getElementById("contribLink").href = "https://github.com/" + gitUser + "/" + gitRepo + "/graphs/contributors";
+                }
+                break;
             case "gitRepo":
                 gitRepo = value;
                 document.getElementById("docsLink").href = "https://github.com/" + gitUser + "/" + gitRepo;
