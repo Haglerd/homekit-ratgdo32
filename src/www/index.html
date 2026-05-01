@@ -372,6 +372,38 @@
               <tr>
                 <td colspan="2">&nbsp;</td>
               </tr>
+              <!-- Auto-close (fork addition) — fires forceClose if door has been
+                   Open longer than autoCloseMinutes AND current local hour is in
+                   the configured window. Window wraps midnight when start > end. -->
+              <tr style="border-top: 1px dashed #888;">
+                <td class="label">Auto-Close (Fork):</td>
+                <td>
+                  <input type="checkbox" id="autoClose" name="autoClose">
+                  <label for="autoClose">Enable firmware-side auto-close timer</label>
+                  <br>
+                  <span style="font-size: 0.75em; color: #888;">
+                    Safety timer that uses forceClose to close the door if it's been left Open
+                    too long during the configured time window. Persistent across reboots.
+                  </span>
+                </td>
+              </tr>
+              <tr id="autoCloseConfigRow">
+                <td></td>
+                <td style="font-size: 0.85em;">
+                  Close after door has been Open for
+                  <input type="number" id="autoCloseMinutes" name="autoCloseMinutes" min="1" max="720"
+                         value="15" style="width: 60px;"> minutes,
+                  but only between
+                  <input type="number" id="autoCloseStartHour" name="autoCloseStartHour" min="0" max="23"
+                         value="22" style="width: 50px;">:00 and
+                  <input type="number" id="autoCloseEndHour" name="autoCloseEndHour" min="0" max="23"
+                         value="6" style="width: 50px;">:00
+                  (24-hour, local time; window wraps midnight when start > end).
+                </td>
+              </tr>
+              <tr>
+                <td colspan="2">&nbsp;</td>
+              </tr>
               <tr id="homekitLightRow" style="display: none;">
                 <td class="label">Light:</td>
                 <td>
