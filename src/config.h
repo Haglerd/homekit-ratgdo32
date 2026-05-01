@@ -89,6 +89,15 @@ constexpr char cfg_dcDebounceDuration[] PROGMEM = "dcDebounceDuration";
 constexpr char cfg_useSWserial[] PROGMEM = "useSWserial";
 constexpr char cfg_obstFromStatus[] PROGMEM = "obstFromStatus";
 constexpr char cfg_builtInTTC[] PROGMEM = "builtInTTC";
+// Auto-close (fork addition): firmware-side safety timer that fires
+// force-close if the door has been Open longer than autoCloseMinutes
+// AND the current local hour is within [autoCloseStartHour,
+// autoCloseEndHour). Window wraps across midnight when start > end
+// (e.g. 22..6 = 10pm-6am). One-shot per Open cycle.
+constexpr char cfg_autoClose[] PROGMEM = "autoClose";
+constexpr char cfg_autoCloseMinutes[] PROGMEM = "autoCloseMinutes";
+constexpr char cfg_autoCloseStartHour[] PROGMEM = "autoCloseStartHour";
+constexpr char cfg_autoCloseEndHour[] PROGMEM = "autoCloseEndHour";
 #ifdef ESP8266
 // On ESP8266 we save user config to a file in LittleFS
 constexpr char cfg_configFile[] PROGMEM = "user_config";
@@ -204,6 +213,10 @@ public:
     uint32_t getDCDebounceDuration() { return std::get<int>(get(cfg_dcDebounceDuration)); };
     bool getObstFromStatus() { return std::get<bool>(get(cfg_obstFromStatus)); };
     uint32_t getBuiltInTTC() { return std::get<int>(get(cfg_builtInTTC)); };
+    bool getAutoClose() { return std::get<bool>(get(cfg_autoClose)); };
+    uint32_t getAutoCloseMinutes() { return std::get<int>(get(cfg_autoCloseMinutes)); };
+    uint32_t getAutoCloseStartHour() { return std::get<int>(get(cfg_autoCloseStartHour)); };
+    uint32_t getAutoCloseEndHour() { return std::get<int>(get(cfg_autoCloseEndHour)); };
 #ifdef RATGDO32_DISCO
     uint32_t getVehicleThreshold() { return std::get<int>(get(cfg_vehicleThreshold)); };
     bool getLaserEnabled() { return std::get<bool>(get(cfg_laserEnabled)); };
