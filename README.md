@@ -1,3 +1,16 @@
+> [!NOTE]
+> **This is a fork of [ratgdo/homekit-ratgdo32](https://github.com/ratgdo/homekit-ratgdo32) maintained by [@Haglerd](https://github.com/Haglerd).**
+> It tracks upstream and adds two features for users whose Security+ 1.0 garage doors refuse to close because of a flaky photo-eye:
+>
+> - **`forceClose` HTTP primitive on `/setgdo`** — emulates the wall-button hold-to-close override. Sends a 3.5-second press, 1.5-second gap, then a second press. Most openers respond on the first press; the second is a backstop. Only meaningful on Sec+1.0; Sec+2.0 falls through to the normal close path.
+> - **Firmware-side auto-close timer** — optional safety timer that fires `forceClose` if the door has been Open longer than `autoCloseMinutes`. You can scope it to a time-of-day window (e.g. 22:00–06:00) or check "Ignore time window" to fire any time, no NTP required.
+>
+> Companion homebridge plugin: [homebridge-ratgdo-forceclose](https://www.npmjs.com/package/homebridge-ratgdo-forceclose) — exposes the same primitive as a HomeKit GarageDoorOpener accessory.
+>
+> **OTA flash**: ratgdo dashboard → Settings → set OTA repo to `Haglerd/homekit-ratgdo32` → Update tab. Or from a fresh device, use the [ESP Web Tools flasher](https://haglerd.github.io/homekit-ratgdo32/).
+>
+> **Safety**: the wall-button override bypasses the photo-eye. Don't run auto-close in time windows where pets/kids might be in the door's path. Use the time window or `Ignore` only when you've accepted that risk.
+
 > [!IMPORTANT]
 > This firmware is for the ESP32-based ratgdo32 and ratgdo32-disco series boards. It will not work with the ESP8266-based ratgdo v2.5xi boards. HomeKit support for for the original v2.5xi devices can be found [here](https://github.com/ratgdo/homekit-ratgdo)
 
