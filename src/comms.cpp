@@ -167,7 +167,7 @@ static Ticker forceCloseGapTimer = Ticker();
 // longer than autoCloseMinutes AND current local hour is in the user's
 // auto-close window. Recorded in wallclock seconds (time(NULL)) so it
 // survives the ~50-day rollover that affects _millis().
-static time_t doorOpenedAt = 0;
+static uint32_t doorOpenedAtMillis = 0;  // monotonic uptime (millis()) — works without NTP
 static bool autoCloseFiredThisCycle = false;
 static Ticker autoCloseTicker = Ticker();
 static void checkAutoClose();  // forward — defined later in file
@@ -1110,20 +1110,18 @@ void update_door_state(GarageDoorCurrentState current_state)
         notify_homekit_current_door_state_change(current_state);
         notify_homekit_target_door_state_change(target_state);
 
-        // Auto-close hook — record when door becomes Open, clear on any
-        // other state. autoCloseFiredThisCycle = false ensures the next
-        // Open cycle gets a fresh attempt even if the previous one fired.
+        // Auto-close hook — record when door becomes Open (uptime millis,
+        // works without NTP), clear on any other state.
         if (current_state == GarageDoorCurrentState::CURR_OPEN &&
             garage_door.current_state != GarageDoorCurrentState::CURR_OPEN)
         {
-            time_t now = time(NULL);
-            if (now > 1000000000) doorOpenedAt = now;  // require SNTP sync
+            doorOpenedAtMillis = millis();
             autoCloseFiredThisCycle = false;
-            ESP_LOGI(TAG, "AUTO-CLOSE: door opened at %lld — countdown starts", (long long)doorOpenedAt);
+            ESP_LOGI(TAG, "AUTO-CLOSE: door opened at uptime %u ms — countdown starts", doorOpenedAtMillis);
         }
-        else if (current_state != GarageDoorCurrentState::CURR_OPEN && doorOpenedAt != 0)
+        else if (current_state != GarageDoorCurrentState::CURR_OPEN && doorOpenedAtMillis != 0)
         {
-            doorOpenedAt = 0;
+            doorOpenedAtMillis = 0;
             autoCloseFiredThisCycle = false;
         }
     }
@@ -2654,64 +2652,81 @@ static void checkAutoClose()
 {
     static uint32_t tickCount = 0;
     tickCount++;
+
     bool enabled = userConfig->getAutoClose();
-    int currentState = (int)garage_door.current_state;
-    time_t now = time(NULL);
-    bool sntpOk = (now >= 1000000000);
-    ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — enabled=%d, currentState=%d (CURR_OPEN=%d), fired=%d, sntpOk=%d, doorOpenedAt=%lld",
-             tickCount, (int)enabled, currentState, (int)GarageDoorCurrentState::CURR_OPEN,
-             (int)autoCloseFiredThisCycle, (int)sntpOk, (long long)doorOpenedAt);
-
-    if (!enabled) return;
-    if (garage_door.current_state != GarageDoorCurrentState::CURR_OPEN) return;
-    if (autoCloseFiredThisCycle) return;
-    if (!sntpOk) return;
-
-    // Bootstrap: if the door was already Open when the feature was enabled
-    // (or after a reboot), the state-change hook never fired and
-    // doorOpenedAt is 0. Initialize it to "now" the first time we observe
-    // a stable Open state — countdown starts from this tick. Worst-case
-    // lag is one ticker interval (60s).
-    if (doorOpenedAt == 0) {
-        doorOpenedAt = now;
-        ESP_LOGI(TAG, "AUTO-CLOSE: door already Open at first check — bootstrapping countdown from now");
-    }
-
-    uint32_t openMinutes = (uint32_t)((now - doorOpenedAt) / 60);
-    uint32_t minMinutes = userConfig->getAutoCloseMinutes();
-
-    struct tm localTime;
-    localtime_r(&now, &localTime);
-    uint32_t nowMOD = (uint32_t)localTime.tm_hour * 60 + (uint32_t)localTime.tm_min;
-    uint32_t startMOD = userConfig->getAutoCloseStartMinutes();
-    uint32_t endMOD = userConfig->getAutoCloseEndMinutes();
+    bool isOpen = (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN);
     bool ignoreWindow = userConfig->getAutoCloseIgnoreWindow();
+    uint32_t nowMillis = millis();
 
-    // Window logic: ignoreWindow bypasses entirely; startMOD == endMOD
-    // is treated as an empty window (no auto-close unless ignoreWindow).
-    // Otherwise interpret as same-day [start..end) or cross-midnight wrap.
-    bool inWindow;
-    if (ignoreWindow)
-        inWindow = true;
-    else if (startMOD == endMOD)
-        inWindow = false;
-    else if (startMOD < endMOD)
-        inWindow = (nowMOD >= startMOD && nowMOD < endMOD);  // e.g. 09:00..17:00
-    else
-        inWindow = (nowMOD >= startMOD || nowMOD < endMOD);  // e.g. 22:00..06:00
-
-    if (openMinutes < minMinutes || !inWindow) {
-        ESP_LOGI(TAG, "AUTO-CLOSE: waiting — openMinutes=%u/%u, now=%02u:%02u, window=[%02u:%02u..%02u:%02u) ignore=%d inWindow=%d",
-                 openMinutes, minMinutes,
-                 nowMOD / 60, nowMOD % 60,
-                 startMOD / 60, startMOD % 60,
-                 endMOD / 60, endMOD % 60,
-                 (int)ignoreWindow, (int)inWindow);
+    if (!enabled) {
+        ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — disabled, skipping", tickCount);
+        return;
+    }
+    if (!isOpen) {
+        ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — door not Open (state=%d), skipping",
+                 tickCount, (int)garage_door.current_state);
+        return;
+    }
+    if (autoCloseFiredThisCycle) {
+        ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — already fired this cycle, waiting for door to leave Open", tickCount);
         return;
     }
 
-    ESP_LOGW(TAG, "AUTO-CLOSE: door has been Open for %u min, now=%02u:%02u in window — firing force-close",
-             openMinutes, nowMOD / 60, nowMOD % 60);
+    // Bootstrap: if the door was already Open at boot/enable, the state-change
+    // hook never set doorOpenedAtMillis. Anchor it now so the countdown starts.
+    if (doorOpenedAtMillis == 0) {
+        doorOpenedAtMillis = nowMillis;
+        ESP_LOGI(TAG, "AUTO-CLOSE: bootstrapping doorOpenedAtMillis=%u (door already Open at first check)", nowMillis);
+    }
+
+    uint32_t openMinutes = (nowMillis - doorOpenedAtMillis) / 60000U;
+    uint32_t minMinutes = userConfig->getAutoCloseMinutes();
+
+    // Window check requires wallclock (NTP). If user set ignoreWindow we
+    // skip this entirely and rely solely on uptime-based elapsed time —
+    // works without NTP.
+    bool inWindow;
+    uint32_t nowMOD = 0, startMOD = 0, endMOD = 0;
+    bool sntpOk = false;
+    if (ignoreWindow) {
+        inWindow = true;
+    } else {
+        time_t now = time(NULL);
+        sntpOk = (now >= 1000000000);
+        if (!sntpOk) {
+            ESP_LOGW(TAG, "AUTO-CLOSE: tick #%u — time window enabled but NTP not synced; firmware can't tell what time it is. "
+                          "Either enable NTP in settings, or tick 'Ignore time window' to fire after %u minutes regardless of clock.",
+                     tickCount, minMinutes);
+            return;
+        }
+        struct tm localTime;
+        localtime_r(&now, &localTime);
+        nowMOD = (uint32_t)localTime.tm_hour * 60 + (uint32_t)localTime.tm_min;
+        startMOD = userConfig->getAutoCloseStartMinutes();
+        endMOD = userConfig->getAutoCloseEndMinutes();
+        if (startMOD == endMOD) inWindow = false;
+        else if (startMOD < endMOD) inWindow = (nowMOD >= startMOD && nowMOD < endMOD);
+        else inWindow = (nowMOD >= startMOD || nowMOD < endMOD);
+    }
+
+    if (openMinutes < minMinutes || !inWindow) {
+        if (ignoreWindow) {
+            ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — waiting (ignoreWindow=on, openMinutes=%u/%u)",
+                     tickCount, openMinutes, minMinutes);
+        } else {
+            ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — waiting: openMinutes=%u/%u, now=%02u:%02u, window=[%02u:%02u..%02u:%02u), inWindow=%d",
+                     tickCount, openMinutes, minMinutes,
+                     nowMOD / 60, nowMOD % 60,
+                     startMOD / 60, startMOD % 60,
+                     endMOD / 60, endMOD % 60,
+                     (int)inWindow);
+        }
+        return;
+    }
+
+    ESP_LOGW(TAG, "AUTO-CLOSE: tick #%u — door open %u min (>= %u) %s — firing force-close",
+             tickCount, openMinutes, minMinutes,
+             ignoreWindow ? "(ignoreWindow=on)" : "and in time window");
     autoCloseFiredThisCycle = true;
     door_command_force_close(3500);
 }
