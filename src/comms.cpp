@@ -2644,9 +2644,10 @@ void door_command_force_close(uint32_t hold_ms)
 }
 
 // Auto-close check — runs every minute via autoCloseTicker. Fires
-// door_command_force_close if user has enabled autoClose and the door
-// has been Open longer than autoCloseMinutes AND the current local hour
-// is in [autoCloseStartHour, autoCloseEndHour). Window wraps midnight
+// door_command_force_close if user has enabled autoClose, the door has
+// been Open longer than autoCloseMinutes, AND either ignoreWindow is
+// set OR the current local minute-of-day is in
+// [autoCloseStartMinutes, autoCloseEndMinutes). Window wraps midnight
 // when start > end. One-shot per Open cycle (autoCloseFiredThisCycle
 // resets when door state leaves Open).
 static void checkAutoClose()
@@ -2673,28 +2674,36 @@ static void checkAutoClose()
 
     struct tm localTime;
     localtime_r(&now, &localTime);
-    uint32_t hour = (uint32_t)localTime.tm_hour;
-    uint32_t startHour = userConfig->getAutoCloseStartHour();
-    uint32_t endHour = userConfig->getAutoCloseEndHour();
+    uint32_t nowMOD = (uint32_t)localTime.tm_hour * 60 + (uint32_t)localTime.tm_min;
+    uint32_t startMOD = userConfig->getAutoCloseStartMinutes();
+    uint32_t endMOD = userConfig->getAutoCloseEndMinutes();
+    bool ignoreWindow = userConfig->getAutoCloseIgnoreWindow();
 
-    // Escape hatch: start == end means "always allow" (24-hour window).
+    // Window logic: ignoreWindow bypasses entirely; startMOD == endMOD
+    // is treated as an empty window (no auto-close unless ignoreWindow).
     // Otherwise interpret as same-day [start..end) or cross-midnight wrap.
     bool inWindow;
-    if (startHour == endHour)
+    if (ignoreWindow)
         inWindow = true;
-    else if (startHour < endHour)
-        inWindow = (hour >= startHour && hour < endHour);  // e.g. 9..17
+    else if (startMOD == endMOD)
+        inWindow = false;
+    else if (startMOD < endMOD)
+        inWindow = (nowMOD >= startMOD && nowMOD < endMOD);  // e.g. 09:00..17:00
     else
-        inWindow = (hour >= startHour || hour < endHour);  // e.g. 22..6
+        inWindow = (nowMOD >= startMOD || nowMOD < endMOD);  // e.g. 22:00..06:00
 
     if (openMinutes < minMinutes || !inWindow) {
-        ESP_LOGI(TAG, "AUTO-CLOSE: waiting — openMinutes=%u/%u, hour=%u, window=[%u..%u), inWindow=%d",
-                 openMinutes, minMinutes, hour, startHour, endHour, (int)inWindow);
+        ESP_LOGI(TAG, "AUTO-CLOSE: waiting — openMinutes=%u/%u, now=%02u:%02u, window=[%02u:%02u..%02u:%02u) ignore=%d inWindow=%d",
+                 openMinutes, minMinutes,
+                 nowMOD / 60, nowMOD % 60,
+                 startMOD / 60, startMOD % 60,
+                 endMOD / 60, endMOD % 60,
+                 (int)ignoreWindow, (int)inWindow);
         return;
     }
 
-    ESP_LOGW(TAG, "AUTO-CLOSE: door has been Open for %u min, current hour %u in window [%u..%u) — firing force-close",
-             openMinutes, hour, startHour, endHour);
+    ESP_LOGW(TAG, "AUTO-CLOSE: door has been Open for %u min, now=%02u:%02u in window — firing force-close",
+             openMinutes, nowMOD / 60, nowMOD % 60);
     autoCloseFiredThisCycle = true;
     door_command_force_close(3500);
 }
