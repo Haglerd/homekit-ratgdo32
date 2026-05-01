@@ -167,8 +167,11 @@ static Ticker forceCloseGapTimer = Ticker();
 // longer than autoCloseMinutes AND current local hour is in the user's
 // auto-close window. Recorded in wallclock seconds (time(NULL)) so it
 // survives the ~50-day rollover that affects _millis().
-static uint32_t doorOpenedAtMillis = 0;  // monotonic uptime (millis()) — works without NTP
-static bool autoCloseFiredThisCycle = false;
+// volatile: written from door state-change callback, read from auto-close
+// ticker (different FreeRTOS tasks). 32-bit reads/writes are atomic on
+// ESP32 so no mutex needed, but the compiler must not cache.
+static volatile uint32_t doorOpenedAtMillis = 0;
+static volatile bool autoCloseFiredThisCycle = false;
 static Ticker autoCloseTicker = Ticker();
 static void checkAutoClose();  // forward — defined later in file
 
@@ -2542,6 +2545,7 @@ void door_command(DoorAction action)
 // so it falls back to the normal close path.
 static int forceCloseAttempt = 0;
 static uint32_t forceCloseHoldMsCached = 3500;
+static volatile bool forceCloseInProgress = false;
 constexpr uint32_t FORCE_CLOSE_GAP_MS = 1500;
 static void send_force_close_press();
 
@@ -2560,6 +2564,7 @@ static void send_force_close_release_then_maybe_retry()
     {
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release");
         forceCloseAttempt = 0;
+        forceCloseInProgress = false;
         return;
     }
     // Sec+1.0 normally sends release twice for reliability — preserve that here too.
@@ -2579,6 +2584,7 @@ static void send_force_close_release_then_maybe_retry()
     {
         ESP_LOGI(TAG, "FORCE CLOSE: door already closing/closed — skipping second press");
         forceCloseAttempt = 0;
+        forceCloseInProgress = false;
         return;
     }
 
@@ -2592,6 +2598,7 @@ static void send_force_close_release_then_maybe_retry()
     {
         ESP_LOGI(TAG, "FORCE CLOSE: 2-attempt sequence complete");
         forceCloseAttempt = 0;
+        forceCloseInProgress = false;
     }
 }
 
@@ -2631,10 +2638,20 @@ void door_command_force_close(uint32_t hold_ms)
         return;
     }
 
+    // Reject overlapping calls — if a sequence is already in flight, a second
+    // POST during the press/release/gap windows could stomp the timer state
+    // and emit duplicate or partial presses.
+    if (forceCloseInProgress)
+    {
+        ESP_LOGW(TAG, "FORCE CLOSE: ignoring request — a sequence is already in progress");
+        return;
+    }
+
     if (hold_ms < 1000) hold_ms = 3500;
     if (hold_ms > 10000) hold_ms = 10000;
     forceCloseHoldMsCached = hold_ms;
     forceCloseAttempt = 0;
+    forceCloseInProgress = true;
     forceCloseGapTimer.detach();
 
     ESP_LOGI(TAG, "FORCE CLOSE: starting 2-attempt sequence (hold=%lums, gap=%lums)", hold_ms, FORCE_CLOSE_GAP_MS);
