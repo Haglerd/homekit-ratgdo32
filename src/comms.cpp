@@ -2481,6 +2481,82 @@ void door_command(DoorAction action)
     }
 }
 
+// ---- Force-close (wall-button hold-to-close emulation) ----
+// Mimics the timing pattern the GDO motor recognizes as a manual override:
+// DoorButtonPress, hold for hold_ms, DoorButtonRelease. Real wall panels
+// emit Press once and don't emit Release until the user lets go; the GDO
+// motor's logic is "if Press → Release gap >~3s while obstruction is
+// reported, ignore the safety beam and close." door_command() can't do
+// this because it queues Release back-to-back with Press.
+//
+// Implementation: queue Press immediately, then schedule a callback via
+// delayFnCall() to queue Release after hold_ms. Wall-panel emulation polls
+// continue during the hold, which appears to be tolerated by Sec+1.0 GDOs.
+//
+// Only meaningful on Sec+1.0. Sec+2.0 has no equivalent protocol message,
+// so it falls back to the normal close path.
+static void send_force_close_release()
+{
+    PacketData data;
+    data.type = PacketDataType::DoorAction;
+    data.value.door_action.action = DoorAction::Close;
+    data.value.door_action.pressed = false;
+    data.value.cmd = secplus1Codes::DoorButtonRelease;
+    data.value.door_action.id = 1;
+
+    Packet pkt = Packet(PacketCommand::DoorAction, data, id_code);
+    PacketAction pkt_ac = {pkt, true, 0};
+    if (!txQueuePush(&pkt_ac))
+    {
+        ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release");
+        return;
+    }
+    // Sec+1.0 normally sends release twice for reliability — preserve that here too.
+    if (!txQueuePush(&pkt_ac))
+    {
+        ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release retry");
+    }
+    send_get_status();
+    ESP_LOGI(TAG, "FORCE CLOSE: deferred release sent — sequence complete");
+}
+
+void door_command_force_close(uint32_t hold_ms)
+{
+    if (doorControlType != 1)
+    {
+        ESP_LOGW(TAG, "FORCE CLOSE: hold-to-close override only meaningful on Sec+1.0; falling back to normal close (doorControlType=%lu)", doorControlType);
+        door_command(DoorAction::Close);
+        return;
+    }
+
+    // Bound the hold so accidental tiny/huge values don't break things.
+    // Liftmaster Sec+1.0 manual override engages around ~3s; we default
+    // to 3500ms for a safety margin, cap at 10s.
+    if (hold_ms < 1000) hold_ms = 3500;
+    if (hold_ms > 10000) hold_ms = 10000;
+
+    ESP_LOGI(TAG, "FORCE CLOSE: pressing button for %lums (mimics wall-button hold-to-close override)", hold_ms);
+
+    PacketData data;
+    data.type = PacketDataType::DoorAction;
+    data.value.door_action.action = DoorAction::Close;
+    data.value.door_action.pressed = true;
+    data.value.cmd = secplus1Codes::DoorButtonPress;
+    data.value.door_action.id = 1;
+
+    Packet pkt = Packet(PacketCommand::DoorAction, data, id_code);
+    PacketAction pkt_ac = {pkt, false, 0};
+    if (!txQueuePush(&pkt_ac))
+    {
+        ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on press");
+        return;
+    }
+
+    // Schedule the deferred release after hold_ms.
+    // Reuses the same TTC delay timer machinery the firmware already has.
+    delayFnCall(hold_ms, send_force_close_release);
+}
+
 #endif // not USE_GDOLIB
 
 void door_command_close()
