@@ -1,0 +1,160 @@
+name: Auto-sync upstream
+
+# Daily check of ratgdo/homekit-ratgdo32 for new releases. When upstream
+# tags a new version, this workflow rebases our feature branch on top of
+# upstream/main and (if the rebase is clean) tags a new -forceclose.N
+# release of the fork — which kicks off the existing release.yml build.
+#
+# If the rebase has conflicts (rare; only when upstream restructures the
+# files our patch touches), the workflow opens a "needs-rebase" issue on
+# the fork so we know to manually resolve.
+
+on:
+  schedule:
+    # 06:00 UTC daily — early enough to catch any overnight upstream releases
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_resync:
+        description: 'Resync even if a -forceclose release already exists for the latest upstream tag'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # push rebased main + tag releases
+  issues: write     # open needs-rebase issues
+  actions: write    # dispatch the build workflow
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/ratgdo/homekit-ratgdo32.git
+          git fetch upstream main --tags
+
+      - name: Determine latest upstream release tag
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_TAG=$(gh release view --repo ratgdo/homekit-ratgdo32 --json tagName -q .tagName)
+          echo "Latest upstream tag: $UPSTREAM_TAG"
+          echo "tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check if we already have a -forceclose release for this upstream tag
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM=${{ steps.upstream.outputs.tag }}
+          # Find any release whose tag starts with "<upstream>-forceclose"
+          EXISTING=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName -q ".[] | select(.tagName | startswith(\"${UPSTREAM}-forceclose\")) | .tagName" | head -1)
+          if [ -n "$EXISTING" ] && [ "${{ inputs.force_resync }}" != "true" ]; then
+            echo "Already synced upstream $UPSTREAM as $EXISTING — skipping."
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Need to sync upstream $UPSTREAM."
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+            # Compute next -forceclose suffix (start at .1, increment if force-resync)
+            if [ -n "$EXISTING" ]; then
+              SUFFIX=$(echo "$EXISTING" | sed -E "s/.*-forceclose\.([0-9]+)/\1/")
+              NEXT=$((SUFFIX + 1))
+            else
+              NEXT=1
+            fi
+            NEW_TAG="${UPSTREAM}-forceclose.${NEXT}"
+            echo "Will create tag: $NEW_TAG"
+            echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase our patches onto upstream/main
+        if: steps.check.outputs.needs_sync == 'true'
+        id: rebase
+        run: |
+          # Try a clean rebase. If it fails, abort and signal conflict.
+          if git rebase upstream/main; then
+            echo "rebase_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Rebase had conflicts — aborting."
+            git rebase --abort || true
+            echo "rebase_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open needs-rebase issue on conflict
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.rebase_ok == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM=${{ steps.upstream.outputs.tag }}
+          # Avoid duplicate issues — search for existing open issue for this upstream tag
+          DUP=$(gh issue list --repo ${{ github.repository }} --state open --search "needs-rebase ${UPSTREAM}" --json number -q '.[0].number')
+          if [ -n "$DUP" ]; then
+            echo "needs-rebase issue already exists (#${DUP}) — not opening another."
+            exit 0
+          fi
+          gh issue create --repo ${{ github.repository }} \
+            --title "Auto-sync conflict: upstream ${UPSTREAM} needs manual rebase" \
+            --label "needs-rebase" \
+            --body "Auto-sync workflow couldn't cleanly rebase our \`feat/force-close\` patches onto upstream \`${UPSTREAM}\`.
+
+          ## Manual resolution
+
+          \`\`\`bash
+          git fetch upstream
+          git checkout main
+          git rebase upstream/main
+          # — resolve conflicts (most likely in src/comms.cpp around door_command) —
+          git add -A
+          git rebase --continue
+          git push --force-with-lease origin main
+          gh release create ${UPSTREAM}-forceclose.1 --target main --title \"${UPSTREAM}-forceclose.1\" --notes \"Manual rebase of upstream ${UPSTREAM} after auto-sync conflict.\"
+          \`\`\`
+
+          The release.yml workflow will then build and publish firmware automatically.
+
+          ---
+          *Opened automatically by [auto-sync-upstream.yml](.github/workflows/auto-sync-upstream.yml). Close this issue manually after resolving.*"
+
+      - name: Push rebased main
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.rebase_ok == 'true'
+        run: git push --force-with-lease origin main
+
+      - name: Tag and publish new release
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.rebase_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_TAG=${{ steps.check.outputs.new_tag }}
+          UPSTREAM=${{ steps.upstream.outputs.tag }}
+          gh release create "$NEW_TAG" \
+            --repo ${{ github.repository }} \
+            --target main \
+            --title "$NEW_TAG" \
+            --notes "Auto-synced fork build of upstream **${UPSTREAM}** with forceClose patches applied.
+
+          This release was created automatically by the auto-sync workflow. The release.yml workflow will now build and upload firmware binaries — check https://github.com/${{ github.repository }}/actions for build status."
+
+      - name: Trigger release.yml build
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.rebase_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # gh release create with GITHUB_TOKEN does NOT trigger workflows
+          # listening on `release: published`, so we manually dispatch
+          # release.yml here. Requires release.yml to have a workflow_dispatch
+          # trigger (see fix to release.yml in this same commit).
+          gh workflow run release.yml --repo ${{ github.repository }} --ref main

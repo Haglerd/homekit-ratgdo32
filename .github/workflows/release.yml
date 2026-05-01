@@ -3,6 +3,10 @@ name: Release
 on:
   release:
      types: [published]
+  # Allow auto-sync-upstream.yml (and humans) to dispatch a build manually.
+  # GITHUB_TOKEN-fired release events do NOT trigger workflows, so the
+  # auto-sync workflow tags a release and then dispatches this build.
+  workflow_dispatch:
 
 permissions:
   actions: write
