@@ -525,7 +525,13 @@ function setElementsFromStatus(status) {
             case "useToggle":
             case "useSWserial":
             case "obstFromStatus":
+            case "autoClose":
                 document.getElementById(key).checked = value;
+                break;
+            case "autoCloseMinutes":
+            case "autoCloseStartHour":
+            case "autoCloseEndHour":
+                document.getElementById(key).value = value;
                 break;
             case "dcOpenClose":
                 document.getElementById(key).checked = value;
@@ -1011,6 +1017,16 @@ async function firmwareUpdate(github = true) {
                 alert("Firmware version at GitHub is unknown, cannot update directly from GitHub.");
                 return;
             }
+            // Guard against partially-published releases. If a release tag
+            // exists but firmware.bin hasn't been attached yet (build still
+            // running), the asset filter returns nothing and downloadURL is
+            // undefined — calling .replace() would throw a confusing
+            // TypeError for the user. Surface a clear message instead.
+            if (!serverStatus.downloadURL) {
+                console.log("Cannot download firmware, downloadURL is undefined (release likely still building)");
+                alert("Latest release tag is " + (serverStatus.latestVersion?.tag_name || 'unknown') + " but no firmware binary is attached yet (build may still be in progress). Wait a minute and try again.");
+                return;
+            }
             console.log("Download firmware from: " + serverStatus.downloadURL);
             document.getElementById("updateMsg").innerHTML = "Do not close browser until update completes. Device will reboot when complete.<br><br>Downloading from GitHub...";
             // For GitHub we will check integrity of downloaded file with MD5 hash.
@@ -1365,6 +1381,15 @@ async function saveSettings() {
     const useSWserial = (document.getElementById("useSWserial").checked) ? '1' : '0';
     const obstFromStatus = (document.getElementById("obstFromStatus").checked) ? '1' : '0';
 
+    // Auto-close (fork) — checkbox + 3 hour/minute inputs.
+    const autoClose = (document.getElementById("autoClose").checked) ? '1' : '0';
+    let autoCloseMinutes = Math.max(Math.min(parseInt(document.getElementById("autoCloseMinutes").value), 720), 1);
+    if (isNaN(autoCloseMinutes)) autoCloseMinutes = 15;
+    let autoCloseStartHour = Math.max(Math.min(parseInt(document.getElementById("autoCloseStartHour").value), 23), 0);
+    if (isNaN(autoCloseStartHour)) autoCloseStartHour = 22;
+    let autoCloseEndHour = Math.max(Math.min(parseInt(document.getElementById("autoCloseEndHour").value), 23), 0);
+    if (isNaN(autoCloseEndHour)) autoCloseEndHour = 6;
+
     let assistDuration = Math.max(Math.min(parseInt(document.getElementById("assistDuration").value), 300), 0);
     if (isNaN(assistDuration)) assistDuration = 0;
 
@@ -1451,6 +1476,10 @@ async function saveSettings() {
         "logLevel", logLevel,
         "useSWserial", useSWserial,
         "obstFromStatus", obstFromStatus,
+        "autoClose", autoClose,
+        "autoCloseMinutes", autoCloseMinutes,
+        "autoCloseStartHour", autoCloseStartHour,
+        "autoCloseEndHour", autoCloseEndHour,
         "dcDebounceDuration", dcDebounceDuration,
         "homespanCLI", homespanCLI,
         "lightHomeKit", lightHomeKit,
