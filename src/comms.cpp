@@ -2653,14 +2653,23 @@ static void checkAutoClose()
 {
     if (!userConfig->getAutoClose()) return;
     if (garage_door.current_state != GarageDoorCurrentState::CURR_OPEN) return;
-    if (doorOpenedAt == 0 || autoCloseFiredThisCycle) return;
+    if (autoCloseFiredThisCycle) return;
 
     time_t now = time(NULL);
     if (now < 1000000000) return;  // SNTP not yet synced
 
+    // Bootstrap: if the door was already Open when the feature was enabled
+    // (or after a reboot), the state-change hook never fired and
+    // doorOpenedAt is 0. Initialize it to "now" the first time we observe
+    // a stable Open state — countdown starts from this tick. Worst-case
+    // lag is one ticker interval (60s).
+    if (doorOpenedAt == 0) {
+        doorOpenedAt = now;
+        ESP_LOGI(TAG, "AUTO-CLOSE: door already Open at first check — bootstrapping countdown from now");
+    }
+
     uint32_t openMinutes = (uint32_t)((now - doorOpenedAt) / 60);
     uint32_t minMinutes = userConfig->getAutoCloseMinutes();
-    if (openMinutes < minMinutes) return;
 
     struct tm localTime;
     localtime_r(&now, &localTime);
@@ -2668,13 +2677,21 @@ static void checkAutoClose()
     uint32_t startHour = userConfig->getAutoCloseStartHour();
     uint32_t endHour = userConfig->getAutoCloseEndHour();
 
+    // Escape hatch: start == end means "always allow" (24-hour window).
+    // Otherwise interpret as same-day [start..end) or cross-midnight wrap.
     bool inWindow;
-    if (startHour <= endHour)
-        inWindow = (hour >= startHour && hour < endHour);  // same-day window e.g. 9..17
+    if (startHour == endHour)
+        inWindow = true;
+    else if (startHour < endHour)
+        inWindow = (hour >= startHour && hour < endHour);  // e.g. 9..17
     else
-        inWindow = (hour >= startHour || hour < endHour);  // cross-midnight e.g. 22..6
+        inWindow = (hour >= startHour || hour < endHour);  // e.g. 22..6
 
-    if (!inWindow) return;
+    if (openMinutes < minMinutes || !inWindow) {
+        ESP_LOGI(TAG, "AUTO-CLOSE: waiting — openMinutes=%u/%u, hour=%u, window=[%u..%u), inWindow=%d",
+                 openMinutes, minMinutes, hour, startHour, endHour, (int)inWindow);
+        return;
+    }
 
     ESP_LOGW(TAG, "AUTO-CLOSE: door has been Open for %u min, current hour %u in window [%u..%u) — firing force-close",
              openMinutes, hour, startHour, endHour);
