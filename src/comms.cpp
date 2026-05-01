@@ -12,6 +12,7 @@
  * Brandon Matthews... https://github.com/thenewwazoo
  * Jonathan Stroud...  https://github.com/jgstroud
  * Mitchell Solomon... https://github.com/mitchjs
+ * Haglerd...          https://github.com/Haglerd  (2025-26: forceClose handler, auto-close timer, auto-double-press)
  *
  */
 

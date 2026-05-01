@@ -11,6 +11,7 @@
  * Brandon Matthews... https://github.com/thenewwazoo
  * Jonathan Stroud...  https://github.com/jgstroud
  * Mitchell Solomon... https://github.com/mitchjs
+ * Haglerd...          https://github.com/Haglerd  (2025-26: forceClose /setgdo POST handler, auto-close timer)
  *
  */
 
