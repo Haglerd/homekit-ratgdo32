@@ -23,6 +23,13 @@ extern void comms_loop();
 
 extern GarageDoorCurrentState open_door();
 extern GarageDoorCurrentState close_door(bool bypass_ttc = false);
+// Force-close: simulates wall-button hold-to-close override on Sec+1.0 by
+// queuing a DoorButtonPress, then deferring DoorButtonRelease by hold_ms
+// (default 3500ms). This mimics the timing the GDO motor recognizes as a
+// "manual override" — closing past a tripped photo-eye safety beam.
+// Sec+2.0 falls back to normal close (no protocol-level hold concept exists).
+// SAFETY: only call when the door is in a known-safe-to-close state.
+extern void door_command_force_close(uint32_t hold_ms);
 #if defined(ESP8266) || !defined(USE_GDOLIB)
 extern GarageDoorCurrentState toggle_door(bool bypass_ttc = false);
 #endif

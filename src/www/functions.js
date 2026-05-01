@@ -906,7 +906,10 @@ async function checkVersion(progress = "dotdot1") {
             document.getElementById("firmwareDescription").innerHTML = marked.parse(latest.body);
         }
         if (asset?.name) {
-            serverStatus.downloadURL = "https://ratgdo.github.io/" + gitRepo + "/firmware/" + asset.name;
+            // Fork-friendly: use gitUser-scoped GitHub Pages instead of
+            // hardcoding ratgdo.github.io. Owner is whoever the firmware
+            // was built against (-D GITUSER at compile time).
+            serverStatus.downloadURL = "https://" + gitUser.toLowerCase() + ".github.io/" + gitRepo + "/firmware/" + asset.name;
             msg = "You have newest release";
             if (serverStatus.firmwareVersion < latest.tag_name) {
                 // Newest version at GitHub is greater from that installed

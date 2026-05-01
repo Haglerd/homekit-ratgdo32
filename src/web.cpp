@@ -1043,6 +1043,25 @@ bool helperGarageDoorState(const std::string &key, const char *value, configSett
     return true;
 }
 
+// forceClose=<hold_ms>: simulate a wall-button hold-to-close override.
+// Useful when the photo-eye is false-tripping (sun glare) or otherwise
+// preventing a normal close — the wall-button hold pattern is the only
+// way to override the GDO motor's safety beam check.
+//
+// SAFETY: only intended for cases where the user has visually verified
+// nothing is blocking the door. The plugin/UI calling this is expected
+// to surface that warning to the user.
+//
+// Sec+1.0 only. On Sec+2.0 doorControlType, this falls back to a normal
+// close (no protocol-level hold pattern exists).
+bool helperForceClose(const std::string &key, const char *value, configSetting *action)
+{
+    int hold_ms = atoi(value);
+    if (hold_ms <= 0) hold_ms = 3500; // default
+    door_command_force_close((uint32_t)hold_ms);
+    return true;
+}
+
 bool helperGarageLockState(const std::string &key, const char *value, configSetting *action)
 {
     set_lock((atoi(value) == 1) ? 1 : 0);
@@ -1164,6 +1183,7 @@ void handle_setgdo()
         {PSTR("resetDoor"), {true, false, 0, helperResetDoor}},
         {PSTR("garageLightOn"), {false, false, 0, helperGarageLightOn}},
         {PSTR("garageDoorState"), {false, false, 0, helperGarageDoorState}},
+        {PSTR("forceClose"), {false, false, 0, helperForceClose}},
         {PSTR("garageLockState"), {false, false, 0, helperGarageLockState}},
         {PSTR("credentials"), {false, false, 0, helperCredentials}}, // parse out wwwUsername and credentials
         {PSTR("updateUnderway"), {false, false, 0, helperUpdateUnderway}},
