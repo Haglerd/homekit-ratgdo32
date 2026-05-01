@@ -155,6 +155,12 @@ static Ticker checkDoorMoving = Ticker();
 static Ticker checkDoorCompleted = Ticker();
 bool TTCwasLightOn = false;
 static Ticker builtInTTCcountdown = Ticker();
+// Idle gap timer between the two press cycles of an auto-double-press
+// force-close. Uses Ticker (not delayFnCall) because we want the gap to
+// be quiet — no TTC light-flash spam during it. The TTC warning emits
+// during the press HOLD via delayFnCall; between presses the comms
+// stream returns to normal poll cadence.
+static Ticker forceCloseGapTimer = Ticker();
 
 void cancel_builtin_TTC_countdown()
 {
@@ -2482,20 +2488,32 @@ void door_command(DoorAction action)
 }
 
 // ---- Force-close (wall-button hold-to-close emulation) ----
-// Mimics the timing pattern the GDO motor recognizes as a manual override:
-// DoorButtonPress, hold for hold_ms, DoorButtonRelease. Real wall panels
-// emit Press once and don't emit Release until the user lets go; the GDO
-// motor's logic is "if Press → Release gap >~3s while obstruction is
-// reported, ignore the safety beam and close." door_command() can't do
-// this because it queues Release back-to-back with Press.
+// One /setgdo POST = full hold-to-close override sequence. The GDO motor's
+// override gate requires TWO sequential press-hold cycles — the first emits
+// the UL-mandated TTC warning, the second confirms intent and engages the
+// override past a tripped photo-eye. This is exactly what holding a real
+// wall button + retrying does:
 //
-// Implementation: queue Press immediately, then schedule a callback via
-// delayFnCall() to queue Release after hold_ms. Wall-panel emulation polls
-// continue during the hold, which appears to be tolerated by Sec+1.0 GDOs.
+//   Press 1 → 3500ms hold (with TTC light-flash warning) → Release 1
+//   Wait 1500ms idle (no comms-stream noise during gap)
+//   Press 2 → 3500ms hold (with TTC light-flash warning) → Release 2
+//
+// Field tested timing: 5000ms total from press-1-start to press-2-start
+// engages the override. Anything shorter overlaps the two presses inside
+// press-1's hold, which the motor reads as a single noisy press and
+// ignores. The 1500ms gap (= 5000ms total - 3500ms hold) is the magic.
+//
+// If the door starts closing after press 1 alone (not blocked by photo
+// eye), the second cycle is skipped automatically — no double-trigger.
 //
 // Only meaningful on Sec+1.0. Sec+2.0 has no equivalent protocol message,
 // so it falls back to the normal close path.
-static void send_force_close_release()
+static int forceCloseAttempt = 0;
+static uint32_t forceCloseHoldMsCached = 3500;
+constexpr uint32_t FORCE_CLOSE_GAP_MS = 1500;
+static void send_force_close_press();
+
+static void send_force_close_release_then_maybe_retry()
 {
     PacketData data;
     data.type = PacketDataType::DoorAction;
@@ -2509,6 +2527,7 @@ static void send_force_close_release()
     if (!txQueuePush(&pkt_ac))
     {
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release");
+        forceCloseAttempt = 0;
         return;
     }
     // Sec+1.0 normally sends release twice for reliability — preserve that here too.
@@ -2517,25 +2536,37 @@ static void send_force_close_release()
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release retry");
     }
     send_get_status();
-    ESP_LOGI(TAG, "FORCE CLOSE: deferred release sent — sequence complete");
-}
+    ESP_LOGI(TAG, "FORCE CLOSE: attempt %d release sent", forceCloseAttempt);
 
-void door_command_force_close(uint32_t hold_ms)
-{
-    if (doorControlType != 1)
+    // If the first press alone got the door moving toward Closed, override
+    // wasn't needed (photo-eye wasn't actually blocking). Skip second press
+    // to avoid toggling the now-closing door back to Open.
+    if (forceCloseAttempt >= 1 &&
+        (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING ||
+         garage_door.current_state == GarageDoorCurrentState::CURR_CLOSED))
     {
-        ESP_LOGW(TAG, "FORCE CLOSE: hold-to-close override only meaningful on Sec+1.0; falling back to normal close (doorControlType=%lu)", doorControlType);
-        door_command(DoorAction::Close);
+        ESP_LOGI(TAG, "FORCE CLOSE: door already closing/closed — skipping second press");
+        forceCloseAttempt = 0;
         return;
     }
 
-    // Bound the hold so accidental tiny/huge values don't break things.
-    // Liftmaster Sec+1.0 manual override engages around ~3s; we default
-    // to 3500ms for a safety margin, cap at 10s.
-    if (hold_ms < 1000) hold_ms = 3500;
-    if (hold_ms > 10000) hold_ms = 10000;
+    if (forceCloseAttempt < 2)
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: scheduling attempt %d after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
+        forceCloseGapTimer.detach();
+        forceCloseGapTimer.once_ms(FORCE_CLOSE_GAP_MS, send_force_close_press);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: 2-attempt sequence complete");
+        forceCloseAttempt = 0;
+    }
+}
 
-    ESP_LOGI(TAG, "FORCE CLOSE: pressing button for %lums (mimics wall-button hold-to-close override)", hold_ms);
+static void send_force_close_press()
+{
+    forceCloseAttempt++;
+    ESP_LOGI(TAG, "FORCE CLOSE: attempt %d/2 — press for %lums (TTC warning during hold)", forceCloseAttempt, forceCloseHoldMsCached);
 
     PacketData data;
     data.type = PacketDataType::DoorAction;
@@ -2549,25 +2580,33 @@ void door_command_force_close(uint32_t hold_ms)
     if (!txQueuePush(&pkt_ac))
     {
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on press");
+        forceCloseAttempt = 0;
         return;
     }
 
-    // Schedule the deferred release via delayFnCall — which also runs the
-    // TTC warning sequence (0x32 light-press flashes every 250ms during the
-    // delay). Initially this looked like a bug, but field testing on a real
-    // Liftmaster Sec+1.0 install showed the OPPOSITE: removing the TTC
-    // warning broke the motor's UL-mandated "warning-then-override" gate.
-    //
-    // UL safety regs require GDOs to emit a visible/audible warning before
-    // closing past a tripped photo-eye. Real wall-button hold-to-close
-    // triggers TTC warning → user keeps pressing → motor allows override.
-    // The 0x32 light-press flashes ARE that warning, so we keep them.
-    //
-    // Empirically: with delayFnCall, first attempt typically fails (warning
-    // emits, photo-eye still tripped) but second attempt succeeds — same as
-    // a real wall-button hold sequence. The plugin's retry logic (3 tries)
-    // handles this automatically.
-    delayFnCall(hold_ms, send_force_close_release);
+    // Schedule release via delayFnCall — which also runs the TTC warning
+    // sequence (light-press flashes during the delay). The TTC warning is
+    // UL-mandated and the motor's override gate requires it.
+    delayFnCall(forceCloseHoldMsCached, send_force_close_release_then_maybe_retry);
+}
+
+void door_command_force_close(uint32_t hold_ms)
+{
+    if (doorControlType != 1)
+    {
+        ESP_LOGW(TAG, "FORCE CLOSE: hold-to-close override only meaningful on Sec+1.0; falling back to normal close (doorControlType=%lu)", doorControlType);
+        door_command(DoorAction::Close);
+        return;
+    }
+
+    if (hold_ms < 1000) hold_ms = 3500;
+    if (hold_ms > 10000) hold_ms = 10000;
+    forceCloseHoldMsCached = hold_ms;
+    forceCloseAttempt = 0;
+    forceCloseGapTimer.detach();
+
+    ESP_LOGI(TAG, "FORCE CLOSE: starting 2-attempt sequence (hold=%lums, gap=%lums)", hold_ms, FORCE_CLOSE_GAP_MS);
+    send_force_close_press();
 }
 
 #endif // not USE_GDOLIB
