@@ -536,7 +536,8 @@ void setup_web()
     server.on("/update", HTTP_POST, handle_update, handle_firmware_upload);
     server.onNotFound(handle_everything);
     // here the list of headers to be recorded
-    const char *headerkeys[] = {"If-None-Match"};
+    // Origin/Referer/Host are needed for CSRF guard on /setgdo
+    const char *headerkeys[] = {"If-None-Match", "Origin", "Referer", "Host"};
     size_t headerkeyssize = sizeof(headerkeys) / sizeof(char *);
     // ask server to track these headers
     server.collectHeaders(headerkeys, headerkeyssize);
@@ -1214,11 +1215,58 @@ void handle_setgdo()
         AUTHENTICATE();
     }
 
+    // CSRF guard: if Origin/Referer is present and points at a host other
+    // than ours, reject. Same-origin requests from the dashboard always
+    // include one of these headers; a cross-site request from another tab
+    // would carry the attacker's origin. We accept missing headers (some
+    // legacy tools and direct curl POSTs don't send them, and the user
+    // already authenticated) so this doesn't lock anyone out — it only
+    // hard-fails the obvious cross-site case.
+    auto headerHas = [](const String &h, const char *needle) -> bool {
+        return h.length() > 0 && h.indexOf(needle) >= 0;
+    };
+    String origin = server.hasHeader("Origin") ? server.header("Origin") : String();
+    String referer = server.hasHeader("Referer") ? server.header("Referer") : String();
+    String myHost = server.hasHeader("Host") ? server.header("Host") : String();
+    if ((origin.length() > 0 || referer.length() > 0) && myHost.length() > 0)
+    {
+        // Strip port for comparison since Origin/Referer may include it
+        String hostOnly = myHost;
+        int colon = hostOnly.indexOf(':');
+        if (colon >= 0) hostOnly = hostOnly.substring(0, colon);
+        bool sameOrigin =
+            (origin.length() > 0 && headerHas(origin, hostOnly.c_str())) ||
+            (referer.length() > 0 && headerHas(referer, hostOnly.c_str()));
+        if (!sameOrigin)
+        {
+            ESP_LOGW(TAG, "CSRF: rejecting /setgdo — Origin=%s Referer=%s Host=%s",
+                     origin.c_str(), referer.c_str(), myHost.c_str());
+            server.send_P(403, type_txt, PSTR("Forbidden: cross-origin"));
+            return;
+        }
+    }
+
     // Loop over all the GDO settings passed in...
     for (int i = 0; i < server.args(); i++)
     {
         std::string key(server.argName(i).c_str());
         std::string value(server.arg(i).c_str());
+
+        // Clamp known integer-ranged auto-close keys server-side. The web UI
+        // already enforces these bounds, but a hand-crafted POST can bypass
+        // them; defending here keeps NVRAM from accepting nonsense like
+        // autoCloseMinutes=99999999 or autoCloseStartMinutes=-1.
+        if (key == "autoCloseMinutes" ||
+            key == "autoCloseStartMinutes" ||
+            key == "autoCloseEndMinutes")
+        {
+            long n = strtol(value.c_str(), nullptr, 10);
+            long lo = (key == "autoCloseMinutes") ? 1 : 0;
+            long hi = (key == "autoCloseMinutes") ? 720 : 1439;
+            if (n < lo) n = lo;
+            if (n > hi) n = hi;
+            value = std::to_string(n);
+        }
 
         if (setGDOhandlers.count(key))
         {
