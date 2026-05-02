@@ -155,12 +155,17 @@ jobs:
       # which works fine), and bundled into a SINGLE commit so the
       # release contributes one entry to history instead of 5.
       - name: Commit firmware bins to docs/firmware/
-        continue-on-error: true
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Stash the built firmware files before resetting HEAD off the
-          # release tag (the action-json step earlier moved us there).
+          # Stash the built firmware files before resetting HEAD — the
+          # earlier action-json + manifest-commit steps left
+          # docs/manifest.json modified in-tree, which makes a plain
+          # `git checkout` refuse with "local changes would be
+          # overwritten." -fB force-checkout is safe here because
+          # origin/main already has the same manifest update from the
+          # prior step in this same job.
           mkdir -p /tmp/fwbins
           cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin /tmp/fwbins/
           cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin /tmp/fwbins/
@@ -168,7 +173,13 @@ jobs:
           cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 /tmp/fwbins/
           cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf /tmp/fwbins/
           git fetch origin main
-          git checkout -B main origin/main
+          # -f discards uncommitted in-tree edits (the manifest.json
+          # bump that's already on origin/main from the earlier step).
+          # Without -f this exited 1 with "local changes would be
+          # overwritten" and continue-on-error swallowed it silently —
+          # which left docs/firmware/ stale by one release on every
+          # build (v18 and v19 both shipped without bins committed).
+          git checkout -fB main origin/main
           mkdir -p docs/firmware
           cp /tmp/fwbins/* docs/firmware/
           git add docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin \
