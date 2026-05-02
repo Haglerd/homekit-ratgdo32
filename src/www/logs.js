@@ -272,6 +272,25 @@ async function refreshHomeKitMDNS() {
     }
     setTimeout(() => { status.textContent = ""; status.style.color = ""; }, 8000);
 }
+
+async function dumpHomeKitState() {
+    const status = document.getElementById("reconnectStatus");
+    status.textContent = "Sending…";
+    try {
+        const res = await fetch("dumpHomeKitState", { method: "POST" });
+        if (res.ok) {
+            status.textContent = "OK — state dump in the log below (HomeSpan output is multi-line).";
+            status.style.color = "#3a7a3a";
+        } else {
+            status.textContent = `Failed (HTTP ${res.status})`;
+            status.style.color = "#a33";
+        }
+    } catch (e) {
+        status.textContent = `Failed (${e.message || "network error"})`;
+        status.style.color = "#a33";
+    }
+    setTimeout(() => { status.textContent = ""; status.style.color = ""; }, 8000);
+}
 // Generate a UUID.  Cannot use crypto.randomUUID() because that will only run
 // in a secure environment, which is not possible with ratgdo.
 function uuidv4() {

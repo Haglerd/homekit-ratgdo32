@@ -79,6 +79,8 @@ Loading...
                title="Lightest recovery — re-broadcast the HomeKit accessory advert without dropping WiFi. Try this first when iOS says 'No Response' but the device looks healthy in the log." />
         <input type="button" value="Reconnect HomeKit" onclick="reconnectHomeKit()" style="margin-left: 0.5em;"
                title="Cycle WiFi to recover from 'No Response' without rebooting. HomeSpan reattaches automatically. Use if Refresh mDNS doesn't help." />
+        <input type="button" value="Dump State" onclick="dumpHomeKitState()" style="margin-left: 0.5em;"
+               title="Dump HomeSpan diagnostic output (status + accessory DB + diag) to the log. Read-only — useful for debugging." />
         <span id="reconnectStatus" style="margin-left: 0.8em; font-size: 0.85em;"></span>
       </div>
       <span id="homekitLogHeader" style="margin: 0px;  color: #b8860b; font-size: 0.6em;"></span>
