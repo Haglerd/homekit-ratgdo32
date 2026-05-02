@@ -488,15 +488,27 @@ static void hap_controller_change_cb()
 constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 60000; // 60s
 static Ticker homekitHealthTicker;
 
-// Self-healing watchdog config. Defaults are conservative — healthy
-// HomeKit polls every 30-90s, so 300s (5 min) without any iOS read
-// strongly indicates the hub thinks we're unresponsive ('No Response').
-//   HK_AUTO_RECOVER_SECS  — threshold before triggering first recovery
-//   HK_AUTO_RECOVER_MAX   — max recovery attempts before giving up
-//                           (resets to 0 every time iOS reads again)
-constexpr uint32_t HK_AUTO_RECOVER_SECS = 300;
-constexpr uint8_t  HK_AUTO_RECOVER_MAX  = 2;
-static uint8_t     hkRecoverAttempts    = 0;
+// Self-healing watchdog. v19: ACTIONS DISABLED BY DEFAULT — initial
+// real-world testing showed iOS read cadence is highly variable (gaps
+// of 6+ min observed during normal idle), so a low threshold causes
+// false-trigger recoveries on a healthy connection. This v19 build:
+//   * keeps the threshold-checking logic
+//   * does NOT take any recovery action (HK_AUTO_RECOVER_EN = false)
+//   * emits TIERED DIAGNOSTIC HINTS in the log at each threshold so
+//     the user can observe real-world silent-gap durations and decide
+//     what auto-recover threshold (if any) makes sense for their setup
+// In a future revision the thresholds + actions will be exposed via
+// the web UI as configurable settings.
+constexpr bool     HK_AUTO_RECOVER_EN    = false;
+constexpr uint32_t HK_AUTO_RECOVER_SECS  = 1800;  // 30 min — only used if EN=true
+constexpr uint8_t  HK_AUTO_RECOVER_MAX   = 2;
+// Diagnostic hint thresholds (always logged regardless of EN). Picked
+// to give a sense of "how silent is silent" without acting on it.
+constexpr uint32_t HK_HINT_QUIET_SECS    = 300;   //  5 min — "extended idle"
+constexpr uint32_t HK_HINT_STALE_SECS    = 900;   // 15 min — "possibly stale"
+constexpr uint32_t HK_HINT_LIKELY_NR     = 1800;  // 30 min — "likely No Response"
+static uint8_t     hkRecoverAttempts     = 0;
+static uint8_t     hkLastHintLevel       = 0;     // 0=none, 1=QUIET, 2=STALE, 3=LIKELY_NR
 
 static void homekit_health_log()
 {
@@ -536,7 +548,44 @@ static void homekit_health_log()
     // HK_AUTO_RECOVER_MAX attempts we stop and wait for a HAP read
     // (which resets the counter) — no auto-reboot, that's too
     // disruptive for a daemon to do on its own.
-    if (lastReadAgo > (int32_t)HK_AUTO_RECOVER_SECS &&
+    // Tiered diagnostic hints — ALWAYS logged regardless of whether
+    // auto-recover is enabled. Lets the user observe how silent
+    // their iOS hub gets during normal operation, so they can pick
+    // an informed threshold before enabling auto-recover.
+    if (lastReadAgo > 0 && paired_controllers > 0)
+    {
+        uint8_t newLevel = 0;
+        if (lastReadAgo > (int32_t)HK_HINT_LIKELY_NR)      newLevel = 3;
+        else if (lastReadAgo > (int32_t)HK_HINT_STALE_SECS) newLevel = 2;
+        else if (lastReadAgo > (int32_t)HK_HINT_QUIET_SECS) newLevel = 1;
+
+        // Only emit a hint when crossing INTO a higher level (don't
+        // spam every 60s while sitting at the same level).
+        if (newLevel > hkLastHintLevel)
+        {
+            const char *label = "";
+            switch (newLevel) {
+                case 1: label = "iOS extended idle (>5min) — could be normal hub idle, watch the trend"; break;
+                case 2: label = "iOS gone quiet (>15min) — possibly stale, hub may be drifting toward No Response"; break;
+                case 3: label = "iOS silent (>30min) — likely No Response on hub side, manual Reconnect or Refresh mDNS may help"; break;
+            }
+            ESP_LOGW(TAG, "HomeKit watchdog hint: %s (last_hap_read_ago=%ds, threshold-level=%u)",
+                     label, lastReadAgo, newLevel);
+            hkLastHintLevel = newLevel;
+        }
+        else if (newLevel < hkLastHintLevel && lastReadAgo < (int32_t)HK_HINT_QUIET_SECS)
+        {
+            // Crossed back below the lowest hint threshold — quiet phase ended.
+            ESP_LOGI(TAG, "HomeKit watchdog hint: HAP reads resumed (last_hap_read_ago=%ds), recovering from level %u", lastReadAgo, hkLastHintLevel);
+            hkLastHintLevel = 0;
+        }
+    }
+
+    // Auto-recover ACTIONS — only run if explicitly enabled. v19 ships
+    // with HK_AUTO_RECOVER_EN=false; the hints above run unconditionally
+    // so the user can decide whether to enable based on real-world data.
+    if (HK_AUTO_RECOVER_EN &&
+        lastReadAgo > (int32_t)HK_AUTO_RECOVER_SECS &&
         WiFi.isConnected() &&
         paired_controllers > 0)
     {
@@ -548,21 +597,17 @@ static void homekit_health_log()
         }
         else if (hkRecoverAttempts == 1)
         {
-            ESP_LOGW(TAG, "HomeKit auto-recover (2/2): mDNS refresh didn't help, cycling WiFi", lastReadAgo);
+            ESP_LOGW(TAG, "HomeKit auto-recover (2/2): mDNS refresh didn't help, cycling WiFi (last_hap_read_ago=%ds)", lastReadAgo);
             homekit_force_reconnect("auto-recover: mDNS refresh insufficient");
             hkRecoverAttempts = 2;
         }
         else
         {
-            // Already tried both. Don't escalate further automatically.
-            // User can still press Reboot in the web UI / HomeKit if needed.
-            ESP_LOGW(TAG, "HomeKit auto-recover: still no HAP read after %d attempts; giving up automatic recovery (user reboot may be required)", hkRecoverAttempts);
+            ESP_LOGW(TAG, "HomeKit auto-recover: still no HAP read after %d attempts; giving up (user reboot may be required)", hkRecoverAttempts);
         }
     }
     else if (lastReadAgo >= 0 && lastReadAgo < 60 && hkRecoverAttempts > 0)
     {
-        // iOS started reading again — clear the counter so a future
-        // outage gets a fresh budget of recovery attempts.
         ESP_LOGI(TAG, "HomeKit auto-recover: HAP reads resumed (last_hap_read_ago=%ds), clearing recovery counter", lastReadAgo);
         hkRecoverAttempts = 0;
     }
