@@ -569,6 +569,15 @@ function setElementsFromStatus(status) {
             case "autoCloseIgnoreWindow":
                 document.getElementById(key).checked = value;
                 break;
+            case "hkAutoRecover":
+                document.getElementById(key).checked = value;
+                break;
+            case "hkAutoRecoverSecs":
+            case "hkHintQuietSecs":
+            case "hkHintStaleSecs":
+            case "hkHintLikelyNRSecs":
+                document.getElementById(key).value = value;
+                break;
             case "dcOpenClose":
                 document.getElementById(key).checked = value;
                 toggleHardwiredBypassRow();
@@ -784,6 +793,15 @@ function setElementsFromStatus(status) {
                 // Auto-close keys flow through here as part of /status.json.
                 // Re-render the home-page status row whenever any of them change.
                 updateAutoCloseStatusRow();
+                break;
+            case "hkAutoRecover":
+            case "hkAutoRecoverSecs":
+            case "hkHintQuietSecs":
+            case "hkHintStaleSecs":
+            case "hkHintLikelyNRSecs":
+                // HomeKit watchdog config flows through /status.json. No
+                // home-page widget for it — the values just get reflected
+                // back into the settings form on next page load.
                 break;
             default:
                 try {
@@ -1484,6 +1502,19 @@ async function saveSettings() {
     const autoCloseEndMinutes   = hhmmToMOD(document.getElementById("autoCloseEnd").value, 360);     // 06:00
     const autoCloseIgnoreWindow = (document.getElementById("autoCloseIgnoreWindow").checked) ? '1' : '0';
 
+    // HomeKit watchdog (fork) — toggle + 4 thresholds. Clamp to
+    // [60, 7200] sec to match the form min/max and avoid bogus values.
+    const hkAutoRecover = (document.getElementById("hkAutoRecover").checked) ? '1' : '0';
+    function clampSecs(id, fallback) {
+        const v = parseInt(document.getElementById(id).value);
+        if (isNaN(v)) return fallback;
+        return Math.max(60, Math.min(7200, v));
+    }
+    const hkAutoRecoverSecs  = clampSecs("hkAutoRecoverSecs", 1800);
+    const hkHintQuietSecs    = clampSecs("hkHintQuietSecs", 300);
+    const hkHintStaleSecs    = clampSecs("hkHintStaleSecs", 900);
+    const hkHintLikelyNRSecs = clampSecs("hkHintLikelyNRSecs", 1800);
+
     let assistDuration = Math.max(Math.min(parseInt(document.getElementById("assistDuration").value), 300), 0);
     if (isNaN(assistDuration)) assistDuration = 0;
 
@@ -1575,6 +1606,11 @@ async function saveSettings() {
         "autoCloseStartMinutes", autoCloseStartMinutes,
         "autoCloseEndMinutes", autoCloseEndMinutes,
         "autoCloseIgnoreWindow", autoCloseIgnoreWindow,
+        "hkAutoRecover", hkAutoRecover,
+        "hkAutoRecoverSecs", hkAutoRecoverSecs,
+        "hkHintQuietSecs", hkHintQuietSecs,
+        "hkHintStaleSecs", hkHintStaleSecs,
+        "hkHintLikelyNRSecs", hkHintLikelyNRSecs,
         "dcDebounceDuration", dcDebounceDuration,
         "homespanCLI", homespanCLI,
         "lightHomeKit", lightHomeKit,

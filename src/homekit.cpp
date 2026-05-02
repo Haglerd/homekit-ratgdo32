@@ -488,25 +488,17 @@ static void hap_controller_change_cb()
 constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 60000; // 60s
 static Ticker homekitHealthTicker;
 
-// Self-healing watchdog. v19: ACTIONS DISABLED BY DEFAULT — initial
-// real-world testing showed iOS read cadence is highly variable (gaps
-// of 6+ min observed during normal idle), so a low threshold causes
-// false-trigger recoveries on a healthy connection. This v19 build:
-//   * keeps the threshold-checking logic
-//   * does NOT take any recovery action (HK_AUTO_RECOVER_EN = false)
-//   * emits TIERED DIAGNOSTIC HINTS in the log at each threshold so
-//     the user can observe real-world silent-gap durations and decide
-//     what auto-recover threshold (if any) makes sense for their setup
-// In a future revision the thresholds + actions will be exposed via
-// the web UI as configurable settings.
-constexpr bool     HK_AUTO_RECOVER_EN    = false;
-constexpr uint32_t HK_AUTO_RECOVER_SECS  = 1800;  // 30 min — only used if EN=true
+// Self-healing watchdog. v21: thresholds + enable-flag are user-settable
+// via Settings → HomeKit Watchdog (persisted in NVRAM). Defaults match
+// v19/v20 hardcoded values (auto-recover OFF, 5/15/30-minute hint tiers,
+// 30-minute trigger). Reading via userConfig at every health-tick means
+// changes apply on the next 60s loop without a reboot.
+//
+// Recovery escalation when enabled: mDNS refresh first (cheapest, no
+// outage), then WiFi reconnect (~3-5s outage). After HK_AUTO_RECOVER_MAX
+// attempts we stop and wait for a HAP read (which resets the counter) —
+// no auto-reboot, that's too disruptive for a daemon to do on its own.
 constexpr uint8_t  HK_AUTO_RECOVER_MAX   = 2;
-// Diagnostic hint thresholds (always logged regardless of EN). Picked
-// to give a sense of "how silent is silent" without acting on it.
-constexpr uint32_t HK_HINT_QUIET_SECS    = 300;   //  5 min — "extended idle"
-constexpr uint32_t HK_HINT_STALE_SECS    = 900;   // 15 min — "possibly stale"
-constexpr uint32_t HK_HINT_LIKELY_NR     = 1800;  // 30 min — "likely No Response"
 static uint8_t     hkRecoverAttempts     = 0;
 static uint8_t     hkLastHintLevel       = 0;     // 0=none, 1=QUIET, 2=STALE, 3=LIKELY_NR
 
@@ -548,6 +540,15 @@ static void homekit_health_log()
     // HK_AUTO_RECOVER_MAX attempts we stop and wait for a HAP read
     // (which resets the counter) — no auto-reboot, that's too
     // disruptive for a daemon to do on its own.
+    // Read settings once per tick — userConfig is mutex-protected so
+    // grabbing them in one shot avoids the (vanishingly small) chance
+    // of a partial-update view.
+    const bool     hkEnabled      = userConfig->getHKAutoRecover();
+    const uint32_t hkRecoverSecs  = userConfig->getHKAutoRecoverSecs();
+    const uint32_t hkQuietSecs    = userConfig->getHKHintQuietSecs();
+    const uint32_t hkStaleSecs    = userConfig->getHKHintStaleSecs();
+    const uint32_t hkLikelyNRSecs = userConfig->getHKHintLikelyNRSecs();
+
     // Tiered diagnostic hints — ALWAYS logged regardless of whether
     // auto-recover is enabled. Lets the user observe how silent
     // their iOS hub gets during normal operation, so they can pick
@@ -555,9 +556,9 @@ static void homekit_health_log()
     if (lastReadAgo > 0 && paired_controllers > 0)
     {
         uint8_t newLevel = 0;
-        if (lastReadAgo > (int32_t)HK_HINT_LIKELY_NR)      newLevel = 3;
-        else if (lastReadAgo > (int32_t)HK_HINT_STALE_SECS) newLevel = 2;
-        else if (lastReadAgo > (int32_t)HK_HINT_QUIET_SECS) newLevel = 1;
+        if (lastReadAgo > (int32_t)hkLikelyNRSecs)     newLevel = 3;
+        else if (lastReadAgo > (int32_t)hkStaleSecs)   newLevel = 2;
+        else if (lastReadAgo > (int32_t)hkQuietSecs)   newLevel = 1;
 
         // Only emit a hint when crossing INTO a higher level (don't
         // spam every 60s while sitting at the same level).
@@ -565,15 +566,15 @@ static void homekit_health_log()
         {
             const char *label = "";
             switch (newLevel) {
-                case 1: label = "iOS extended idle (>5min) — could be normal hub idle, watch the trend"; break;
-                case 2: label = "iOS gone quiet (>15min) — possibly stale, hub may be drifting toward No Response"; break;
-                case 3: label = "iOS silent (>30min) — likely No Response on hub side, manual Reconnect or Refresh mDNS may help"; break;
+                case 1: label = "iOS extended idle — could be normal hub idle, watch the trend"; break;
+                case 2: label = "iOS gone quiet — possibly stale, hub may be drifting toward No Response"; break;
+                case 3: label = "iOS silent — likely No Response on hub side, manual Reconnect or Refresh mDNS may help"; break;
             }
             ESP_LOGW(TAG, "HomeKit watchdog hint: %s (last_hap_read_ago=%ds, threshold-level=%u)",
                      label, lastReadAgo, newLevel);
             hkLastHintLevel = newLevel;
         }
-        else if (newLevel < hkLastHintLevel && lastReadAgo < (int32_t)HK_HINT_QUIET_SECS)
+        else if (newLevel < hkLastHintLevel && lastReadAgo < (int32_t)hkQuietSecs)
         {
             // Crossed back below the lowest hint threshold — quiet phase ended.
             ESP_LOGI(TAG, "HomeKit watchdog hint: HAP reads resumed (last_hap_read_ago=%ds), recovering from level %u", lastReadAgo, hkLastHintLevel);
@@ -581,11 +582,11 @@ static void homekit_health_log()
         }
     }
 
-    // Auto-recover ACTIONS — only run if explicitly enabled. v19 ships
-    // with HK_AUTO_RECOVER_EN=false; the hints above run unconditionally
-    // so the user can decide whether to enable based on real-world data.
-    if (HK_AUTO_RECOVER_EN &&
-        lastReadAgo > (int32_t)HK_AUTO_RECOVER_SECS &&
+    // Auto-recover ACTIONS — only run if explicitly enabled. Defaults
+    // ship disabled; the hints above run unconditionally so the user
+    // can decide whether to enable based on real-world data.
+    if (hkEnabled &&
+        lastReadAgo > (int32_t)hkRecoverSecs &&
         WiFi.isConnected() &&
         paired_controllers > 0)
     {

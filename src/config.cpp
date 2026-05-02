@@ -473,6 +473,16 @@ userSettings::userSettings()
         {cfg_autoCloseStartMinutes, {false, false, 1320, NULL}}, // 22:00
         {cfg_autoCloseEndMinutes, {false, false, 360, NULL}},    // 06:00
         {cfg_autoCloseIgnoreWindow, {false, false, false, NULL}},
+        // HomeKit watchdog defaults — recovery actions OFF by default
+        // (real-world iOS read cadence varies wildly; let the user observe
+        // the diagnostic hints first and opt in). Hint thresholds match
+        // the v19/v20 hardcoded defaults so behaviour is unchanged on
+        // first boot for users who already trust them.
+        {cfg_hkAutoRecover, {false, false, false, NULL}},
+        {cfg_hkAutoRecoverSecs, {false, false, 1800, NULL}},  // 30 min
+        {cfg_hkHintQuietSecs, {false, false, 300, NULL}},     //  5 min
+        {cfg_hkHintStaleSecs, {false, false, 900, NULL}},     // 15 min
+        {cfg_hkHintLikelyNRSecs, {false, false, 1800, NULL}}, // 30 min
 #ifndef ESP8266
         // These features not available on ESP8266
         {cfg_occupancyDuration, {false, false, 0, helperOccupancyDuration}}, // call fn to enable/disable HomeKit accessories
