@@ -75,8 +75,10 @@ Loading...
     <div id="homekitTab" class="tabcontent">
       <p style="margin: 0px; color: #b8860b">HomeKit, WiFi, and HomeSpan events only — filtered from the system log.</p>
       <div style="margin: 0.5em 0;">
-        <input type="button" value="Reconnect HomeKit" onclick="reconnectHomeKit()"
-               title="Cycle WiFi to recover from 'No Response' without rebooting. HomeSpan reattaches automatically." />
+        <input type="button" value="Refresh mDNS" onclick="refreshHomeKitMDNS()"
+               title="Lightest recovery — re-broadcast the HomeKit accessory advert without dropping WiFi. Try this first when iOS says 'No Response' but the device looks healthy in the log." />
+        <input type="button" value="Reconnect HomeKit" onclick="reconnectHomeKit()" style="margin-left: 0.5em;"
+               title="Cycle WiFi to recover from 'No Response' without rebooting. HomeSpan reattaches automatically. Use if Refresh mDNS doesn't help." />
         <span id="reconnectStatus" style="margin-left: 0.8em; font-size: 0.85em;"></span>
       </div>
       <span id="homekitLogHeader" style="margin: 0px;  color: #b8860b; font-size: 0.6em;"></span>

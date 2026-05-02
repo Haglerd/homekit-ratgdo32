@@ -69,6 +69,8 @@ extern void homekit_unpair();
 extern bool homekit_is_paired();
 // Cycle WiFi to recover from "No Response" — HomeSpan auto-reattaches.
 extern void homekit_force_reconnect(const char *reason);
+// Re-advertise mDNS without cycling WiFi (lighter-touch recovery).
+extern void homekit_refresh_mdns(const char *reason);
 
 extern char ipv6_addresses[];
 
