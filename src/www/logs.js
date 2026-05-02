@@ -100,6 +100,18 @@ async function loadLogs() {
                 if (!sysLogLoaded) tmpLogMsgs.push(event.data);
                 // Only scroll the page if we are already at bottom of the page
                 if (scroll) divElem.scrollTop = divElem.scrollHeight;
+
+                // Mirror HomeKit / WiFi / HomeSpan events into the HomeKit
+                // tab so they're visible without scrolling through the
+                // full system log noise. Match by tag substring — anything
+                // logged from ratgdo-homekit, anything mentioning "WiFi"
+                // or "HomeSpan" or "HomeKit reconnect" etc.
+                if (isHomeKitLine(event.data)) {
+                    let hkPane = document.getElementById("homekitTab");
+                    let hkScroll = (hkPane.scrollHeight - hkPane.scrollTop - hkPane.clientHeight) < 10;
+                    document.getElementById("homekitlog").insertAdjacentText('beforeend', event.data + "\n");
+                    if (hkScroll) hkPane.scrollTop = hkPane.scrollHeight;
+                }
             });
             evtSource.addEventListener("error", (event) => {
                 // If an error occurs close the connection.
@@ -136,6 +148,13 @@ async function loadLogPages() {
                 let divElem = document.getElementById("logTab");
                 // Scroll to the bottom
                 divElem.scrollTop = divElem.scrollHeight;
+                // Seed the HomeKit tab from the same buffered text.
+                const hkText = text.split('\n').filter(isHomeKitLine).join('\n');
+                if (hkText.length > 0) {
+                    document.getElementById("homekitlog").insertAdjacentText('afterbegin', hkText + '\n');
+                    let hkPane = document.getElementById("homekitTab");
+                    hkPane.scrollTop = hkPane.scrollHeight;
+                }
             })
             .catch(error => console.warn(error)),
 
@@ -204,6 +223,35 @@ async function clearCrashLog() {
     if (msgJson) msgJson.crashCount = 0;
     document.getElementById("crashlog").innerText = "No crashes saved";
     loaderElem.style.visibility = "hidden";
+}
+
+// Match HomeKit / WiFi / HomeSpan-related lines from the system log
+// stream. Used by both the live SSE subscription and the initial fetch
+// of /showlog when the HomeKit tab opens.
+function isHomeKitLine(line) {
+    return /ratgdo-homekit|HomeKit |HomeSpan|WiFi |Wifi |wifi |force-close to clear|HomeKit reconnect/i.test(line);
+}
+
+async function reconnectHomeKit() {
+    const status = document.getElementById("reconnectStatus");
+    if (!confirm("Reconnect HomeKit? This cycles WiFi briefly (no reboot).")) return;
+    status.textContent = "Sending…";
+    try {
+        const res = await fetch("reconnectHomeKit", { method: "POST" });
+        if (res.ok) {
+            status.textContent = "OK — WiFi cycling. Watch the log below.";
+            status.style.color = "#3a7a3a";
+        } else {
+            status.textContent = `Failed (HTTP ${res.status})`;
+            status.style.color = "#a33";
+        }
+    } catch (e) {
+        // The cycle will brieflyDrop our HTTP — the request may error;
+        // that's expected. Don't treat a network drop as failure.
+        status.textContent = "Sent (HTTP dropped during reconnect — expected).";
+        status.style.color = "#3a7a3a";
+    }
+    setTimeout(() => { status.textContent = ""; status.style.color = ""; }, 8000);
 }
 // Generate a UUID.  Cannot use crypto.randomUUID() because that will only run
 // in a secure environment, which is not possible with ratgdo.

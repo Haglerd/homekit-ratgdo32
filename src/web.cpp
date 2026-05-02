@@ -64,6 +64,7 @@ static const char *TAG = "ratgdo-http";
 
 // Forward declare the internal URI handling functions...
 void handle_reset();
+void handle_reconnect_homekit();
 void handle_status();
 void handle_everything();
 void handle_setgdo();
@@ -92,6 +93,7 @@ const std::unordered_map<std::string, std::pair<const HTTPMethod, void (*)()>> b
     {"/status.json", {HTTP_GET, handle_status}},
     {"/reset", {HTTP_POST, handle_reset}},
     {"/reboot", {HTTP_POST, handle_reboot}},
+    {"/reconnectHomeKit", {HTTP_POST, handle_reconnect_homekit}},
     {"/setgdo", {HTTP_POST, handle_setgdo}},
     {"/logout", {HTTP_GET, handle_logout}},
     {"/auth", {HTTP_GET, handle_auth}},
@@ -644,6 +646,26 @@ void handle_reboot()
     delay(500);
     server.stop();
     sync_and_restart();
+    return;
+}
+
+// User-triggered HomeKit recovery — much less disruptive than /reboot
+// when the device is otherwise healthy but the HomeKit hub thinks it's
+// "No Response" (stale HAP TCP, mDNS gone stale, controller cache).
+// Just cycles WiFi; HomeSpan auto-reattaches on link-up.
+//
+// Returns 200 immediately with a short text response. The actual cycle
+// happens after the response is flushed so the client sees the OK and
+// the user gets feedback in the UI before HTTP becomes briefly
+// unreachable. Logged via ESP_LOGW with "via web UI" tag for syslog
+// visibility.
+void handle_reconnect_homekit()
+{
+    const char *resp = "HomeKit reconnect triggered. WiFi will cycle in ~1s; expect a brief HTTP outage.\n";
+    server.client().setNoDelay(true);
+    server.send(200, type_txt, resp);
+    delay(500);
+    homekit_force_reconnect("via web UI /reconnectHomeKit");
     return;
 }
 

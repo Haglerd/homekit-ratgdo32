@@ -47,6 +47,7 @@
     <!-- view selection tabs ------------------------------------------------------------------->
     <div id="tabs-bar" class="tab">
       <button class="tablinks" id="defaultOpen" onclick="openTab(event, 'logTab')">System Log</button>
+      <button class="tablinks" onclick="openTab(event, 'homekitTab')">HomeKit</button>
       <button class="tablinks" onclick="openTab(event, 'statusTab')">Status</button>
       <button class="tablinks" onclick="openTab(event, 'rebootTab')">Reboot Log</button>
       <button class="tablinks" onclick="openTab(event, 'crashTab')">Crash Log</button>
@@ -70,6 +71,16 @@ Loading...
       <p style="margin: 0px;  color: #b8860b">Current server message log...</p>
       <span id="showLogHeader" style="margin: 0px;  color: #b8860b; font-size: 0.6em;"></span>
       <pre id="showlog" style="font-size: 0.6em; margin-top: 0px"></pre>
+    </div>
+    <div id="homekitTab" class="tabcontent">
+      <p style="margin: 0px; color: #b8860b">HomeKit, WiFi, and HomeSpan events only — filtered from the system log.</p>
+      <div style="margin: 0.5em 0;">
+        <input type="button" value="Reconnect HomeKit" onclick="reconnectHomeKit()"
+               title="Cycle WiFi to recover from 'No Response' without rebooting. HomeSpan reattaches automatically." />
+        <span id="reconnectStatus" style="margin-left: 0.8em; font-size: 0.85em;"></span>
+      </div>
+      <span id="homekitLogHeader" style="margin: 0px;  color: #b8860b; font-size: 0.6em;"></span>
+      <pre id="homekitlog" style="font-size: 0.6em; margin-top: 0px"></pre>
     </div>
     <div id="rebootTab" class="tabcontent">
       <p style="margin: 0px; color: darkgoldenrod">Messages logged immediately before last user requested reboot or

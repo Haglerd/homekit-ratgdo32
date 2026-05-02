@@ -972,6 +972,11 @@ void wallPlate_Emulation()
     }
 }
 
+// Forward decl — defined alongside the force-close state machine below.
+// Clears in-flight force-close flags (forceCloseInProgress, forceCloseAttempt,
+// forceCloseGapTimer). Safe to call when no force-close is in flight (no-op).
+static void clear_force_close_state(const char *reason);
+
 void update_door_state(GarageDoorCurrentState current_state)
 {
     static _millis_t start_opening = 0;
@@ -1014,6 +1019,17 @@ void update_door_state(GarageDoorCurrentState current_state)
         {
             ESP_LOGI(TAG, "Door closing, canceling TTC delay timer");
             TTCtimer.detach();
+            // PRIMARY LEAK FIX: TTCtimer is shared between regular TTC
+            // delays AND the force-close press/release timing. When the
+            // door starts physically closing partway through the hold
+            // press, this branch detaches the timer without firing the
+            // pending release callback — the only path that clears
+            // forceCloseInProgress on normal completion. Without this
+            // cleanup, every successful force-close leaks the flag and
+            // every subsequent /setgdo forceClose POST is silently
+            // rejected with "FORCE CLOSE: ignoring request — a sequence
+            // is already in progress" until the next reboot.
+            clear_force_close_state("door=Closing detected during force-close press window");
             // This will force us to send current state to browser, so it reports correct state.
             last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
         }
@@ -1028,6 +1044,12 @@ void update_door_state(GarageDoorCurrentState current_state)
     case GarageDoorCurrentState::CURR_OPEN:
     case GarageDoorCurrentState::CURR_CLOSED:
     case GarageDoorCurrentState::CURR_STOPPED:
+        // Defensive cleanup — if we somehow reach a terminal state
+        // (door physically settled) with the force-close flag still
+        // set (e.g. someone aborted the sequence via wall/remote
+        // before our release callback could fire), clear it now so
+        // the next force-close request isn't rejected.
+        clear_force_close_state("door reached terminal state");
         // If timer that checks door completely opens/closes is active, cancel it.
         if (checkDoorCompleted.active())
         {
@@ -2548,6 +2570,28 @@ static uint32_t forceCloseHoldMsCached = 3500;
 static volatile bool forceCloseInProgress = false;
 constexpr uint32_t FORCE_CLOSE_GAP_MS = 1500;
 static void send_force_close_press();
+
+// Centralized cleanup for in-flight force-close state. Called from:
+//   - update_door_state(CURR_CLOSING) when TTCtimer.detach() kills the
+//     pending release callback. This is the primary leak path: every
+//     successful force-close transitions Open → Closing partway through
+//     the press hold, the state machine cancels TTCtimer, and the
+//     release callback that would normally clear forceCloseInProgress
+//     never fires.
+//   - update_door_state(CURR_OPEN/CURR_CLOSED/CURR_STOPPED) defensively,
+//     so any unanticipated abort path can't permanently poison the flag.
+//
+// Safe to call when no force-close is in flight — early-returns silently.
+// `reason` is logged for diagnostics so we can tell which path triggered
+// the cleanup if it ever fires unexpectedly.
+static void clear_force_close_state(const char *reason)
+{
+    if (!forceCloseInProgress) return;
+    ESP_LOGI(TAG, "FORCE CLOSE: clearing in-progress flag (%s)", reason);
+    forceCloseInProgress = false;
+    forceCloseAttempt = 0;
+    forceCloseGapTimer.detach();
+}
 
 static void send_force_close_release_then_maybe_retry()
 {
