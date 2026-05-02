@@ -136,150 +136,75 @@ jobs:
           mv .pio/build/ratgdo_esp32dev/firmware.elf .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
           mv .pio/build/ratgdo_esp32dev/firmware.md5 .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5
 
-      - name: Attach Bundle - firmware.bin
+      # Attach all 5 firmware artifacts to the GitHub Release in one
+       # batch — single API call, fewer chances to hit rule-eval timeouts.
+      - name: Attach all firmware artifacts to release
         uses: AButler/upload-release-assets@v3.0
         with:
-          files: ".pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          release-tag: ${{ steps.tag.outputs.latestTag }}
-      
-      - name: Upload Release Asset - firmware.bin
-        uses: wow-actions/download-upload@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin
-          dir: docs/firmware/
-          commit_message: "Upload Latest Firmware: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin"
-    
-      - name: Upload firmware.bin
-        uses: actions/upload-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin
-          path: |
-            .pio/build/ratgdo_esp32dev/*.firmware.bin
-
-      - name: Download firmware.bin
-        uses: actions/download-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin
-          path: |
-            docs/firmware/
-
-      - name: Attach Bundle - bootloader.bin
-        uses: AButler/upload-release-assets@v3.0
-        with:
-          files: ".pio/build/ratgdo_esp32dev/*.bootloader.bin"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          release-tag: ${{ steps.tag.outputs.latestTag }}
-        
-      - name: Upload Release Asset - bootloader.bin
-        uses: wow-actions/download-upload@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin
-          dir: docs/firmware/
-          commit_message: "Upload Latest bootloader: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin"
-    
-      - name: Upload bootloader.bin
-        uses: actions/upload-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin
-          path: |
-            .pio/build/ratgdo_esp32dev/*.bootloader.bin
-
-      - name: Download bootloader.bin
-        uses: actions/download-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin
-          path: |
-            docs/firmware/
-
-      - name: Attach Bundle - partitions.bin
-        uses: AButler/upload-release-assets@v3.0
-        with:
-          files: ".pio/build/ratgdo_esp32dev/*.partitions.bin"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          release-tag: ${{ steps.tag.outputs.latestTag }}
-      
-      - name: Upload Release Asset - partitions.bin
-        uses: wow-actions/download-upload@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin
-          dir: docs/firmware/
-          commit_message: "Upload Latest partitions: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin"
-    
-      - name: Upload partitions.bin
-        uses: actions/upload-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin
-          path: |
-            .pio/build/ratgdo_esp32dev/*.partitions.bin
-
-      - name: Download partitions.bin
-        uses: actions/download-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin
-          path: |
-            docs/firmware/
-            
-      - name: Attach Bundle - Firmware.md5
-        uses: AButler/upload-release-assets@v3.0
-        with:
-          files: ".pio/build/ratgdo_esp32dev/*.firmware.md5"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          release-tag: ${{ steps.tag.outputs.latestTag }}
-    
-      - name: Upload Release Asset - firmware.md5
-        uses: wow-actions/download-upload@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5
-          dir: docs/firmware/
-          commit_message: "Upload Latest md5: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5"
-    
-      - name: Upload firmware.md5
-        uses: actions/upload-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5
-          path: |
-            .pio/build/ratgdo_esp32dev/*.firmware.md5
-
-      - name: Download firmware.md5
-        uses: actions/download-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5
-          path: |
-            docs/firmware/
-  
-      - name: Attach Bundle - Firmware.elf
-        uses: AButler/upload-release-assets@v3.0
-        with:
-          files: ".pio/build/ratgdo_esp32dev/*.elf"
+          files: ".pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin;.pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin;.pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin;.pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5;.pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           release-tag: ${{ steps.tag.outputs.latestTag }}
 
-      - name: Upload Release Asset - Firmware.elf
-        uses: wow-actions/download-upload@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          url: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf 
-          dir: docs/firmware/
-          commit_message: "Upload Latest Firmware: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf"
-    
-      - name: Upload Firmware.elf
+      # The previous workflow ran 5 separate `wow-actions/download-upload`
+      # steps (each one a Contents-API commit per binary). Those failed
+      # under branch protection: the Contents API path triggers rule
+      # validation that times out with "Unable to validate Block force
+      # pushes / Restrict deletions" errors even though the commit
+      # itself wouldn't violate any rule. Replaced with one direct
+      # git-push step (same pattern as the manifest.json commit above
+      # which works fine), and bundled into a SINGLE commit so the
+      # release contributes one entry to history instead of 5.
+      - name: Commit firmware bins to docs/firmware/
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Stash the built firmware files before resetting HEAD — the
+          # earlier action-json + manifest-commit steps left
+          # docs/manifest.json modified in-tree, which makes a plain
+          # `git checkout` refuse with "local changes would be
+          # overwritten." -fB force-checkout is safe here because
+          # origin/main already has the same manifest update from the
+          # prior step in this same job.
+          mkdir -p /tmp/fwbins
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf /tmp/fwbins/
+          git fetch origin main
+          # -f discards uncommitted in-tree edits (the manifest.json
+          # bump that's already on origin/main from the earlier step).
+          # Without -f this exited 1 with "local changes would be
+          # overwritten" and continue-on-error swallowed it silently —
+          # which left docs/firmware/ stale by one release on every
+          # build (v18 and v19 both shipped without bins committed).
+          git checkout -fB main origin/main
+          mkdir -p docs/firmware
+          cp /tmp/fwbins/* docs/firmware/
+          git add docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
+          if ! git diff --cached --quiet; then
+            git commit -m "Upload firmware bins for ${{ steps.tag.outputs.latestTag }}"
+            git push origin main
+          else
+            echo "firmware bins already present on main, skipping commit"
+          fi
+        shell: bash
+
+      # Keep the .elf as a workflow artifact for crash backtrace decoding
+      # (addr2line consumers). Not on the release because elf files are
+      # multi-MB and people don't usually want them — they're just
+      # uploaded to docs/firmware/ for advanced debugging.
+      - name: Upload firmware.elf as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
           path: |
             .pio/build/ratgdo_esp32dev/*.elf
-
-      - name: Download Firmware.elf
-        uses: actions/download-artifact@v4
-        with:
-          name: homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
-          path: |
-            docs/firmware/
 
       # Discord webhook notification stripped — fork doesn't have the
       # upstream's DISCORD_WEBHOOK_URL secret. Add back via repo settings
