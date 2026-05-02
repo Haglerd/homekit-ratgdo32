@@ -102,6 +102,21 @@ constexpr char cfg_autoCloseMinutes[] PROGMEM = "autoCloseMinutes";
 constexpr char cfg_autoCloseStartMinutes[] PROGMEM = "autoCloseStartMinutes";
 constexpr char cfg_autoCloseEndMinutes[] PROGMEM = "autoCloseEndMinutes";
 constexpr char cfg_autoCloseIgnoreWindow[] PROGMEM = "autoCloseIgnoreWindow";
+// HomeKit watchdog (fork addition): observes seconds-since-last HAP read
+// and (if enabled) takes recovery action when iOS goes silent past the
+// trigger threshold. Hint thresholds always log into syslog regardless
+// of the enabled flag — they let the user observe real-world idle gaps
+// before opting in to auto-recover.
+//   hkAutoRecover         bool : run mDNS-refresh + WiFi-cycle when stale
+//   hkAutoRecoverSecs     int  : seconds-without-HAP-read trigger
+//   hkHintQuietSecs       int  : level-1 "extended idle" hint threshold
+//   hkHintStaleSecs       int  : level-2 "possibly stale" hint threshold
+//   hkHintLikelyNRSecs    int  : level-3 "likely No Response" hint threshold
+constexpr char cfg_hkAutoRecover[] PROGMEM = "hkAutoRecover";
+constexpr char cfg_hkAutoRecoverSecs[] PROGMEM = "hkAutoRecoverSecs";
+constexpr char cfg_hkHintQuietSecs[] PROGMEM = "hkHintQuietSecs";
+constexpr char cfg_hkHintStaleSecs[] PROGMEM = "hkHintStaleSecs";
+constexpr char cfg_hkHintLikelyNRSecs[] PROGMEM = "hkHintLikelyNRSecs";
 #ifdef ESP8266
 // On ESP8266 we save user config to a file in LittleFS
 constexpr char cfg_configFile[] PROGMEM = "user_config";
@@ -222,6 +237,11 @@ public:
     uint32_t getAutoCloseStartMinutes() { return std::get<int>(get(cfg_autoCloseStartMinutes)); };
     uint32_t getAutoCloseEndMinutes() { return std::get<int>(get(cfg_autoCloseEndMinutes)); };
     bool getAutoCloseIgnoreWindow() { return std::get<bool>(get(cfg_autoCloseIgnoreWindow)); };
+    bool getHKAutoRecover() { return std::get<bool>(get(cfg_hkAutoRecover)); };
+    uint32_t getHKAutoRecoverSecs() { return std::get<int>(get(cfg_hkAutoRecoverSecs)); };
+    uint32_t getHKHintQuietSecs() { return std::get<int>(get(cfg_hkHintQuietSecs)); };
+    uint32_t getHKHintStaleSecs() { return std::get<int>(get(cfg_hkHintStaleSecs)); };
+    uint32_t getHKHintLikelyNRSecs() { return std::get<int>(get(cfg_hkHintLikelyNRSecs)); };
 #ifdef RATGDO32_DISCO
     uint32_t getVehicleThreshold() { return std::get<int>(get(cfg_vehicleThreshold)); };
     bool getLaserEnabled() { return std::get<bool>(get(cfg_laserEnabled)); };
