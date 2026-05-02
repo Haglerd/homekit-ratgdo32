@@ -441,6 +441,42 @@ void connectionCallback(int count)
 // enabled (syslogEn=true), every drop and re-association is now timestamped
 // in the Pi-side log so we can correlate user-visible failures with the
 // underlying network state instead of guessing.
+// Track timestamp (in seconds since boot) of the last time iOS asked us
+// for any characteristic value. If this gets stale (no reads for >5min)
+// while WiFi is healthy, the failure is hub-side — iOS isn't even
+// trying to talk to us. This is THE single best signal for narrowing
+// "No Response" to device-side vs hub-side. Updated by the
+// setGetCharacteristicsCallback hook.
+static volatile uint32_t hapLastReadSec = 0;
+
+static void hap_get_characteristics_cb(const char *paths)
+{
+    hapLastReadSec = (uint32_t)(_millis() / 1000);
+}
+
+// Pair/unpair real-time event. setPairCallback fires on every HomeKit
+// pairing transition, including unexpected unpair-from-iOS — the
+// startup HS_PAIRED status only fires once at boot, so without this
+// we wouldn't notice if a controller dropped the pairing later.
+static void hap_pair_cb(boolean isPaired)
+{
+    ESP_LOGW(TAG, "HomeKit pair state changed: now %s", isPaired ? "paired" : "UNPAIRED");
+}
+
+// Controller list change — fires when a pairing is added/removed or
+// admin status changes. Logs the new count + admin count so timeline
+// shows exactly when paired devices appear/disappear.
+static void hap_controller_change_cb()
+{
+    size_t count = 0;
+    size_t admins = 0;
+    for (auto it = homeSpan.controllerListBegin(); it != homeSpan.controllerListEnd(); ++it) {
+        ++count;
+        if (it->isAdmin()) ++admins;
+    }
+    ESP_LOGI(TAG, "HomeKit controller list changed: %u paired (%u admin)", (unsigned)count, (unsigned)admins);
+}
+
 // Periodic visibility into the live HomeKit / WiFi state. Without this
 // the only way to learn about a stuck/silent HomeSpan was to hit the web
 // UI for /status.json — which fails first when things go wrong. Every
@@ -464,13 +500,20 @@ static void homekit_health_log()
     for (auto it = homeSpan.controllerListBegin(); it != homeSpan.controllerListEnd(); ++it) {
         ++paired_controllers;
     }
-    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu uptime=%llus paired=%s controllers=%u",
+    uint32_t nowSec = (uint32_t)(_millis() / 1000);
+    // If hapLastReadSec is 0 we've never seen a read since boot.
+    // Otherwise log seconds since last read — the smoking gun for
+    // "No Response" diagnosis. If this number keeps growing while WiFi
+    // is connected and paired_controllers > 0, the hub stopped talking.
+    int32_t lastReadAgo = hapLastReadSec ? (int32_t)(nowSec - hapLastReadSec) : -1;
+    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu uptime=%us paired=%s controllers=%u last_hap_read_ago=%ds",
              wifiState,
              rssi,
              (unsigned long)esp_get_free_heap_size(),
-             (uint64_t)(_millis() / 1000),
+             nowSec,
              isPaired ? "yes" : "no",
-             (unsigned)paired_controllers);
+             (unsigned)paired_controllers,
+             lastReadAgo);
 }
 
 void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
@@ -962,6 +1005,15 @@ void setup_homekit()
     homeSpan.setWifiBegin(wifiBegin);
     homeSpan.setConnectionCallback(connectionCallback);
     homeSpan.setStatusCallback(statusCallback);
+    // Real-time HomeKit event visibility (helps diagnose "No Response"):
+    //   setPairCallback           — pair/unpair transitions (incl. unexpected unpair)
+    //   setControllerCallback     — controller list changes (pairings added/removed)
+    //   setGetCharacteristicsCallback — fires when iOS reads any characteristic;
+    //                                used to track "last time iOS talked to us"
+    //                                in the periodic health log.
+    homeSpan.setPairCallback(hap_pair_cb);
+    homeSpan.setControllerCallback(hap_controller_change_cb);
+    homeSpan.setGetCharacteristicsCallback(hap_get_characteristics_cb);
 
     homeSpan.begin(Category::Bridges, device_name, device_name_rfc952, "ratgdo-ESP32");
 
