@@ -174,8 +174,17 @@ static volatile uint32_t doorOpenedAtMillis = 0;
 static volatile bool autoCloseFiredThisCycle = false;
 static Ticker autoCloseTicker = Ticker();
 static void checkAutoClose();  // forward — defined later in file
-// update_auto_close_schedule() prototype lives in comms.h so web.cpp can
-// call it from the /setgdo settings-save path.
+// v23: deferred-reschedule pattern. update_auto_close_schedule() does
+// Ticker.detach() + attach/once_ms — both touch the C++ Ticker wrapper's
+// internal state which is not MT-safe. Two threads were calling it: the
+// /setgdo request handler (web.cpp) and checkAutoClose itself when it
+// crossed a window edge (this file). Now both call sites SET this flag,
+// and a single drain in service_timer_loop (ratgdo.cpp) does the actual
+// (re)schedule from main-loop context. Mirrors the pendingRemove
+// pattern that fixed the SSE crash in v22.
+static volatile bool autoCloseRescheduleRequested = false;
+// update_auto_close_schedule() and request_auto_close_reschedule()
+// prototypes live in comms.h so web.cpp + ratgdo.cpp can call them.
 
 void cancel_builtin_TTC_countdown()
 {
@@ -2613,8 +2622,12 @@ static void send_force_close_release_then_maybe_retry()
     if (!txQueuePush(&pkt_ac))
     {
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release");
-        forceCloseAttempt = 0;
-        forceCloseInProgress = false;
+        // v23: route through the helper so forceCloseGapTimer is also
+        // detached if it had been armed. Was bare flag+attempt clear,
+        // which left a stale gap-timer arming-toward-nothing in the
+        // (rare but possible) case where this path fired after an
+        // earlier press scheduled the gap timer.
+        clear_force_close_state("tx queue full on release");
         return;
     }
     // Sec+1.0 normally sends release twice for reliability — preserve that here too.
@@ -2633,8 +2646,8 @@ static void send_force_close_release_then_maybe_retry()
          garage_door.current_state == GarageDoorCurrentState::CURR_CLOSED))
     {
         ESP_LOGI(TAG, "FORCE CLOSE: door already closing/closed — skipping second press");
-        forceCloseAttempt = 0;
-        forceCloseInProgress = false;
+        // v23: route through helper for full state cleanup (flag + attempt + timer).
+        clear_force_close_state("door already closing/closed after attempt 1");
         return;
     }
 
@@ -2647,8 +2660,8 @@ static void send_force_close_release_then_maybe_retry()
     else
     {
         ESP_LOGI(TAG, "FORCE CLOSE: 2-attempt sequence complete");
-        forceCloseAttempt = 0;
-        forceCloseInProgress = false;
+        // v23: route through helper for full state cleanup.
+        clear_force_close_state("2-attempt sequence complete");
     }
 }
 
@@ -2669,7 +2682,12 @@ static void send_force_close_press()
     if (!txQueuePush(&pkt_ac))
     {
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on press");
-        forceCloseAttempt = 0;
+        // v23: previously only reset forceCloseAttempt — leaked
+        // forceCloseInProgress=true permanently, blocking all subsequent
+        // close commands until the door state changed (which won't
+        // happen if the press was supposed to make it move). Route
+        // through the helper for full cleanup.
+        clear_force_close_state("tx queue full on press");
         return;
     }
 
@@ -2725,7 +2743,17 @@ static bool autoCloseInWindow(uint32_t *outNowMOD)
     uint32_t startMOD = userConfig->getAutoCloseStartMinutes();
     uint32_t endMOD = userConfig->getAutoCloseEndMinutes();
     if (outNowMOD) *outNowMOD = nowMOD;
-    if (startMOD == endMOD) return false;
+    // v23: treat start == end as "always in window" — matches user
+    // intent for "00:00 to 00:00 means all day," and avoids the silent
+    // never-fire trap if a user accidentally fingers the same time
+    // into both fields. Previously returned false here, which combined
+    // with update_auto_close_schedule's logic to schedule a one-shot
+    // for "next start" → fire → in_window=false → schedule again →
+    // forever no-op without any log warning. Always-in-window is
+    // strictly safer (the autoCloseMinutes threshold + door=Open guard
+    // still apply, so it doesn't fire automatically just because the
+    // setting is degenerate).
+    if (startMOD == endMOD) return true;
     if (startMOD < endMOD) return (nowMOD >= startMOD && nowMOD < endMOD);
     return (nowMOD >= startMOD || nowMOD < endMOD);
 }
@@ -2796,6 +2824,29 @@ void update_auto_close_schedule()
     }
 }
 
+// v23: request a re-schedule from any thread. Sets the flag; the
+// actual update_auto_close_schedule() call happens in main-loop
+// context via auto_close_drain_pending_reschedule(). Cheap and safe
+// to call from web request handlers, Ticker callbacks, etc.
+void request_auto_close_reschedule()
+{
+    autoCloseRescheduleRequested = true;
+}
+
+// v23: drain — called every main loop tick from service_timer_loop.
+// If a reschedule was requested since last drain, run the actual
+// scheduler. This serializes Ticker manipulation onto a single thread
+// so the wrapper's internal state can't be corrupted by concurrent
+// detach/attach from request handler vs. tick callback.
+void auto_close_drain_pending_reschedule()
+{
+    if (autoCloseRescheduleRequested)
+    {
+        autoCloseRescheduleRequested = false;
+        update_auto_close_schedule();
+    }
+}
+
 // Auto-close check — only runs while we're scheduled (i.e. autoClose=on
 // AND we're either in window or ignoring the window). Skip-paths are
 // silent — the only logs are state transitions (entering active phase
@@ -2819,9 +2870,18 @@ static void checkAutoClose()
     // by update_auto_close_schedule but we stop firing immediately too.)
     bool ignoreWindow = userConfig->getAutoCloseIgnoreWindow();
     if (!ignoreWindow && !autoCloseInWindow(NULL)) {
-        // Crossed out of the window mid-tick. Re-arm the scheduler so
-        // we sleep until the next window-start instead of ticking.
-        update_auto_close_schedule();
+        // v23: only re-schedule if NTP is actually synced. Without a
+        // real wallclock the scheduler falls back to a 60s tick anyway,
+        // so re-arming on every NTP-loss tick would just spam logs and
+        // recursively detach/attach the same Ticker each minute.
+        time_t now = time(NULL);
+        if (now >= 1000000000) {
+            // v23: route through the deferred-flag drain instead of
+            // calling update_auto_close_schedule() directly from this
+            // Ticker context. Avoids a race with web.cpp's settings-save
+            // path also touching the Ticker.
+            request_auto_close_reschedule();
+        }
         return;
     }
 

@@ -527,7 +527,16 @@ void homekit_refresh_watchdog_config()
     hkCfgQuietSecs    = userConfig->getHKHintQuietSecs();
     hkCfgStaleSecs    = userConfig->getHKHintStaleSecs();
     hkCfgLikelyNRSecs = userConfig->getHKHintLikelyNRSecs();
-    ESP_LOGI(TAG, "HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u",
+    // v23: reset hint-level + recovery-attempts state when thresholds
+    // change. Both are only meaningful relative to the active thresholds.
+    // Without these resets, lowering the trigger threshold mid-episode
+    // would skip the cheap mDNS-refresh attempt (recovery counter still
+    // says "1 attempt already used"), and toggling the watchdog off→on
+    // would carry over a stale level/counter from before. Wipe the
+    // slate so each settings change is a fresh start.
+    hkLastHintLevel   = 0;
+    hkRecoverAttempts = 0;
+    ESP_LOGI(TAG, "HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u (state reset)",
              (int)hkCfgEnabled, (unsigned)hkCfgRecoverSecs,
              (unsigned)hkCfgQuietSecs, (unsigned)hkCfgStaleSecs, (unsigned)hkCfgLikelyNRSecs);
 }

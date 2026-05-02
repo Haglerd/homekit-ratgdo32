@@ -35,8 +35,16 @@ extern void door_command_force_close(uint32_t hold_ms);
 // re-arms based on userConfig (off → nothing scheduled; ignoreWindow=on
 // → 60s tick; window mode in-window → 60s tick; window mode out-of-
 // window → one-shot until next window-start). Called from comms_setup
-// at boot and from the web /setgdo settings save path.
+// at boot (single-threaded) and from auto_close_drain_pending_reschedule
+// (main loop). Other call sites must use request_auto_close_reschedule
+// instead — see below.
 extern void update_auto_close_schedule();
+// v23: deferred-reschedule pattern. Web request handlers and Ticker
+// callbacks set the flag; the main loop drains it and invokes
+// update_auto_close_schedule() in single-threaded context, so the
+// Ticker's internal state can't be raced.
+extern void request_auto_close_reschedule();
+extern void auto_close_drain_pending_reschedule();
 #if defined(ESP8266) || !defined(USE_GDOLIB)
 extern GarageDoorCurrentState toggle_door(bool bypass_ttc = false);
 #endif

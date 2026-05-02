@@ -424,6 +424,10 @@ void service_timer_loop()
     // would call Ticker.detach() on its own running Ticker → vTaskDelete →
     // uxListRemove panic.
     process_sse_pending_removes();
+    // v23: drain pending auto-close reschedule requests in single-
+    // threaded context, so concurrent /setgdo handler + Ticker callback
+    // can't both manipulate autoCloseTicker's internal state at once.
+    auto_close_drain_pending_reschedule();
 
     // Check heap
     static _millis_t last_heap_check = 0;
