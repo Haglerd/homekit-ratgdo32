@@ -94,23 +94,21 @@ async function loadLogs() {
                 loadLogPages();
             };
             evtSource.addEventListener("logger", (event) => {
-                let divElem = document.getElementById("logTab");
-                let scroll = (divElem.scrollHeight - divElem.scrollTop - divElem.clientHeight) < 10;
-                document.getElementById("showlog").insertAdjacentText('beforeend', event.data + "\n");
-                if (!sysLogLoaded) tmpLogMsgs.push(event.data);
-                // Only scroll the page if we are already at bottom of the page
-                if (scroll) divElem.scrollTop = divElem.scrollHeight;
-
-                // Mirror HomeKit / WiFi / HomeSpan events into the HomeKit
-                // tab so they're visible without scrolling through the
-                // full system log noise. Match by tag substring — anything
-                // logged from ratgdo-homekit, anything mentioning "WiFi"
-                // or "HomeSpan" or "HomeKit reconnect" etc.
+                // v22: HomeKit lines are EXCLUSIVE to the HomeKit tab —
+                // they no longer also clutter the system log. If a line
+                // matches isHomeKitLine() it goes ONLY to the HomeKit
+                // pre, otherwise it goes ONLY to the system log pre.
                 if (isHomeKitLine(event.data)) {
                     let hkPane = document.getElementById("homekitTab");
                     let hkScroll = (hkPane.scrollHeight - hkPane.scrollTop - hkPane.clientHeight) < 10;
                     document.getElementById("homekitlog").insertAdjacentText('beforeend', event.data + "\n");
                     if (hkScroll) hkPane.scrollTop = hkPane.scrollHeight;
+                } else {
+                    let divElem = document.getElementById("logTab");
+                    let scroll = (divElem.scrollHeight - divElem.scrollTop - divElem.clientHeight) < 10;
+                    document.getElementById("showlog").insertAdjacentText('beforeend', event.data + "\n");
+                    if (!sysLogLoaded) tmpLogMsgs.push(event.data);
+                    if (scroll) divElem.scrollTop = divElem.scrollHeight;
                 }
             });
             evtSource.addEventListener("error", (event) => {
@@ -144,14 +142,18 @@ async function loadLogPages() {
                     console.log(`Remove dup: ${line}`);
                     text = text.replace(line + '\n', '');
                 }
-                document.getElementById("showlog").insertAdjacentText('afterbegin', text);
+                // v22: split the buffered showlog into HomeKit lines vs
+                // system lines and seed each tab with ONLY its own
+                // content. Mirror behaviour of the live SSE handler so
+                // homekit lines never appear in the system log.
+                const lines = text.split('\n');
+                const hkLines = lines.filter(isHomeKitLine);
+                const sysLines = lines.filter(l => !isHomeKitLine(l));
+                document.getElementById("showlog").insertAdjacentText('afterbegin', sysLines.join('\n'));
                 let divElem = document.getElementById("logTab");
-                // Scroll to the bottom
                 divElem.scrollTop = divElem.scrollHeight;
-                // Seed the HomeKit tab from the same buffered text.
-                const hkText = text.split('\n').filter(isHomeKitLine).join('\n');
-                if (hkText.length > 0) {
-                    document.getElementById("homekitlog").insertAdjacentText('afterbegin', hkText + '\n');
+                if (hkLines.length > 0) {
+                    document.getElementById("homekitlog").insertAdjacentText('afterbegin', hkLines.join('\n') + '\n');
                     let hkPane = document.getElementById("homekitTab");
                     hkPane.scrollTop = hkPane.scrollHeight;
                 }
