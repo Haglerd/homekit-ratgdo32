@@ -418,6 +418,13 @@ void service_timer_loop()
         }
     }
 
+    // v22: drain any SSE subscriptions flagged for deferred remove from
+    // inside a Ticker callback. Cheap when nothing is pending — just an
+    // 8-slot array scan. Fixes the v21-and-earlier crash where SSEheartbeat
+    // would call Ticker.detach() on its own running Ticker → vTaskDelete →
+    // uxListRemove panic.
+    process_sse_pending_removes();
+
     // Check heap
     static _millis_t last_heap_check = 0;
     if (current_millis - last_heap_check >= FREE_HEAP_CHECK_MS)

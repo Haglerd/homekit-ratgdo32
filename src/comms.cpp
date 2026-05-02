@@ -174,6 +174,8 @@ static volatile uint32_t doorOpenedAtMillis = 0;
 static volatile bool autoCloseFiredThisCycle = false;
 static Ticker autoCloseTicker = Ticker();
 static void checkAutoClose();  // forward — defined later in file
+// update_auto_close_schedule() prototype lives in comms.h so web.cpp can
+// call it from the /setgdo settings-save path.
 
 void cancel_builtin_TTC_countdown()
 {
@@ -790,12 +792,12 @@ void setup_comms()
     ESP_LOGI(TAG, "Door close history (%d): %lums, %lums, %lums, %lums, %lums, %lums; Median: %dsecs", closeHistory.count,
              closeHistory(1), closeHistory(2), closeHistory(3), closeHistory(4), closeHistory(5), closeHistory(6), garage_door.closeDuration);
 
-    // Start the auto-close periodic check. The check itself is a no-op
-    // when userConfig->autoClose is false, so attaching it unconditionally
-    // is fine — the user just toggles autoClose to enable it.
-    autoCloseTicker.detach();
-    autoCloseTicker.attach_ms(60 * 1000, checkAutoClose);
-    ESP_LOGI(TAG, "AUTO-CLOSE: periodic check started (60s interval; gated by userConfig->autoClose)");
+    // v22: window-aware scheduler instead of unconditional 60s tick.
+    // When autoClose is OFF, no ticker is attached. When ON with
+    // ignoreWindow=true, a recurring 60s tick runs. When ON with a time
+    // window, a one-shot timer sleeps until the window opens, then a
+    // 60s tick runs through the window, then we re-arm the one-shot.
+    update_auto_close_schedule();
 
     comms_setup_done = true;
 }
@@ -2706,91 +2708,129 @@ void door_command_force_close(uint32_t hold_ms)
     send_force_close_press();
 }
 
-// Auto-close check — runs every minute via autoCloseTicker. Fires
-// door_command_force_close if user has enabled autoClose, the door has
-// been Open longer than autoCloseMinutes, AND either ignoreWindow is
-// set OR the current local minute-of-day is in
-// [autoCloseStartMinutes, autoCloseEndMinutes). Window wraps midnight
-// when start > end. One-shot per Open cycle (autoCloseFiredThisCycle
-// resets when door state leaves Open).
+// Compute whether wallclock NOW is inside the configured auto-close
+// window. Sets *outNowMOD to the current minute-of-day (or 0 if NTP
+// not synced). Returns false if NTP is not synced (caller should warn
+// + skip the window check rather than firing).
+static bool autoCloseInWindow(uint32_t *outNowMOD)
+{
+    time_t now = time(NULL);
+    if (now < 1000000000) {
+        if (outNowMOD) *outNowMOD = 0;
+        return false;
+    }
+    struct tm lt;
+    localtime_r(&now, &lt);
+    uint32_t nowMOD = (uint32_t)lt.tm_hour * 60 + (uint32_t)lt.tm_min;
+    uint32_t startMOD = userConfig->getAutoCloseStartMinutes();
+    uint32_t endMOD = userConfig->getAutoCloseEndMinutes();
+    if (outNowMOD) *outNowMOD = nowMOD;
+    if (startMOD == endMOD) return false;
+    if (startMOD < endMOD) return (nowMOD >= startMOD && nowMOD < endMOD);
+    return (nowMOD >= startMOD || nowMOD < endMOD);
+}
+
+// Compute seconds from NOW until the next window-start edge. Used by
+// the one-shot scheduler to sleep through the inactive period instead
+// of waking every 60s. Caps at 24h - 1s to avoid Ticker overflow on
+// long sleeps. Assumes NTP is synced (caller checks).
+static uint32_t autoCloseSecsUntilNextStart()
+{
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    uint32_t nowSecOfDay = (uint32_t)lt.tm_hour * 3600 + (uint32_t)lt.tm_min * 60 + (uint32_t)lt.tm_sec;
+    uint32_t startMOD = userConfig->getAutoCloseStartMinutes();
+    uint32_t startSecOfDay = startMOD * 60;
+    uint32_t delta;
+    if (startSecOfDay > nowSecOfDay) {
+        delta = startSecOfDay - nowSecOfDay;
+    } else {
+        // Window-start has already passed today; next start is tomorrow.
+        delta = (24U * 3600U) - nowSecOfDay + startSecOfDay;
+    }
+    if (delta < 30U) delta = 30U;          // never sleep less than 30s
+    if (delta > 23U * 3600U) delta = 23U * 3600U; // cap at <24h
+    return delta;
+}
+
+// v22 scheduler entry. Called at boot and whenever the user saves
+// auto-close settings (web.cpp setting-save path). Detaches whatever
+// is currently scheduled and re-arms based on the current config:
+//   * autoClose=off            → nothing scheduled, nothing fires
+//   * autoClose=on, ignoreWindow=on → 60s recurring tick
+//   * autoClose=on, ignoreWindow=off, in window → 60s recurring tick
+//   * autoClose=on, ignoreWindow=off, outside window → one-shot timer
+//     to next window-start edge, which then re-calls this scheduler
+void update_auto_close_schedule()
+{
+    autoCloseTicker.detach();
+    if (!userConfig->getAutoClose()) {
+        ESP_LOGI(TAG, "AUTO-CLOSE: disabled, no schedule");
+        return;
+    }
+    if (userConfig->getAutoCloseIgnoreWindow()) {
+        autoCloseTicker.attach_ms(60U * 1000U, checkAutoClose);
+        ESP_LOGI(TAG, "AUTO-CLOSE: ignoreWindow=on — 60s recurring tick scheduled");
+        return;
+    }
+    // Window mode. NTP required; without it we can't know "outside the window."
+    time_t now = time(NULL);
+    if (now < 1000000000) {
+        ESP_LOGW(TAG, "AUTO-CLOSE: window mode enabled but NTP not synced. "
+                      "Falling back to 60s tick — firing will be skipped until NTP syncs. "
+                      "Either enable NTP in settings, or tick 'Ignore time window'.");
+        autoCloseTicker.attach_ms(60U * 1000U, checkAutoClose);
+        return;
+    }
+    uint32_t nowMOD = 0;
+    if (autoCloseInWindow(&nowMOD)) {
+        autoCloseTicker.attach_ms(60U * 1000U, checkAutoClose);
+        ESP_LOGI(TAG, "AUTO-CLOSE: in window (now=%02u:%02u) — 60s recurring tick scheduled",
+                 nowMOD / 60, nowMOD % 60);
+    } else {
+        uint32_t secs = autoCloseSecsUntilNextStart();
+        autoCloseTicker.once_ms((uint32_t)(secs * 1000U), update_auto_close_schedule);
+        ESP_LOGI(TAG, "AUTO-CLOSE: outside window (now=%02u:%02u) — sleeping %us until window-start, then will re-schedule",
+                 nowMOD / 60, nowMOD % 60, secs);
+    }
+}
+
+// Auto-close check — only runs while we're scheduled (i.e. autoClose=on
+// AND we're either in window or ignoring the window). Skip-paths are
+// silent — the only logs are state transitions (entering active phase
+// when the door first opens) and the actual firing event.
 static void checkAutoClose()
 {
-    static uint32_t tickCount = 0;
-    tickCount++;
-
-    bool enabled = userConfig->getAutoClose();
     bool isOpen = (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN);
-    bool ignoreWindow = userConfig->getAutoCloseIgnoreWindow();
+    if (!isOpen) return;                 // door not Open — nothing to do, silent
+    if (autoCloseFiredThisCycle) return; // already fired this Open cycle, silent
+
     uint32_t nowMillis = millis();
-
-    if (!enabled) {
-        ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — disabled, skipping", tickCount);
-        return;
-    }
-    if (!isOpen) {
-        ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — door not Open (state=%d), skipping",
-                 tickCount, (int)garage_door.current_state);
-        return;
-    }
-    if (autoCloseFiredThisCycle) {
-        ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — already fired this cycle, waiting for door to leave Open", tickCount);
-        return;
-    }
-
-    // Bootstrap: if the door was already Open at boot/enable, the state-change
-    // hook never set doorOpenedAtMillis. Anchor it now so the countdown starts.
     if (doorOpenedAtMillis == 0) {
+        // Bootstrap: door was already Open at boot/enable; anchor the timer.
         doorOpenedAtMillis = nowMillis;
-        ESP_LOGI(TAG, "AUTO-CLOSE: bootstrapping doorOpenedAtMillis=%u (door already Open at first check)", nowMillis);
+        ESP_LOGI(TAG, "AUTO-CLOSE: bootstrapping doorOpenedAtMillis=%u (door already Open at first tick)", nowMillis);
+    }
+
+    // Re-check the window on every tick — the 60s recurring tick runs
+    // through the window and we need to stop firing when we cross the
+    // closing edge. (The one-shot exit-of-window re-schedule is driven
+    // by update_auto_close_schedule but we stop firing immediately too.)
+    bool ignoreWindow = userConfig->getAutoCloseIgnoreWindow();
+    if (!ignoreWindow && !autoCloseInWindow(NULL)) {
+        // Crossed out of the window mid-tick. Re-arm the scheduler so
+        // we sleep until the next window-start instead of ticking.
+        update_auto_close_schedule();
+        return;
     }
 
     uint32_t openMinutes = (nowMillis - doorOpenedAtMillis) / 60000U;
     uint32_t minMinutes = userConfig->getAutoCloseMinutes();
+    if (openMinutes < minMinutes) return; // not yet — silent
 
-    // Window check requires wallclock (NTP). If user set ignoreWindow we
-    // skip this entirely and rely solely on uptime-based elapsed time —
-    // works without NTP.
-    bool inWindow;
-    uint32_t nowMOD = 0, startMOD = 0, endMOD = 0;
-    bool sntpOk = false;
-    if (ignoreWindow) {
-        inWindow = true;
-    } else {
-        time_t now = time(NULL);
-        sntpOk = (now >= 1000000000);
-        if (!sntpOk) {
-            ESP_LOGW(TAG, "AUTO-CLOSE: tick #%u — time window enabled but NTP not synced; firmware can't tell what time it is. "
-                          "Either enable NTP in settings, or tick 'Ignore time window' to fire after %u minutes regardless of clock.",
-                     tickCount, minMinutes);
-            return;
-        }
-        struct tm localTime;
-        localtime_r(&now, &localTime);
-        nowMOD = (uint32_t)localTime.tm_hour * 60 + (uint32_t)localTime.tm_min;
-        startMOD = userConfig->getAutoCloseStartMinutes();
-        endMOD = userConfig->getAutoCloseEndMinutes();
-        if (startMOD == endMOD) inWindow = false;
-        else if (startMOD < endMOD) inWindow = (nowMOD >= startMOD && nowMOD < endMOD);
-        else inWindow = (nowMOD >= startMOD || nowMOD < endMOD);
-    }
-
-    if (openMinutes < minMinutes || !inWindow) {
-        if (ignoreWindow) {
-            ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — waiting (ignoreWindow=on, openMinutes=%u/%u)",
-                     tickCount, openMinutes, minMinutes);
-        } else {
-            ESP_LOGI(TAG, "AUTO-CLOSE: tick #%u — waiting: openMinutes=%u/%u, now=%02u:%02u, window=[%02u:%02u..%02u:%02u), inWindow=%d",
-                     tickCount, openMinutes, minMinutes,
-                     nowMOD / 60, nowMOD % 60,
-                     startMOD / 60, startMOD % 60,
-                     endMOD / 60, endMOD % 60,
-                     (int)inWindow);
-        }
-        return;
-    }
-
-    ESP_LOGW(TAG, "AUTO-CLOSE: tick #%u — door open %u min (>= %u) %s — firing force-close",
-             tickCount, openMinutes, minMinutes,
+    ESP_LOGW(TAG, "AUTO-CLOSE: door open %u min (>= %u) %s — firing force-close",
+             openMinutes, minMinutes,
              ignoreWindow ? "(ignoreWindow=on)" : "and in time window");
     autoCloseFiredThisCycle = true;
     door_command_force_close(3500);

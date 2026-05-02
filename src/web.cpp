@@ -195,6 +195,13 @@ struct SSESubscription
     int SSEfailCount;
     String clientUUID;
     bool logViewer;
+    // v22: deferred-cleanup flag to break the heartbeatTimer self-detach
+    // crash. SSEheartbeat() runs IN the Ticker callback context — calling
+    // heartbeatTimer.detach() from there ends up in vTaskDelete on the
+    // Ticker's own task, which corrupts the FreeRTOS task list and
+    // panics in uxListRemove. Instead we set this flag and let
+    // service_timer_loop() (main loop context) do the actual remove.
+    volatile bool pendingRemove;
 };
 SSESubscription subscription[SSE_MAX_CHANNELS];
 // During firmware update note which subscribed client is updating
@@ -1080,7 +1087,13 @@ void handle_status()
     }
     else
     {
-        ESP_LOGI(TAG, "JSON status: %d (%d%%), build time %lums, response time: %lums", strlen(json), strlen(json) * 100 / STATUS_JSON_BUFFER_SIZE, build_time, response_time);
+        // Demoted from INFO → DEBUG in v22. The Homebridge plugin polls
+        // /status.json every 3s by default to drive the GarageDoorOpener
+        // tile + Obstruction/Motion sensors, so this line was firing ~20
+        // times/min and burying every other log message. The 95%-buffer
+        // WARNING above still fires at WARN level — that's the actionable
+        // signal. To see these again, set log level to DEBUG in settings.
+        ESP_LOGD(TAG, "JSON status: %d (%d%%), build time %lums, response time: %lums", strlen(json), strlen(json) * 100 / STATUS_JSON_BUFFER_SIZE, build_time, response_time);
     }
     GIVE_MUTEX();
     return;
@@ -1383,6 +1396,12 @@ void handle_setgdo()
     {
         userConfig->set(cfg_wifiChanged, wifiChanged);
         ESP8266_SAVE_CONFIG();
+        // v22 hooks — after settings save, re-arm anything that caches
+        // a config value at boot. Cheap (refreshing a handful of static
+        // vars / detaching+attaching a Ticker) and only runs when the
+        // user actually changes settings.
+        homekit_refresh_watchdog_config();
+        update_auto_close_schedule();
     }
     if (reboot)
     {
@@ -1410,6 +1429,23 @@ void removeSSEsubscription(SSESubscription *s)
     s->clientIP = INADDR_NONE;
     s->clientUUID.clear();
     s->SSEconnected = false;
+    s->pendingRemove = false;
+}
+
+// v22: drain SSESubscription entries flagged pendingRemove during a
+// Ticker callback (where calling Ticker.detach() on the still-running
+// Ticker would crash in vTaskDelete → uxListRemove). Called every main
+// loop tick from service_timer_loop in ratgdo.cpp. Cheap when nothing
+// is pending — just an array scan.
+void process_sse_pending_removes()
+{
+    for (uint32_t i = 0; i < SSE_MAX_CHANNELS; i++)
+    {
+        if (subscription[i].pendingRemove)
+        {
+            removeSSEsubscription(&subscription[i]);
+        }
+    }
 }
 
 void SSEheartbeat(SSESubscription *s)
@@ -1424,10 +1460,11 @@ void SSEheartbeat(SSESubscription *s)
     {
         if (s->SSEfailCount++ >= 5)
         {
-            // 5 heartbeats have failed... assume client will not connect
-            // and free up the slot
-            ESP_LOGD(TAG, "Client %s (%s) >5 heartbeat fails, remove SSE subscription", s->clientIP.toString().c_str(), s->clientUUID.c_str());
-            removeSSEsubscription(s);
+            // v22: defer the remove to main-loop context — calling
+            // removeSSEsubscription here would Ticker.detach() the very
+            // Ticker that's running this callback, crashing in uxListRemove.
+            ESP_LOGD(TAG, "Client %s (%s) >5 heartbeat fails, marking for deferred remove", s->clientIP.toString().c_str(), s->clientUUID.c_str());
+            s->pendingRemove = true;
         }
         else
         {
@@ -1477,8 +1514,9 @@ void SSEheartbeat(SSESubscription *s)
     }
     else
     {
-        ESP_LOGD(TAG, "Client %s (%s) not listening (heartbeat), remove SSE subscription", s->clientIP.toString().c_str(), s->clientUUID.c_str());
-        removeSSEsubscription(s);
+        // v22: defer to main-loop context (see SSEheartbeat top comment).
+        ESP_LOGD(TAG, "Client %s (%s) not listening (heartbeat), marking for deferred remove", s->clientIP.toString().c_str(), s->clientUUID.c_str());
+        s->pendingRemove = true;
         YIELD();
     }
 }
