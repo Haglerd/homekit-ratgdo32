@@ -67,6 +67,12 @@ extern bool enable_service_homekit_motion_sensor(bool enable);
 
 extern void homekit_unpair();
 extern bool homekit_is_paired();
+// Cycle WiFi to recover from "No Response" — HomeSpan auto-reattaches.
+extern void homekit_force_reconnect(const char *reason);
+// Re-advertise mDNS without cycling WiFi (lighter-touch recovery).
+extern void homekit_refresh_mdns(const char *reason);
+// Dump HomeSpan's CLI diagnostic output (status + accessory DB + diag) to log.
+extern void homekit_dump_state(const char *reason);
 
 extern char ipv6_addresses[];
 
