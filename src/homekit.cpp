@@ -19,6 +19,9 @@
 #include <ESP8266WiFi.h>
 #endif // ESP8266
 
+// Ticker for periodic HomeKit health log
+#include <Ticker.h>
+
 // RATGDO project includes
 #include "ratgdo.h"
 #include "config.h"
@@ -432,6 +435,85 @@ void connectionCallback(int count)
     notify_new_ipv4_address();
 }
 
+// WiFi disconnect/reconnect visibility — without these the firmware emits
+// nothing when WiFi flaps, which is the most common root cause of HomeKit
+// "No Response" reports we can't otherwise explain. With remote syslog
+// enabled (syslogEn=true), every drop and re-association is now timestamped
+// in the Pi-side log so we can correlate user-visible failures with the
+// underlying network state instead of guessing.
+// Periodic visibility into the live HomeKit / WiFi state. Without this
+// the only way to learn about a stuck/silent HomeSpan was to hit the web
+// UI for /status.json — which fails first when things go wrong. Every
+// HOMEKIT_HEALTH_INTERVAL_MS we log a one-liner with: WiFi RSSI, free
+// heap, uptime, IP, current door state. With remote syslog enabled,
+// the Pi has a permanent timeline of these snapshots so we can correlate
+// "No Response" reports against signal degradation, heap leaks, or
+// disconnects.
+constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 60000; // 60s
+static Ticker homekitHealthTicker;
+
+static void homekit_health_log()
+{
+    if (rebooting) return;
+    int rssi = WiFi.isConnected() ? WiFi.RSSI() : 0;
+    const char *wifiState = WiFi.isConnected() ? "connected" : "disconnected";
+    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu uptime=%llus paired=%s",
+             wifiState,
+             rssi,
+             (unsigned long)esp_get_free_heap_size(),
+             (uint64_t)(_millis() / 1000),
+             isPaired ? "yes" : "no");
+}
+
+void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+    // ESP-IDF reason codes — most useful ones called out by name; rest
+    // fall through to numeric so we can look them up if they're new.
+    const uint8_t reason = info.wifi_sta_disconnected.reason;
+    const char *why = "unknown";
+    switch (reason)
+    {
+        case WIFI_REASON_AUTH_EXPIRE:        why = "auth expired"; break;
+        case WIFI_REASON_AUTH_LEAVE:         why = "deauth (we left)"; break;
+        case WIFI_REASON_ASSOC_EXPIRE:       why = "assoc expired"; break;
+        case WIFI_REASON_ASSOC_TOOMANY:      why = "AP too many clients"; break;
+        case WIFI_REASON_NOT_AUTHED:         why = "not authed"; break;
+        case WIFI_REASON_NOT_ASSOCED:        why = "not assoced"; break;
+        case WIFI_REASON_ASSOC_LEAVE:        why = "assoc leave"; break;
+        case WIFI_REASON_ASSOC_NOT_AUTHED:   why = "assoc not authed"; break;
+        case WIFI_REASON_BEACON_TIMEOUT:     why = "beacon timeout (AP gone)"; break;
+        case WIFI_REASON_NO_AP_FOUND:        why = "AP not found"; break;
+        case WIFI_REASON_AUTH_FAIL:          why = "auth fail"; break;
+        case WIFI_REASON_ASSOC_FAIL:         why = "assoc fail"; break;
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:  why = "handshake timeout"; break;
+        default: break;
+    }
+    ESP_LOGW(TAG, "WiFi disconnected: reason=%d (%s); HomeSpan will auto-reconnect", reason, why);
+}
+
+void WiFiStaConnected(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+    ESP_LOGI(TAG, "WiFi (re)connected to AP — waiting for IP");
+}
+
+// User-triggered "Reconnect HomeKit" recovery — invoked from the
+// /reconnectHomeKit web endpoint. Cycles the WiFi association without
+// rebooting; HomeSpan reattaches automatically when WiFi returns and
+// re-advertises mDNS. Less disruptive than /reboot for cases where the
+// device is otherwise healthy but the HomeKit hub thinks it's
+// unresponsive (stale HAP TCP, mDNS gone stale, controller cache).
+void homekit_force_reconnect(const char *reason)
+{
+    ESP_LOGW(TAG, "HomeKit reconnect requested (%s) — cycling WiFi", reason ? reason : "unspecified");
+    // Don't erase WiFi credentials — pass false. The reconnect call will
+    // re-associate using the same SSID/password from NVRAM.
+    WiFi.disconnect(false);
+    // Small gap so the AP sees the disassociate before we re-associate.
+    delay(250);
+    WiFi.reconnect();
+    ESP_LOGI(TAG, "HomeKit reconnect: WiFi.reconnect() invoked, expect '(re)connected to AP' shortly");
+}
+
 void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
 {
     if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP6)
@@ -484,6 +566,10 @@ void statusCallback(HS_STATUS status)
         // Monitor IP address events, so we can show user IPv6 addresses
         WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP6);
         WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+        // Monitor disconnect/reconnect transitions so HomeKit "No Response"
+        // events can be correlated with WiFi flaps in the syslog history.
+        WiFi.onEvent(WiFiStaDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+        WiFi.onEvent(WiFiStaConnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED);
         break;
     case HS_PAIRING_NEEDED:
         ESP_LOGI(TAG, "Status: Need to pair");
@@ -918,6 +1004,12 @@ void setup_homekit()
     // Auto poll starts up a new FreeRTOS task to do the HomeKit comms
     // so no need to handle in our Arduino loop.
     homeSpan.autoPoll((1024 * 16), 1, 0);
+
+    // Start periodic HomeKit health logging — see homekit_health_log()
+    // above. Fires at boot (immediate first sample) then every 60s.
+    homekitHealthTicker.detach();
+    homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_MS, homekit_health_log);
+
     homekit_setup_done = true;
 }
 

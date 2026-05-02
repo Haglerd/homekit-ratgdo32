@@ -67,6 +67,8 @@ extern bool enable_service_homekit_motion_sensor(bool enable);
 
 extern void homekit_unpair();
 extern bool homekit_is_paired();
+// Cycle WiFi to recover from "No Response" — HomeSpan auto-reattaches.
+extern void homekit_force_reconnect(const char *reason);
 
 extern char ipv6_addresses[];
 
