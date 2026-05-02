@@ -488,6 +488,16 @@ static void hap_controller_change_cb()
 constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 60000; // 60s
 static Ticker homekitHealthTicker;
 
+// Self-healing watchdog config. Defaults are conservative — healthy
+// HomeKit polls every 30-90s, so 300s (5 min) without any iOS read
+// strongly indicates the hub thinks we're unresponsive ('No Response').
+//   HK_AUTO_RECOVER_SECS  — threshold before triggering first recovery
+//   HK_AUTO_RECOVER_MAX   — max recovery attempts before giving up
+//                           (resets to 0 every time iOS reads again)
+constexpr uint32_t HK_AUTO_RECOVER_SECS = 300;
+constexpr uint8_t  HK_AUTO_RECOVER_MAX  = 2;
+static uint8_t     hkRecoverAttempts    = 0;
+
 static void homekit_health_log()
 {
     if (rebooting) return;
@@ -514,6 +524,48 @@ static void homekit_health_log()
              isPaired ? "yes" : "no",
              (unsigned)paired_controllers,
              lastReadAgo);
+
+    // Self-healing watchdog. Trigger only when:
+    //   * we've seen a HAP read at least once (lastReadAgo > 0) — so
+    //     we don't fire on a brand-new boot with no controllers paired
+    //   * iOS has been quiet longer than the recovery threshold
+    //   * WiFi is up and we have at least one paired controller
+    //   * we haven't already exhausted recovery attempts this episode
+    // Recovery escalation: mDNS refresh first (cheapest, ~1s, no
+    // outage), then WiFi reconnect (heavier, ~3-5s outage). After
+    // HK_AUTO_RECOVER_MAX attempts we stop and wait for a HAP read
+    // (which resets the counter) — no auto-reboot, that's too
+    // disruptive for a daemon to do on its own.
+    if (lastReadAgo > (int32_t)HK_AUTO_RECOVER_SECS &&
+        WiFi.isConnected() &&
+        paired_controllers > 0)
+    {
+        if (hkRecoverAttempts == 0)
+        {
+            ESP_LOGW(TAG, "HomeKit auto-recover (1/2): no HAP read in %ds, refreshing mDNS", lastReadAgo);
+            homekit_refresh_mdns("auto-recover: no HAP read in threshold window");
+            hkRecoverAttempts = 1;
+        }
+        else if (hkRecoverAttempts == 1)
+        {
+            ESP_LOGW(TAG, "HomeKit auto-recover (2/2): mDNS refresh didn't help, cycling WiFi", lastReadAgo);
+            homekit_force_reconnect("auto-recover: mDNS refresh insufficient");
+            hkRecoverAttempts = 2;
+        }
+        else
+        {
+            // Already tried both. Don't escalate further automatically.
+            // User can still press Reboot in the web UI / HomeKit if needed.
+            ESP_LOGW(TAG, "HomeKit auto-recover: still no HAP read after %d attempts; giving up automatic recovery (user reboot may be required)", hkRecoverAttempts);
+        }
+    }
+    else if (lastReadAgo >= 0 && lastReadAgo < 60 && hkRecoverAttempts > 0)
+    {
+        // iOS started reading again — clear the counter so a future
+        // outage gets a fresh budget of recovery attempts.
+        ESP_LOGI(TAG, "HomeKit auto-recover: HAP reads resumed (last_hap_read_ago=%ds), clearing recovery counter", lastReadAgo);
+        hkRecoverAttempts = 0;
+    }
 }
 
 void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
