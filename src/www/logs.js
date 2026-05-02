@@ -246,10 +246,29 @@ async function reconnectHomeKit() {
             status.style.color = "#a33";
         }
     } catch (e) {
-        // The cycle will brieflyDrop our HTTP — the request may error;
+        // The cycle will briefly drop our HTTP — the request may error;
         // that's expected. Don't treat a network drop as failure.
         status.textContent = "Sent (HTTP dropped during reconnect — expected).";
         status.style.color = "#3a7a3a";
+    }
+    setTimeout(() => { status.textContent = ""; status.style.color = ""; }, 8000);
+}
+
+async function refreshHomeKitMDNS() {
+    const status = document.getElementById("reconnectStatus");
+    status.textContent = "Sending…";
+    try {
+        const res = await fetch("refreshHomeKitMDNS", { method: "POST" });
+        if (res.ok) {
+            status.textContent = "OK — mDNS re-advertised. Check Home app in a few seconds.";
+            status.style.color = "#3a7a3a";
+        } else {
+            status.textContent = `Failed (HTTP ${res.status})`;
+            status.style.color = "#a33";
+        }
+    } catch (e) {
+        status.textContent = `Failed (${e.message || "network error"})`;
+        status.style.color = "#a33";
     }
     setTimeout(() => { status.textContent = ""; status.style.color = ""; }, 8000);
 }

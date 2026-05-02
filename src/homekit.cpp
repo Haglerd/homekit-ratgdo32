@@ -457,12 +457,20 @@ static void homekit_health_log()
     if (rebooting) return;
     int rssi = WiFi.isConnected() ? WiFi.RSSI() : 0;
     const char *wifiState = WiFi.isConnected() ? "connected" : "disconnected";
-    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu uptime=%llus paired=%s",
+    // Count paired controllers — tells us when iOS has dropped the
+    // pairing without actually unpairing on our side, or shows the
+    // expected number for a healthy household.
+    size_t paired_controllers = 0;
+    for (auto it = homeSpan.controllerListBegin(); it != homeSpan.controllerListEnd(); ++it) {
+        ++paired_controllers;
+    }
+    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu uptime=%llus paired=%s controllers=%u",
              wifiState,
              rssi,
              (unsigned long)esp_get_free_heap_size(),
              (uint64_t)(_millis() / 1000),
-             isPaired ? "yes" : "no");
+             isPaired ? "yes" : "no",
+             (unsigned)paired_controllers);
 }
 
 void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
@@ -494,6 +502,25 @@ void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
 void WiFiStaConnected(WiFiEvent_t event, WiFiEventInfo_t info)
 {
     ESP_LOGI(TAG, "WiFi (re)connected to AP — waiting for IP");
+}
+
+// Lighter-touch HomeKit recovery — re-advertises mDNS via HomeSpan's
+// updateDatabase(true). Doesn't cycle WiFi, doesn't drop HAP TCP.
+// First thing to try when the iOS hub says "No Response" but device-side
+// is healthy in the syslog — often this is just stale mDNS. Roughly
+// 1-2 seconds of disruption vs ~3-5s for the WiFi cycle vs ~25s for
+// a full reboot.
+void homekit_refresh_mdns(const char *reason)
+{
+    ESP_LOGW(TAG, "HomeKit mDNS refresh requested (%s) — re-broadcasting accessory advert",
+             reason ? reason : "unspecified");
+    // updateDatabase(true) bumps the HAP config number, calls
+    // updateMDNS (which re-advertises), and triggers HomeSpan's
+    // internal database update. Safe to call when nothing has actually
+    // changed in the accessory tree — controllers will see the same
+    // config number on a no-op and ignore the re-fetch.
+    homeSpan.updateDatabase(true);
+    ESP_LOGI(TAG, "HomeKit mDNS refresh: updateDatabase(true) returned, mDNS re-advertised");
 }
 
 // User-triggered "Reconnect HomeKit" recovery — invoked from the

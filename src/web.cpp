@@ -65,6 +65,7 @@ static const char *TAG = "ratgdo-http";
 // Forward declare the internal URI handling functions...
 void handle_reset();
 void handle_reconnect_homekit();
+void handle_refresh_mdns();
 void handle_status();
 void handle_everything();
 void handle_setgdo();
@@ -94,6 +95,7 @@ const std::unordered_map<std::string, std::pair<const HTTPMethod, void (*)()>> b
     {"/reset", {HTTP_POST, handle_reset}},
     {"/reboot", {HTTP_POST, handle_reboot}},
     {"/reconnectHomeKit", {HTTP_POST, handle_reconnect_homekit}},
+    {"/refreshHomeKitMDNS", {HTTP_POST, handle_refresh_mdns}},
     {"/setgdo", {HTTP_POST, handle_setgdo}},
     {"/logout", {HTTP_GET, handle_logout}},
     {"/auth", {HTTP_GET, handle_auth}},
@@ -666,6 +668,19 @@ void handle_reconnect_homekit()
     server.send(200, type_txt, resp);
     delay(500);
     homekit_force_reconnect("via web UI /reconnectHomeKit");
+    return;
+}
+
+// Lighter-touch HomeKit recovery — re-broadcast mDNS without dropping
+// WiFi. First thing to try when iOS says "No Response" but the syslog
+// shows the device is otherwise healthy. No HTTP outage — just a quick
+// HomeSpan database update + mDNS re-advert.
+void handle_refresh_mdns()
+{
+    const char *resp = "HomeKit mDNS refresh triggered.\n";
+    server.client().setNoDelay(true);
+    server.send(200, type_txt, resp);
+    homekit_refresh_mdns("via web UI /refreshHomeKitMDNS");
     return;
 }
 
