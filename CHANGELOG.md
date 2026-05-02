@@ -2,7 +2,76 @@
 
 **v3.x.x firmware is for ratgdo32 and ratgdo32-disco boards only**
 
-All notable changes to `homekit-ratgdo32` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
+All notable changes to `homekit-ratgdo32` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/) and [Keep a Changelog](https://keepachangelog.com/).
+
+---
+
+## Fork releases (`v3.4.4-forceclose.N`)
+
+This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
+
+### v3.4.4-forceclose.22 (2026-05-02)
+
+**Fixed**
+- **SSE self-detach crash in `loopTask`** — `SSEheartbeat()` called `removeSSEsubscription()` from inside the Ticker callback, which `Ticker.detach()`'d its own running heartbeat → `vTaskDelete` on the Ticker's task → `uxListRemove` panic. Long-running `logs.html` sessions would eventually hit this on any version. Fix: `SSESubscription.pendingRemove` flag set from inside the callback, drained from `service_timer_loop()` in main-loop context.
+- Auto-close: ticker now scheduled window-aware. Outside the configured window, no recurring tick — a one-shot timer sleeps until window-start, then the 60s tick attaches. Re-armed on `/setgdo` settings save. Skip-paths are silent (no more `AUTO-CLOSE: tick #N — door not Open, skipping` every 60s).
+- HomeKit watchdog config now cached at boot and on settings save instead of taking the `userConfig` mutex inside the Ticker callback every 60s.
+
+**Changed**
+- `/status.json` request log demoted `ESP_LOGI → ESP_LOGD`. The Homebridge plugin polls every 3s by default; the previous INFO line was ~20/min of pure noise. The 95%-buffer-full WARN stays at WARN (still actionable).
+- HomeKit / WiFi / HomeSpan log lines are now **exclusive to the HomeKit tab** in `logs.html` — they no longer also clutter the System Log tab.
+- Health log interval bumped 60s → 180s (purely diagnostic; doesn't need 1-min resolution).
+
+### v3.4.4-forceclose.21 (2026-05-02)
+
+**Added**
+- **HomeKit watchdog settings UI** — Settings page now exposes a toggle (`hkAutoRecover`) and four threshold inputs (`hkAutoRecoverSecs`, `hkHintQuietSecs`, `hkHintStaleSecs`, `hkHintLikelyNRSecs`). Replaces the v19/v20 compile-time constants. Defaults preserve v19/v20 behaviour exactly: auto-recover OFF, 5/15/30-minute hint tiers, 30-minute trigger.
+
+### v3.4.4-forceclose.20 (2026-05-02)
+
+**Fixed**
+- CI: replaced 5 separate `wow-actions/download-upload` Contents-API commits with a single `git checkout -fB main origin/main` + `git push`. Branch protection ("Block force pushes / Restrict deletions") was timing out the Contents-API rule eval, leaving `docs/firmware/` stale by one release on every build (v18 + v19 both shipped without bins committed). The single direct push works inside a 1s window.
+
+**Changed**
+- New `auto-release.yml` — fires on push to `main` that touches `docs/manifest.json`. Reads version, creates tag + release, dispatches `release.yml`. Net effect: bumping `docs/manifest.json` on a feature branch + merging the PR runs the entire release pipeline hands-free.
+
+### v3.4.4-forceclose.19 (2026-05-02)
+
+**Changed**
+- HomeKit watchdog ships **disabled by default** with tiered diagnostic hints. Real-world iOS read cadence is highly variable (gaps of 6+ min observed during normal idle), so a low fixed threshold caused false-trigger recoveries on healthy connections. v19 keeps the threshold-checking logic and emits hint logs at 5/15/30 min, but no recovery action runs unless the user opts in.
+
+### v3.4.4-forceclose.18 (2026-05-02)
+
+**Added**
+- **HomeKit self-healing watchdog** — periodic health check (every 60s) tracking `last_hap_read_ago`. When iOS goes silent past the trigger threshold AND WiFi is connected AND we have paired controllers, escalates: mDNS refresh first (cheap, no outage), then WiFi reconnect (~5s outage). Stops after 2 attempts; never auto-reboots.
+
+### v3.4.4-forceclose.17 (2026-05-02)
+
+**Fixed**
+- `clear_force_close_state()` was firing on every `CURR_OPEN` / `CURR_CLOSED` / `CURR_STOPPED` status poll, wiping `forceCloseAttempt` mid-sequence. Symptom: "attempt 0 release sent" then full sequence ran twice. Removed the over-defensive terminal-state cleanup; kept only the `CURR_CLOSING` transition fix from .16.
+
+**Added**
+- HomeKit recovery buttons on home page (Refresh mDNS / Reconnect HomeKit / Dump State) in addition to the logs.html ones.
+
+### v3.4.4-forceclose.16 (2026-05-02)
+
+**Fixed**
+- `forceCloseInProgress` flag leak — fork's force-close override could get stuck "in progress" if the firmware took an unexpected path during the 2-press sequence, blocking subsequent close commands until reboot. Added `clear_force_close_state()` triggered on `CURR_CLOSING` transition (the door reached the desired state — clear our in-progress marker).
+
+**Added**
+- HomeKit visibility (WiFi connect/disconnect events with reason codes, periodic 60s health log, three HomeSpan callbacks tracking `hapLastReadSec`).
+- Recovery endpoints: `POST /reconnectHomeKit` (cycles WiFi, HomeSpan re-attaches), `POST /refreshHomeKitMDNS` (re-broadcast mDNS without dropping WiFi), `POST /dumpHomeKitState` (dump HomeSpan CLI status / accessory DB / diag to log).
+- New "HomeKit" tab in `logs.html` with three recovery buttons + filtered HomeKit/WiFi/HomeSpan event view.
+
+### v3.4.4-forceclose.15 (and earlier)
+
+Initial fork releases adding the `forceClose` HTTP primitive (single POST → 2-press hold-to-close override at the Sec+1.0 protocol level), the firmware-side auto-close timer (with optional time-of-day window), security hardening (input validation, CSRF on `/setgdo`, busy-flag guard on force-close), and basic UI polish (widened time inputs, fork README header).
+
+---
+
+## Upstream releases (`v3.x.x`)
+
+The following are upstream `ratgdo/homekit-ratgdo32` releases the fork tracks via daily auto-sync. Each fork release includes everything from upstream `v3.4.4` plus the fork-specific changes above.
 
 ## v3.4.4 (2026-02-??)
 

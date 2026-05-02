@@ -1,15 +1,37 @@
 > [!NOTE]
-> **This is a fork of [ratgdo/homekit-ratgdo32](https://github.com/ratgdo/homekit-ratgdo32) maintained by [@Haglerd](https://github.com/Haglerd).**
-> It tracks upstream and adds two features for users whose Security+ 1.0 garage doors refuse to close because of a flaky photo-eye:
+> **This is a fork of [ratgdo/homekit-ratgdo32](https://github.com/ratgdo/homekit-ratgdo32) maintained by [@Haglerd](https://github.com/Haglerd).** It tracks upstream daily via automated sync and layers fork-specific features on top. See [CHANGELOG.md](CHANGELOG.md) for the per-version history.
 >
-> - **`forceClose` HTTP primitive on `/setgdo`** — emulates the wall-button hold-to-close override. Sends a 3.5-second press, 1.5-second gap, then a second press. Most openers respond on the first press; the second is a backstop. Only meaningful on Sec+1.0; Sec+2.0 falls through to the normal close path.
-> - **Firmware-side auto-close timer** — optional safety timer that fires `forceClose` if the door has been Open longer than `autoCloseMinutes`. You can scope it to a time-of-day window (e.g. 22:00–06:00) or check "Ignore time window" to fire any time, no NTP required.
+> ### What this fork adds
 >
-> Companion homebridge plugin: [homebridge-ratgdo-forceclose](https://www.npmjs.com/package/homebridge-ratgdo-forceclose) — exposes the same primitive as a HomeKit GarageDoorOpener accessory.
+> **1. `forceClose` HTTP primitive on `/setgdo`** *(forceclose.5+)* — emulates the wall-button hold-to-close override. Sends a 3.5-second press, 1.5-second gap, then a second press. Most openers respond on the first press; the second is a backstop. Only meaningful on Sec+1.0; Sec+2.0 falls through to the normal close path.
 >
-> **OTA flash**: ratgdo dashboard → Settings → set OTA repo to `Haglerd/homekit-ratgdo32` → Update tab. Or from a fresh device, use the [ESP Web Tools flasher](https://haglerd.github.io/homekit-ratgdo32/).
+> **2. Firmware-side auto-close timer** *(forceclose.5+)* — optional safety timer that fires `forceClose` if the door has been Open longer than `autoCloseMinutes`. You can scope it to a time-of-day window (e.g. 22:00–06:00) or check "Ignore time window" to fire any time, no NTP required. As of `forceclose.22` the scheduler is window-aware: outside the window the firmware sleeps until window-start instead of polling every minute.
 >
-> **Safety**: the wall-button override bypasses the photo-eye. Don't run auto-close in time windows where pets/kids might be in the door's path. Use the time window or `Ignore` only when you've accepted that risk.
+> **3. HomeKit recovery actions** *(forceclose.16+)* — three new endpoints surfaced via the Settings page and the `logs.html` HomeKit tab:
+>   - `POST /reconnectHomeKit` — cycles WiFi; HomeSpan re-attaches (~5–10s)
+>   - `POST /refreshHomeKitMDNS` — re-broadcast mDNS without dropping WiFi
+>   - `POST /dumpHomeKitState` — dump HomeSpan CLI status / accessory DB / diag to the log
+>
+> **4. HomeKit watchdog** *(forceclose.18+, configurable in UI from forceclose.21)* — periodic health snapshot tracking `last_hap_read_ago`. Tiered diagnostic hints log when iOS goes silent past 5 / 15 / 30 minutes. Optional auto-recovery (mDNS refresh → WiFi cycle, max 2 attempts) is **off by default** because real-world iOS read cadence is highly variable. Toggle and thresholds live under Settings → HomeKit Watchdog.
+>
+> **5. Filtered HomeKit log tab** *(forceclose.16+)* — `logs.html` gains a HomeKit tab that shows only HomeKit / WiFi / HomeSpan events, separate from the System Log. As of `forceclose.22`, HomeKit lines are *exclusive* to this tab.
+>
+> **6. Security hardening** *(forceclose.14+)* — server-side input validation on auto-close keys, same-origin check on `/setgdo`, busy-flag guard against re-entrant force-close calls.
+>
+> ### Companion homebridge plugin
+> [`homebridge-ratgdo-forceclose`](https://www.npmjs.com/package/homebridge-ratgdo-forceclose) ([source](https://github.com/Haglerd/homebridge-ratgdo-forceclose)) exposes `forceClose` as a HomeKit GarageDoorOpener tile (or legacy momentary switch). v1.3.0+ also adds a one-tap **Reconnect HomeKit** switch that hits `/reconnectHomeKit` for in-Home-app recovery.
+>
+> ### OTA installation
+> ratgdo dashboard → Settings → set OTA repo to `Haglerd/homekit-ratgdo32` → Update tab. Or from a fresh device, use the [ESP Web Tools flasher](https://haglerd.github.io/homekit-ratgdo32/).
+>
+> ### Persistent logs (optional)
+> The firmware can forward all logs to a remote `rsyslog` server (Settings → Syslog). Useful for long-term analysis of "No Response" / crash events that happen when nobody's at the device's web UI. The `/crashlog` endpoint also surfaces ESP32 panic dumps — decode them with `addr2line` against the matching `firmware.elf` from [`docs/firmware/`](docs/firmware/).
+>
+> ### Safety
+> The wall-button override bypasses the photo-eye. Don't run auto-close in time windows where pets/kids might be in the door's path. Use the time window or `Ignore time window` only when you've accepted that risk.
+>
+> ### Reporting issues
+> File fork-specific bugs at [Haglerd/homekit-ratgdo32/issues](https://github.com/Haglerd/homekit-ratgdo32/issues). Upstream-tracked bugs (anything not from the list above) belong at [ratgdo/homekit-ratgdo32/issues](https://github.com/ratgdo/homekit-ratgdo32/issues). When in doubt, open here and we'll redirect.
 
 > [!IMPORTANT]
 > This firmware is for the ESP32-based ratgdo32 and ratgdo32-disco series boards. It will not work with the ESP8266-based ratgdo v2.5xi boards. HomeKit support for for the original v2.5xi devices can be found [here](https://github.com/ratgdo/homekit-ratgdo)
