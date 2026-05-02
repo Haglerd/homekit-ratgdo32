@@ -73,6 +73,10 @@ extern void homekit_force_reconnect(const char *reason);
 extern void homekit_refresh_mdns(const char *reason);
 // Dump HomeSpan's CLI diagnostic output (status + accessory DB + diag) to log.
 extern void homekit_dump_state(const char *reason);
+// v22: refresh cached watchdog config (called from web settings save
+// path; also called once at boot from setup_homekit). The Ticker
+// callback reads the cache instead of taking the userConfig mutex.
+extern void homekit_refresh_watchdog_config();
 
 extern char ipv6_addresses[];
 

@@ -485,14 +485,23 @@ static void hap_controller_change_cb()
 // the Pi has a permanent timeline of these snapshots so we can correlate
 // "No Response" reports against signal degradation, heap leaks, or
 // disconnects.
-constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 60000; // 60s
+// v22: bumped 60s → 180s. The health log is purely diagnostic — once a
+// minute is more frequent than needed (most "No Response" episodes
+// resolve themselves or persist for many minutes). 3 minutes still
+// gives us a usable timeline for syslog correlation without polluting
+// the log every 60s. The watchdog itself uses these snapshots, but
+// thresholds are in minutes, so a 3-min cadence is plenty of resolution.
+constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 180000; // 180s
 static Ticker homekitHealthTicker;
 
-// Self-healing watchdog. v21: thresholds + enable-flag are user-settable
-// via Settings → HomeKit Watchdog (persisted in NVRAM). Defaults match
-// v19/v20 hardcoded values (auto-recover OFF, 5/15/30-minute hint tiers,
-// 30-minute trigger). Reading via userConfig at every health-tick means
-// changes apply on the next 60s loop without a reboot.
+// Self-healing watchdog. v22: settings are now CACHED at boot (and
+// refreshed by homekit_refresh_watchdog_config() from the web settings
+// save path) instead of re-read from userConfig on every health-tick.
+// v21 did a mutex-protected std::map lookup ×5 per tick inside the
+// Ticker callback context — eliminating those reads removes one
+// plausible cause of mid-callback contention. Defaults match
+// v19/v20/v21: auto-recover OFF, 5/15/30-minute hint tiers, 30-minute
+// trigger.
 //
 // Recovery escalation when enabled: mDNS refresh first (cheapest, no
 // outage), then WiFi reconnect (~3-5s outage). After HK_AUTO_RECOVER_MAX
@@ -501,6 +510,27 @@ static Ticker homekitHealthTicker;
 constexpr uint8_t  HK_AUTO_RECOVER_MAX   = 2;
 static uint8_t     hkRecoverAttempts     = 0;
 static uint8_t     hkLastHintLevel       = 0;     // 0=none, 1=QUIET, 2=STALE, 3=LIKELY_NR
+
+// Cached watchdog config. Refreshed at boot in setup_homekit and on
+// settings save via homekit_refresh_watchdog_config(). Read in the
+// Ticker callback without taking a mutex.
+static volatile bool     hkCfgEnabled       = false;
+static volatile uint32_t hkCfgRecoverSecs   = 1800;
+static volatile uint32_t hkCfgQuietSecs     = 300;
+static volatile uint32_t hkCfgStaleSecs     = 900;
+static volatile uint32_t hkCfgLikelyNRSecs  = 1800;
+
+void homekit_refresh_watchdog_config()
+{
+    hkCfgEnabled      = userConfig->getHKAutoRecover();
+    hkCfgRecoverSecs  = userConfig->getHKAutoRecoverSecs();
+    hkCfgQuietSecs    = userConfig->getHKHintQuietSecs();
+    hkCfgStaleSecs    = userConfig->getHKHintStaleSecs();
+    hkCfgLikelyNRSecs = userConfig->getHKHintLikelyNRSecs();
+    ESP_LOGI(TAG, "HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u",
+             (int)hkCfgEnabled, (unsigned)hkCfgRecoverSecs,
+             (unsigned)hkCfgQuietSecs, (unsigned)hkCfgStaleSecs, (unsigned)hkCfgLikelyNRSecs);
+}
 
 static void homekit_health_log()
 {
@@ -540,14 +570,13 @@ static void homekit_health_log()
     // HK_AUTO_RECOVER_MAX attempts we stop and wait for a HAP read
     // (which resets the counter) — no auto-reboot, that's too
     // disruptive for a daemon to do on its own.
-    // Read settings once per tick — userConfig is mutex-protected so
-    // grabbing them in one shot avoids the (vanishingly small) chance
-    // of a partial-update view.
-    const bool     hkEnabled      = userConfig->getHKAutoRecover();
-    const uint32_t hkRecoverSecs  = userConfig->getHKAutoRecoverSecs();
-    const uint32_t hkQuietSecs    = userConfig->getHKHintQuietSecs();
-    const uint32_t hkStaleSecs    = userConfig->getHKHintStaleSecs();
-    const uint32_t hkLikelyNRSecs = userConfig->getHKHintLikelyNRSecs();
+    // v22: read cached values (refreshed at boot + on settings-save)
+    // instead of taking the userConfig mutex inside this Ticker callback.
+    const bool     hkEnabled      = hkCfgEnabled;
+    const uint32_t hkRecoverSecs  = hkCfgRecoverSecs;
+    const uint32_t hkQuietSecs    = hkCfgQuietSecs;
+    const uint32_t hkStaleSecs    = hkCfgStaleSecs;
+    const uint32_t hkLikelyNRSecs = hkCfgLikelyNRSecs;
 
     // Tiered diagnostic hints — ALWAYS logged regardless of whether
     // auto-recover is enabled. Lets the user observe how silent
@@ -1199,8 +1228,13 @@ void setup_homekit()
     // so no need to handle in our Arduino loop.
     homeSpan.autoPoll((1024 * 16), 1, 0);
 
+    // v22: seed the watchdog config cache before the first health-tick
+    // fires. After this, the Ticker callback reads the cached values
+    // instead of taking the userConfig mutex.
+    homekit_refresh_watchdog_config();
+
     // Start periodic HomeKit health logging — see homekit_health_log()
-    // above. Fires at boot (immediate first sample) then every 60s.
+    // above. v22 bumped to 180s.
     homekitHealthTicker.detach();
     homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_MS, homekit_health_log);
 

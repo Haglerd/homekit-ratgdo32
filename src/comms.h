@@ -31,6 +31,12 @@ extern GarageDoorCurrentState close_door(bool bypass_ttc = false);
 // Sec+2.0 falls back to normal close (no protocol-level hold concept exists).
 // SAFETY: only call when the door is in a known-safe-to-close state.
 extern void door_command_force_close(uint32_t hold_ms);
+// v22 auto-close scheduler. Detaches whatever is currently scheduled and
+// re-arms based on userConfig (off → nothing scheduled; ignoreWindow=on
+// → 60s tick; window mode in-window → 60s tick; window mode out-of-
+// window → one-shot until next window-start). Called from comms_setup
+// at boot and from the web /setgdo settings save path.
+extern void update_auto_close_schedule();
 #if defined(ESP8266) || !defined(USE_GDOLIB)
 extern GarageDoorCurrentState toggle_door(bool bypass_ttc = false);
 #endif
