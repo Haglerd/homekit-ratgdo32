@@ -19,6 +19,9 @@
 #include <ESP8266WiFi.h>
 #endif // ESP8266
 
+// Ticker for periodic HomeKit health log
+#include <Ticker.h>
+
 // RATGDO project includes
 #include "ratgdo.h"
 #include "config.h"
@@ -432,6 +435,269 @@ void connectionCallback(int count)
     notify_new_ipv4_address();
 }
 
+// WiFi disconnect/reconnect visibility — without these the firmware emits
+// nothing when WiFi flaps, which is the most common root cause of HomeKit
+// "No Response" reports we can't otherwise explain. With remote syslog
+// enabled (syslogEn=true), every drop and re-association is now timestamped
+// in the Pi-side log so we can correlate user-visible failures with the
+// underlying network state instead of guessing.
+// Track timestamp (in seconds since boot) of the last time iOS asked us
+// for any characteristic value. If this gets stale (no reads for >5min)
+// while WiFi is healthy, the failure is hub-side — iOS isn't even
+// trying to talk to us. This is THE single best signal for narrowing
+// "No Response" to device-side vs hub-side. Updated by the
+// setGetCharacteristicsCallback hook.
+static volatile uint32_t hapLastReadSec = 0;
+
+static void hap_get_characteristics_cb(const char *paths)
+{
+    hapLastReadSec = (uint32_t)(_millis() / 1000);
+}
+
+// Pair/unpair real-time event. setPairCallback fires on every HomeKit
+// pairing transition, including unexpected unpair-from-iOS — the
+// startup HS_PAIRED status only fires once at boot, so without this
+// we wouldn't notice if a controller dropped the pairing later.
+static void hap_pair_cb(boolean isPaired)
+{
+    ESP_LOGW(TAG, "HomeKit pair state changed: now %s", isPaired ? "paired" : "UNPAIRED");
+}
+
+// Controller list change — fires when a pairing is added/removed or
+// admin status changes. Logs the new count + admin count so timeline
+// shows exactly when paired devices appear/disappear.
+static void hap_controller_change_cb()
+{
+    size_t count = 0;
+    size_t admins = 0;
+    for (auto it = homeSpan.controllerListBegin(); it != homeSpan.controllerListEnd(); ++it) {
+        ++count;
+        if (it->isAdmin()) ++admins;
+    }
+    ESP_LOGI(TAG, "HomeKit controller list changed: %u paired (%u admin)", (unsigned)count, (unsigned)admins);
+}
+
+// Periodic visibility into the live HomeKit / WiFi state. Without this
+// the only way to learn about a stuck/silent HomeSpan was to hit the web
+// UI for /status.json — which fails first when things go wrong. Every
+// HOMEKIT_HEALTH_INTERVAL_MS we log a one-liner with: WiFi RSSI, free
+// heap, uptime, IP, current door state. With remote syslog enabled,
+// the Pi has a permanent timeline of these snapshots so we can correlate
+// "No Response" reports against signal degradation, heap leaks, or
+// disconnects.
+constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 60000; // 60s
+static Ticker homekitHealthTicker;
+
+// Self-healing watchdog. v19: ACTIONS DISABLED BY DEFAULT — initial
+// real-world testing showed iOS read cadence is highly variable (gaps
+// of 6+ min observed during normal idle), so a low threshold causes
+// false-trigger recoveries on a healthy connection. This v19 build:
+//   * keeps the threshold-checking logic
+//   * does NOT take any recovery action (HK_AUTO_RECOVER_EN = false)
+//   * emits TIERED DIAGNOSTIC HINTS in the log at each threshold so
+//     the user can observe real-world silent-gap durations and decide
+//     what auto-recover threshold (if any) makes sense for their setup
+// In a future revision the thresholds + actions will be exposed via
+// the web UI as configurable settings.
+constexpr bool     HK_AUTO_RECOVER_EN    = false;
+constexpr uint32_t HK_AUTO_RECOVER_SECS  = 1800;  // 30 min — only used if EN=true
+constexpr uint8_t  HK_AUTO_RECOVER_MAX   = 2;
+// Diagnostic hint thresholds (always logged regardless of EN). Picked
+// to give a sense of "how silent is silent" without acting on it.
+constexpr uint32_t HK_HINT_QUIET_SECS    = 300;   //  5 min — "extended idle"
+constexpr uint32_t HK_HINT_STALE_SECS    = 900;   // 15 min — "possibly stale"
+constexpr uint32_t HK_HINT_LIKELY_NR     = 1800;  // 30 min — "likely No Response"
+static uint8_t     hkRecoverAttempts     = 0;
+static uint8_t     hkLastHintLevel       = 0;     // 0=none, 1=QUIET, 2=STALE, 3=LIKELY_NR
+
+static void homekit_health_log()
+{
+    if (rebooting) return;
+    int rssi = WiFi.isConnected() ? WiFi.RSSI() : 0;
+    const char *wifiState = WiFi.isConnected() ? "connected" : "disconnected";
+    // Count paired controllers — tells us when iOS has dropped the
+    // pairing without actually unpairing on our side, or shows the
+    // expected number for a healthy household.
+    size_t paired_controllers = 0;
+    for (auto it = homeSpan.controllerListBegin(); it != homeSpan.controllerListEnd(); ++it) {
+        ++paired_controllers;
+    }
+    uint32_t nowSec = (uint32_t)(_millis() / 1000);
+    // If hapLastReadSec is 0 we've never seen a read since boot.
+    // Otherwise log seconds since last read — the smoking gun for
+    // "No Response" diagnosis. If this number keeps growing while WiFi
+    // is connected and paired_controllers > 0, the hub stopped talking.
+    int32_t lastReadAgo = hapLastReadSec ? (int32_t)(nowSec - hapLastReadSec) : -1;
+    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu uptime=%us paired=%s controllers=%u last_hap_read_ago=%ds",
+             wifiState,
+             rssi,
+             (unsigned long)esp_get_free_heap_size(),
+             nowSec,
+             isPaired ? "yes" : "no",
+             (unsigned)paired_controllers,
+             lastReadAgo);
+
+    // Self-healing watchdog. Trigger only when:
+    //   * we've seen a HAP read at least once (lastReadAgo > 0) — so
+    //     we don't fire on a brand-new boot with no controllers paired
+    //   * iOS has been quiet longer than the recovery threshold
+    //   * WiFi is up and we have at least one paired controller
+    //   * we haven't already exhausted recovery attempts this episode
+    // Recovery escalation: mDNS refresh first (cheapest, ~1s, no
+    // outage), then WiFi reconnect (heavier, ~3-5s outage). After
+    // HK_AUTO_RECOVER_MAX attempts we stop and wait for a HAP read
+    // (which resets the counter) — no auto-reboot, that's too
+    // disruptive for a daemon to do on its own.
+    // Tiered diagnostic hints — ALWAYS logged regardless of whether
+    // auto-recover is enabled. Lets the user observe how silent
+    // their iOS hub gets during normal operation, so they can pick
+    // an informed threshold before enabling auto-recover.
+    if (lastReadAgo > 0 && paired_controllers > 0)
+    {
+        uint8_t newLevel = 0;
+        if (lastReadAgo > (int32_t)HK_HINT_LIKELY_NR)      newLevel = 3;
+        else if (lastReadAgo > (int32_t)HK_HINT_STALE_SECS) newLevel = 2;
+        else if (lastReadAgo > (int32_t)HK_HINT_QUIET_SECS) newLevel = 1;
+
+        // Only emit a hint when crossing INTO a higher level (don't
+        // spam every 60s while sitting at the same level).
+        if (newLevel > hkLastHintLevel)
+        {
+            const char *label = "";
+            switch (newLevel) {
+                case 1: label = "iOS extended idle (>5min) — could be normal hub idle, watch the trend"; break;
+                case 2: label = "iOS gone quiet (>15min) — possibly stale, hub may be drifting toward No Response"; break;
+                case 3: label = "iOS silent (>30min) — likely No Response on hub side, manual Reconnect or Refresh mDNS may help"; break;
+            }
+            ESP_LOGW(TAG, "HomeKit watchdog hint: %s (last_hap_read_ago=%ds, threshold-level=%u)",
+                     label, lastReadAgo, newLevel);
+            hkLastHintLevel = newLevel;
+        }
+        else if (newLevel < hkLastHintLevel && lastReadAgo < (int32_t)HK_HINT_QUIET_SECS)
+        {
+            // Crossed back below the lowest hint threshold — quiet phase ended.
+            ESP_LOGI(TAG, "HomeKit watchdog hint: HAP reads resumed (last_hap_read_ago=%ds), recovering from level %u", lastReadAgo, hkLastHintLevel);
+            hkLastHintLevel = 0;
+        }
+    }
+
+    // Auto-recover ACTIONS — only run if explicitly enabled. v19 ships
+    // with HK_AUTO_RECOVER_EN=false; the hints above run unconditionally
+    // so the user can decide whether to enable based on real-world data.
+    if (HK_AUTO_RECOVER_EN &&
+        lastReadAgo > (int32_t)HK_AUTO_RECOVER_SECS &&
+        WiFi.isConnected() &&
+        paired_controllers > 0)
+    {
+        if (hkRecoverAttempts == 0)
+        {
+            ESP_LOGW(TAG, "HomeKit auto-recover (1/2): no HAP read in %ds, refreshing mDNS", lastReadAgo);
+            homekit_refresh_mdns("auto-recover: no HAP read in threshold window");
+            hkRecoverAttempts = 1;
+        }
+        else if (hkRecoverAttempts == 1)
+        {
+            ESP_LOGW(TAG, "HomeKit auto-recover (2/2): mDNS refresh didn't help, cycling WiFi (last_hap_read_ago=%ds)", lastReadAgo);
+            homekit_force_reconnect("auto-recover: mDNS refresh insufficient");
+            hkRecoverAttempts = 2;
+        }
+        else
+        {
+            ESP_LOGW(TAG, "HomeKit auto-recover: still no HAP read after %d attempts; giving up (user reboot may be required)", hkRecoverAttempts);
+        }
+    }
+    else if (lastReadAgo >= 0 && lastReadAgo < 60 && hkRecoverAttempts > 0)
+    {
+        ESP_LOGI(TAG, "HomeKit auto-recover: HAP reads resumed (last_hap_read_ago=%ds), clearing recovery counter", lastReadAgo);
+        hkRecoverAttempts = 0;
+    }
+}
+
+void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+    // ESP-IDF reason codes — most useful ones called out by name; rest
+    // fall through to numeric so we can look them up if they're new.
+    const uint8_t reason = info.wifi_sta_disconnected.reason;
+    const char *why = "unknown";
+    switch (reason)
+    {
+        case WIFI_REASON_AUTH_EXPIRE:        why = "auth expired"; break;
+        case WIFI_REASON_AUTH_LEAVE:         why = "deauth (we left)"; break;
+        case WIFI_REASON_ASSOC_EXPIRE:       why = "assoc expired"; break;
+        case WIFI_REASON_ASSOC_TOOMANY:      why = "AP too many clients"; break;
+        case WIFI_REASON_NOT_AUTHED:         why = "not authed"; break;
+        case WIFI_REASON_NOT_ASSOCED:        why = "not assoced"; break;
+        case WIFI_REASON_ASSOC_LEAVE:        why = "assoc leave"; break;
+        case WIFI_REASON_ASSOC_NOT_AUTHED:   why = "assoc not authed"; break;
+        case WIFI_REASON_BEACON_TIMEOUT:     why = "beacon timeout (AP gone)"; break;
+        case WIFI_REASON_NO_AP_FOUND:        why = "AP not found"; break;
+        case WIFI_REASON_AUTH_FAIL:          why = "auth fail"; break;
+        case WIFI_REASON_ASSOC_FAIL:         why = "assoc fail"; break;
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:  why = "handshake timeout"; break;
+        default: break;
+    }
+    ESP_LOGW(TAG, "WiFi disconnected: reason=%d (%s); HomeSpan will auto-reconnect", reason, why);
+}
+
+void WiFiStaConnected(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+    ESP_LOGI(TAG, "WiFi (re)connected to AP — waiting for IP");
+}
+
+// Lighter-touch HomeKit recovery — re-advertises mDNS via HomeSpan's
+// updateDatabase(true). Doesn't cycle WiFi, doesn't drop HAP TCP.
+// First thing to try when the iOS hub says "No Response" but device-side
+// is healthy in the syslog — often this is just stale mDNS. Roughly
+// 1-2 seconds of disruption vs ~3-5s for the WiFi cycle vs ~25s for
+// a full reboot.
+void homekit_refresh_mdns(const char *reason)
+{
+    ESP_LOGW(TAG, "HomeKit mDNS refresh requested (%s) — re-broadcasting accessory advert",
+             reason ? reason : "unspecified");
+    // updateDatabase(true) bumps the HAP config number, calls
+    // updateMDNS (which re-advertises), and triggers HomeSpan's
+    // internal database update. Safe to call when nothing has actually
+    // changed in the accessory tree — controllers will see the same
+    // config number on a no-op and ignore the re-fetch.
+    homeSpan.updateDatabase(true);
+    ESP_LOGI(TAG, "HomeKit mDNS refresh: updateDatabase(true) returned, mDNS re-advertised");
+}
+
+// Programmatic invocation of HomeSpan's diagnostic CLI commands. Lets us
+// dump full HomeSpan state to the syslog from a web button without
+// requiring a USB serial cable. Only read-only commands ('s' status,
+// 'i' accessory database, 'd' diagnostics) — no 'P' (pairing data is
+// sensitive), no state-changing commands.
+void homekit_dump_state(const char *reason)
+{
+    ESP_LOGW(TAG, "HomeSpan state dump requested (%s) — running CLI commands s, i, d", reason ? reason : "unspecified");
+    // 's' — overall status (WiFi, pair, config number)
+    homeSpan.processSerialCommand("s");
+    // 'i' — accessory database with IIDs/values/permissions
+    homeSpan.processSerialCommand("i");
+    // 'd' — operational state diagnostics
+    homeSpan.processSerialCommand("d");
+    ESP_LOGI(TAG, "HomeSpan state dump complete");
+}
+
+// User-triggered "Reconnect HomeKit" recovery — invoked from the
+// /reconnectHomeKit web endpoint. Cycles the WiFi association without
+// rebooting; HomeSpan reattaches automatically when WiFi returns and
+// re-advertises mDNS. Less disruptive than /reboot for cases where the
+// device is otherwise healthy but the HomeKit hub thinks it's
+// unresponsive (stale HAP TCP, mDNS gone stale, controller cache).
+void homekit_force_reconnect(const char *reason)
+{
+    ESP_LOGW(TAG, "HomeKit reconnect requested (%s) — cycling WiFi", reason ? reason : "unspecified");
+    // Don't erase WiFi credentials — pass false. The reconnect call will
+    // re-associate using the same SSID/password from NVRAM.
+    WiFi.disconnect(false);
+    // Small gap so the AP sees the disassociate before we re-associate.
+    delay(250);
+    WiFi.reconnect();
+    ESP_LOGI(TAG, "HomeKit reconnect: WiFi.reconnect() invoked, expect '(re)connected to AP' shortly");
+}
+
 void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
 {
     if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP6)
@@ -484,6 +750,10 @@ void statusCallback(HS_STATUS status)
         // Monitor IP address events, so we can show user IPv6 addresses
         WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP6);
         WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+        // Monitor disconnect/reconnect transitions so HomeKit "No Response"
+        // events can be correlated with WiFi flaps in the syslog history.
+        WiFi.onEvent(WiFiStaDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+        WiFi.onEvent(WiFiStaConnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED);
         break;
     case HS_PAIRING_NEEDED:
         ESP_LOGI(TAG, "Status: Need to pair");
@@ -832,6 +1102,15 @@ void setup_homekit()
     homeSpan.setWifiBegin(wifiBegin);
     homeSpan.setConnectionCallback(connectionCallback);
     homeSpan.setStatusCallback(statusCallback);
+    // Real-time HomeKit event visibility (helps diagnose "No Response"):
+    //   setPairCallback           — pair/unpair transitions (incl. unexpected unpair)
+    //   setControllerCallback     — controller list changes (pairings added/removed)
+    //   setGetCharacteristicsCallback — fires when iOS reads any characteristic;
+    //                                used to track "last time iOS talked to us"
+    //                                in the periodic health log.
+    homeSpan.setPairCallback(hap_pair_cb);
+    homeSpan.setControllerCallback(hap_controller_change_cb);
+    homeSpan.setGetCharacteristicsCallback(hap_get_characteristics_cb);
 
     homeSpan.begin(Category::Bridges, device_name, device_name_rfc952, "ratgdo-ESP32");
 
@@ -918,6 +1197,12 @@ void setup_homekit()
     // Auto poll starts up a new FreeRTOS task to do the HomeKit comms
     // so no need to handle in our Arduino loop.
     homeSpan.autoPoll((1024 * 16), 1, 0);
+
+    // Start periodic HomeKit health logging — see homekit_health_log()
+    // above. Fires at boot (immediate first sample) then every 60s.
+    homekitHealthTicker.detach();
+    homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_MS, homekit_health_log);
+
     homekit_setup_done = true;
 }
 

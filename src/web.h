@@ -35,6 +35,9 @@ extern void web_loop();
 
 extern void handle_notfound();
 extern void handle_reboot();
+extern void handle_reconnect_homekit();
+extern void handle_refresh_mdns();
+extern void handle_dump_homekit_state();
 extern void factoryReset();
 
 extern void load_page(const char *page);

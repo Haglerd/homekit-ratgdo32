@@ -1172,6 +1172,47 @@ async function firmwareUpdate(github = true) {
     }
 }
 
+// HomeKit recovery actions — same handlers as the Logs/HomeKit tab,
+// duplicated so home-page buttons work without depending on logs.js.
+function _hkSetStatus(text, color, clearMs) {
+    const el = document.getElementById("hkActionStatus");
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = color || "";
+    if (clearMs) setTimeout(() => { el.textContent = ""; el.style.color = ""; }, clearMs);
+}
+
+async function hkRefreshMDNS() {
+    _hkSetStatus("Sending mDNS refresh…", "");
+    try {
+        const r = await fetch("refreshHomeKitMDNS", { method: "POST" });
+        if (r.ok) _hkSetStatus("Refresh sent — mDNS re-advertised. Check Home app in a few seconds.", "#3a7a3a", 8000);
+        else _hkSetStatus(`Failed (HTTP ${r.status})`, "#a33", 6000);
+    } catch (e) { _hkSetStatus(`Failed (${e.message || "network"})`, "#a33", 6000); }
+}
+
+async function hkReconnect() {
+    if (!confirm("Reconnect HomeKit WiFi? This cycles WiFi briefly (no reboot).")) return;
+    _hkSetStatus("Sending reconnect…", "");
+    try {
+        const r = await fetch("reconnectHomeKit", { method: "POST" });
+        if (r.ok) _hkSetStatus("Reconnect sent — WiFi cycling, HomeSpan will re-attach.", "#3a7a3a", 8000);
+        else _hkSetStatus(`Failed (HTTP ${r.status})`, "#a33", 6000);
+    } catch (e) {
+        // HTTP can drop during the cycle — that's expected, treat as success
+        _hkSetStatus("Sent (HTTP dropped during reconnect — expected).", "#3a7a3a", 8000);
+    }
+}
+
+async function hkDumpState() {
+    _hkSetStatus("Dumping state to log…", "");
+    try {
+        const r = await fetch("dumpHomeKitState", { method: "POST" });
+        if (r.ok) _hkSetStatus("Dump sent — see the System Log / HomeKit tab for output.", "#3a7a3a", 8000);
+        else _hkSetStatus(`Failed (HTTP ${r.status})`, "#a33", 6000);
+    } catch (e) { _hkSetStatus(`Failed (${e.message || "network"})`, "#a33", 6000); }
+}
+
 async function rebootRATGDO(dialog = true) {
     if (dialog) {
         let txt = "Reboot RATGDO, are you sure?";
