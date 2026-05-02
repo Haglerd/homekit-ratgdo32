@@ -1,0 +1,82 @@
+name: Auto-release on manifest version bump
+
+# Fires whenever docs/manifest.json changes on main. If the new version
+# field doesn't match an existing tag, this workflow creates the tag,
+# creates the GitHub Release, and dispatches release.yml to build the
+# firmware. Net effect: merge a PR that bumps manifest.json → entire
+# release pipeline runs hands-free.
+#
+# Why two workflows instead of one: GitHub workflows triggered by
+# `release: published` only fire when the release is created by a USER
+# token, NOT GITHUB_TOKEN. So if THIS workflow used GITHUB_TOKEN to
+# create the release, release.yml would never see the event. Solution:
+# explicitly dispatch release.yml after creating the tag/release.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/manifest.json'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  auto-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history needed for tag check)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read manifest version
+        id: ver
+        run: |
+          set -e
+          VERSION=$(jq -r '.version' docs/manifest.json)
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::Could not read .version from docs/manifest.json"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Manifest version on main: $VERSION"
+
+      - name: Check whether tag already exists
+        id: tagcheck
+        run: |
+          if git rev-parse "refs/tags/${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.ver.outputs.version }} already exists — nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.ver.outputs.version }} does not exist — will tag + release."
+          fi
+
+      - name: Create tag + GitHub Release
+        if: steps.tagcheck.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.ver.outputs.version }}" -m "${{ steps.ver.outputs.version }}"
+          git push origin "${{ steps.ver.outputs.version }}"
+          gh release create "${{ steps.ver.outputs.version }}" \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.ver.outputs.version }}" \
+            --notes "Auto-released by .github/workflows/auto-release.yml on push to main (manifest.json version bump)."
+
+      - name: Dispatch release.yml build
+        if: steps.tagcheck.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # release.yml's `release: published` trigger does NOT fire when
+          # the release was created by GITHUB_TOKEN (it does for user
+          # tokens). Manually dispatch to kick the build, using the new
+          # tag as the ref so action-json + builds use the tagged source.
+          gh workflow run release.yml --ref "${{ steps.ver.outputs.version }}"
+          echo "Dispatched release.yml at ref ${{ steps.ver.outputs.version }}"
