@@ -32,6 +32,10 @@ extern ESP8266WebServer server;
 
 extern void setup_web();
 extern void web_loop();
+// v22: drain SSE subscriptions flagged for deferred remove (set from
+// inside Ticker callbacks to avoid the in-callback Ticker.detach() →
+// vTaskDelete → uxListRemove crash). Call from main-loop context.
+extern void process_sse_pending_removes();
 
 extern void handle_notfound();
 extern void handle_reboot();
