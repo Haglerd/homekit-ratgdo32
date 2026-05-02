@@ -130,6 +130,20 @@
           <input type="button" value="Firmware Update" style="width: 28%;" onclick="showUpdateDialog()">
           <input type="button" id="unpair" value="Reset HomeKit" style="width: 28%;" onclick="unpairRATGDO()">
         </div>
+        <!-- HomeKit recovery row — try in order: lightest first.
+             Refresh mDNS  : re-broadcast advert, no WiFi drop  (~1s)
+             Reconnect HK  : cycle WiFi, HomeSpan re-attaches    (~3-5s)
+             Dump State    : print HomeSpan diag to log (read-only) -->
+        <div class="fullwidth"
+          style="padding-top: 0px; padding-bottom: 5px; padding-left: 0%; padding-right: 0%; display: flex; justify-content: space-between;">
+          <input type="button" value="Refresh HK mDNS" style="width: 28%;" onclick="hkRefreshMDNS()"
+                 title="Lightest HomeKit recovery — re-broadcast accessory advert without dropping WiFi.">
+          <input type="button" value="Reconnect HK WiFi" style="width: 28%;" onclick="hkReconnect()"
+                 title="Cycle WiFi briefly to recover from 'No Response' without rebooting.">
+          <input type="button" value="Dump HK State" style="width: 28%;" onclick="hkDumpState()"
+                 title="Dump HomeSpan diagnostic state to the system log (read-only).">
+        </div>
+        <span id="hkActionStatus" style="font-size: 0.85em; padding-left: 4px;"></span>
         <div class="fullwidth">
           <table style="table-layout: fixed; width: 100%;">
             <colgroup>
