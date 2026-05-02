@@ -1044,12 +1044,16 @@ void update_door_state(GarageDoorCurrentState current_state)
     case GarageDoorCurrentState::CURR_OPEN:
     case GarageDoorCurrentState::CURR_CLOSED:
     case GarageDoorCurrentState::CURR_STOPPED:
-        // Defensive cleanup — if we somehow reach a terminal state
-        // (door physically settled) with the force-close flag still
-        // set (e.g. someone aborted the sequence via wall/remote
-        // before our release callback could fire), clear it now so
-        // the next force-close request isn't rejected.
-        clear_force_close_state("door reached terminal state");
+        // NOTE: removed defensive clear_force_close_state() here in
+        // v3.4.4-forceclose.17. update_door_state() is invoked on EVERY
+        // status poll, not only on state transitions, so calling
+        // clear_force_close_state from the CURR_OPEN case fired during
+        // an in-flight force-close (door still physically Open while
+        // attempt 1's hold timer was running) — wiping forceCloseAttempt
+        // mid-sequence. The release callback then sent "attempt 0
+        // release" and the firmware looped a second 2-attempt sequence
+        // on top of the first. The CURR_CLOSING fix above is the actual
+        // leak-stopper; this branch was over-defensive.
         // If timer that checks door completely opens/closes is active, cancel it.
         if (checkDoorCompleted.active())
         {
