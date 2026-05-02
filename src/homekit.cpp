@@ -523,6 +523,23 @@ void homekit_refresh_mdns(const char *reason)
     ESP_LOGI(TAG, "HomeKit mDNS refresh: updateDatabase(true) returned, mDNS re-advertised");
 }
 
+// Programmatic invocation of HomeSpan's diagnostic CLI commands. Lets us
+// dump full HomeSpan state to the syslog from a web button without
+// requiring a USB serial cable. Only read-only commands ('s' status,
+// 'i' accessory database, 'd' diagnostics) — no 'P' (pairing data is
+// sensitive), no state-changing commands.
+void homekit_dump_state(const char *reason)
+{
+    ESP_LOGW(TAG, "HomeSpan state dump requested (%s) — running CLI commands s, i, d", reason ? reason : "unspecified");
+    // 's' — overall status (WiFi, pair, config number)
+    homeSpan.processSerialCommand("s");
+    // 'i' — accessory database with IIDs/values/permissions
+    homeSpan.processSerialCommand("i");
+    // 'd' — operational state diagnostics
+    homeSpan.processSerialCommand("d");
+    ESP_LOGI(TAG, "HomeSpan state dump complete");
+}
+
 // User-triggered "Reconnect HomeKit" recovery — invoked from the
 // /reconnectHomeKit web endpoint. Cycles the WiFi association without
 // rebooting; HomeSpan reattaches automatically when WiFi returns and

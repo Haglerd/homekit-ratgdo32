@@ -66,6 +66,7 @@ static const char *TAG = "ratgdo-http";
 void handle_reset();
 void handle_reconnect_homekit();
 void handle_refresh_mdns();
+void handle_dump_homekit_state();
 void handle_status();
 void handle_everything();
 void handle_setgdo();
@@ -96,6 +97,7 @@ const std::unordered_map<std::string, std::pair<const HTTPMethod, void (*)()>> b
     {"/reboot", {HTTP_POST, handle_reboot}},
     {"/reconnectHomeKit", {HTTP_POST, handle_reconnect_homekit}},
     {"/refreshHomeKitMDNS", {HTTP_POST, handle_refresh_mdns}},
+    {"/dumpHomeKitState", {HTTP_POST, handle_dump_homekit_state}},
     {"/setgdo", {HTTP_POST, handle_setgdo}},
     {"/logout", {HTTP_GET, handle_logout}},
     {"/auth", {HTTP_GET, handle_auth}},
@@ -681,6 +683,19 @@ void handle_refresh_mdns()
     server.client().setNoDelay(true);
     server.send(200, type_txt, resp);
     homekit_refresh_mdns("via web UI /refreshHomeKitMDNS");
+    return;
+}
+
+// Dumps HomeSpan's full diagnostic CLI output (status + accessory DB +
+// operational diagnostics) to the system log / syslog. Read-only —
+// useful for debugging "No Response" against device-side state without
+// needing a USB serial cable.
+void handle_dump_homekit_state()
+{
+    const char *resp = "HomeSpan state dump triggered. Check the System Log / HomeKit tab for output.\n";
+    server.client().setNoDelay(true);
+    server.send(200, type_txt, resp);
+    homekit_dump_state("via web UI /dumpHomeKitState");
     return;
 }
 
