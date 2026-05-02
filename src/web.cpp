@@ -855,6 +855,13 @@ void build_status_json(char *json)
     JSON_ADD_INT("autoCloseStartMinutes", userConfig->getAutoCloseStartMinutes());
     JSON_ADD_INT("autoCloseEndMinutes", userConfig->getAutoCloseEndMinutes());
     JSON_ADD_BOOL("autoCloseIgnoreWindow", userConfig->getAutoCloseIgnoreWindow());
+    // HomeKit watchdog (fork addition) — toggle + thresholds drive the
+    // periodic homekit_health_log diagnostics and (if enabled) recovery.
+    JSON_ADD_BOOL("hkAutoRecover", userConfig->getHKAutoRecover());
+    JSON_ADD_INT("hkAutoRecoverSecs", userConfig->getHKAutoRecoverSecs());
+    JSON_ADD_INT("hkHintQuietSecs", userConfig->getHKHintQuietSecs());
+    JSON_ADD_INT("hkHintStaleSecs", userConfig->getHKHintStaleSecs());
+    JSON_ADD_INT("hkHintLikelyNRSecs", userConfig->getHKHintLikelyNRSecs());
     JSON_ADD_INT("upTime", upTime);
     JSON_ADD_STR(cfg_deviceName, userConfig->getDeviceName());
     JSON_ADD_STR("userName", userConfig->getwwwUsername());
