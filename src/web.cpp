@@ -623,6 +623,44 @@ String *ratgdoAuthenticate(HTTPAuthMethod mode, String enteredUsernameOrReq, Str
         return server.requestAuthentication(DIGEST_AUTH, www_realm);
 #endif
 
+// v23: same-origin / CSRF guard for state-changing endpoints. If
+// Origin or Referer is present and the host part doesn't match our
+// own Host header, reject with 403. Missing headers are accepted (some
+// legacy tools and direct curl POSTs don't send them, and the user
+// already authenticated through AUTHENTICATE() above) so this doesn't
+// lock anyone out — it only hard-fails the obvious cross-site case.
+//
+// Pulled out of handle_setgdo (where it lived inline) so the new
+// /reconnectHomeKit, /refreshHomeKitMDNS, /dumpHomeKitState endpoints
+// can reuse the same logic. Returns true if the request should
+// proceed; returns false (and sends 403) if it should be rejected.
+static bool enforce_same_origin(const char *uriForLog)
+{
+    auto headerHas = [](const String &h, const char *needle) -> bool {
+        return h.length() > 0 && h.indexOf(needle) >= 0;
+    };
+    String origin  = server.hasHeader("Origin")  ? server.header("Origin")  : String();
+    String referer = server.hasHeader("Referer") ? server.header("Referer") : String();
+    String myHost  = server.hasHeader("Host")    ? server.header("Host")    : String();
+    if ((origin.length() > 0 || referer.length() > 0) && myHost.length() > 0)
+    {
+        String hostOnly = myHost;
+        int colon = hostOnly.indexOf(':');
+        if (colon >= 0) hostOnly = hostOnly.substring(0, colon);
+        bool sameOrigin =
+            (origin.length() > 0  && headerHas(origin,  hostOnly.c_str())) ||
+            (referer.length() > 0 && headerHas(referer, hostOnly.c_str()));
+        if (!sameOrigin)
+        {
+            ESP_LOGW(TAG, "CSRF: rejecting %s — Origin=%s Referer=%s Host=%s",
+                     uriForLog, origin.c_str(), referer.c_str(), myHost.c_str());
+            server.send_P(403, type_txt, PSTR("Forbidden: cross-origin"));
+            return false;
+        }
+    }
+    return true;
+}
+
 void handle_auth()
 {
     AUTHENTICATE();
@@ -670,13 +708,29 @@ void handle_reboot()
 // the user gets feedback in the UI before HTTP becomes briefly
 // unreachable. Logged via ESP_LOGW with "via web UI" tag for syslog
 // visibility.
+// v23: deferred WiFi cycle. Used by handle_reconnect_homekit. Fires
+// from a one-shot Ticker so the request thread returns immediately
+// instead of blocking other web requests / SSE clients / Tickers for
+// the ~750ms it takes to disconnect+reconnect WiFi.
+static Ticker reconnectHKTicker;
+static void run_deferred_reconnect_homekit()
+{
+    homekit_force_reconnect("via web UI /reconnectHomeKit");
+}
+
 void handle_reconnect_homekit()
 {
+    AUTHENTICATE();
+    if (!enforce_same_origin("/reconnectHomeKit")) return;
     const char *resp = "HomeKit reconnect triggered. WiFi will cycle in ~1s; expect a brief HTTP outage.\n";
     server.client().setNoDelay(true);
     server.send(200, type_txt, resp);
-    delay(500);
-    homekit_force_reconnect("via web UI /reconnectHomeKit");
+    // v23: schedule the WiFi cycle off the request thread. Was a bare
+    // delay(500) + sync WiFi.disconnect/reconnect inline, which blocked
+    // every concurrent SSE client + Ticker for ~750ms while the request
+    // thread stalled.
+    reconnectHKTicker.detach();
+    reconnectHKTicker.once_ms(500, run_deferred_reconnect_homekit);
     return;
 }
 
@@ -686,6 +740,8 @@ void handle_reconnect_homekit()
 // HomeSpan database update + mDNS re-advert.
 void handle_refresh_mdns()
 {
+    AUTHENTICATE();
+    if (!enforce_same_origin("/refreshHomeKitMDNS")) return;
     const char *resp = "HomeKit mDNS refresh triggered.\n";
     server.client().setNoDelay(true);
     server.send(200, type_txt, resp);
@@ -697,8 +753,22 @@ void handle_refresh_mdns()
 // operational diagnostics) to the system log / syslog. Read-only —
 // useful for debugging "No Response" against device-side state without
 // needing a USB serial cable.
+//
+// v23: gated on the homespanCLI setting. The HomeSpan dump exposes
+// pairing controller count and HAP IIDs to syslog (and to anyone who
+// can read it), which is information disclosure that the user never
+// opted into. Tying it to the existing homespanCLI toggle means this
+// only works when the user has explicitly enabled HomeSpan diagnostic
+// access for the device.
 void handle_dump_homekit_state()
 {
+    AUTHENTICATE();
+    if (!enforce_same_origin("/dumpHomeKitState")) return;
+    if (!userConfig->getEnableHomeSpanCLI())
+    {
+        server.send_P(403, type_txt, PSTR("Forbidden: enable 'HomeSpan CLI' in Settings to use the state dump."));
+        return;
+    }
     const char *resp = "HomeSpan state dump triggered. Check the System Log / HomeKit tab for output.\n";
     server.client().setNoDelay(true);
     server.send(200, type_txt, resp);
@@ -1287,36 +1357,9 @@ void handle_setgdo()
         AUTHENTICATE();
     }
 
-    // CSRF guard: if Origin/Referer is present and points at a host other
-    // than ours, reject. Same-origin requests from the dashboard always
-    // include one of these headers; a cross-site request from another tab
-    // would carry the attacker's origin. We accept missing headers (some
-    // legacy tools and direct curl POSTs don't send them, and the user
-    // already authenticated) so this doesn't lock anyone out — it only
-    // hard-fails the obvious cross-site case.
-    auto headerHas = [](const String &h, const char *needle) -> bool {
-        return h.length() > 0 && h.indexOf(needle) >= 0;
-    };
-    String origin = server.hasHeader("Origin") ? server.header("Origin") : String();
-    String referer = server.hasHeader("Referer") ? server.header("Referer") : String();
-    String myHost = server.hasHeader("Host") ? server.header("Host") : String();
-    if ((origin.length() > 0 || referer.length() > 0) && myHost.length() > 0)
-    {
-        // Strip port for comparison since Origin/Referer may include it
-        String hostOnly = myHost;
-        int colon = hostOnly.indexOf(':');
-        if (colon >= 0) hostOnly = hostOnly.substring(0, colon);
-        bool sameOrigin =
-            (origin.length() > 0 && headerHas(origin, hostOnly.c_str())) ||
-            (referer.length() > 0 && headerHas(referer, hostOnly.c_str()));
-        if (!sameOrigin)
-        {
-            ESP_LOGW(TAG, "CSRF: rejecting /setgdo — Origin=%s Referer=%s Host=%s",
-                     origin.c_str(), referer.c_str(), myHost.c_str());
-            server.send_P(403, type_txt, PSTR("Forbidden: cross-origin"));
-            return;
-        }
-    }
+    // v23: CSRF guard pulled into enforce_same_origin() (above) so the
+    // 4 state-changing endpoints share one implementation.
+    if (!enforce_same_origin("/setgdo")) return;
 
     // Loop over all the GDO settings passed in...
     for (int i = 0; i < server.args(); i++)
@@ -1337,6 +1380,22 @@ void handle_setgdo()
             long hi = (key == "autoCloseMinutes") ? 720 : 1439;
             if (n < lo) n = lo;
             if (n > hi) n = hi;
+            value = std::to_string(n);
+        }
+        // v23: same defensive clamp for HomeKit watchdog timer keys.
+        // Without this, a hand-crafted POST hkAutoRecoverSecs=0 (or any
+        // value < 60) would make the watchdog auto-fire on every health
+        // tick → WiFi cycles every 3 minutes forever → device unreachable
+        // by HomeKit until manual settings rescue. Range [60, 7200] matches
+        // the form bounds in src/www/index.html.
+        if (key == "hkAutoRecoverSecs" ||
+            key == "hkHintQuietSecs" ||
+            key == "hkHintStaleSecs" ||
+            key == "hkHintLikelyNRSecs")
+        {
+            long n = strtol(value.c_str(), nullptr, 10);
+            if (n < 60) n = 60;
+            if (n > 7200) n = 7200;
             value = std::to_string(n);
         }
 
@@ -1398,10 +1457,12 @@ void handle_setgdo()
         ESP8266_SAVE_CONFIG();
         // v22 hooks — after settings save, re-arm anything that caches
         // a config value at boot. Cheap (refreshing a handful of static
-        // vars / detaching+attaching a Ticker) and only runs when the
-        // user actually changes settings.
+        // vars / setting a flag) and only runs when the user actually
+        // changes settings. v23 routes the auto-close reschedule via
+        // the deferred-flag drain so it happens on the main loop instead
+        // of racing the Ticker callback's own self-reschedule.
         homekit_refresh_watchdog_config();
-        update_auto_close_schedule();
+        request_auto_close_reschedule();
     }
     if (reboot)
     {

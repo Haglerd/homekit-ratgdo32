@@ -82,9 +82,15 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           release-tag: ${{ steps.tag.outputs.latestTag }}
 
+      # v23: removed `continue-on-error: true`. Previously a silent failure
+      # here would let the firmware-bins step proceed with a stale manifest
+      # on origin/main → end users OTA the new bins via a pinned-old
+      # manifest.json that points at older filenames. The current logic
+      # (set -e + git push) now hard-fails the workflow if anything goes
+      # wrong, so we either ship a consistent release or no release at all.
       - name: Commit updated manifest.json to docs/
-        continue-on-error: true
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # Save the action-json edits before we move HEAD off the release tag
