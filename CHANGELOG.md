@@ -10,6 +10,33 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.34 (2026-05-05)
+
+The "needs-build-validation" bucket of audit follow-ups, plus a user-spec'd watchdog log gating toggle, plus a HOTFIX for the v33 device-side OTA breakage.
+
+**⚠️ HOTFIX — device-side OTA URL was broken in v33**
+
+v33 ship MH7 (manifest paths → absolute GitHub release URLs) but missed updating `src/www/functions.js:1019`, which constructs the device's `Update from GitHub` button download URL from a Pages-relative pattern. After v33 shipped, devices on v32 trying to OTA to v33 via the device's web UI got an MD5 mismatch error because the `firmware.bin` Pages URL no longer existed. **v34 patches functions.js to construct the github.com release-download URL.** Workaround until v34 ships: use the web installer at `https://haglerd.github.io/homekit-ratgdo32/` (which fetches `manifest.json` directly with the correct URLs).
+
+**Added (user-spec)**
+
+- **`hkVerboseLogs` toggle (default OFF).** Gates the periodic 180s `HomeKit health` / `HomeKit diag-sse` / `HomeKit diag-hk` lines + post-action narration (mDNS refresh complete, HomeSpan state dump complete, HomeKit reconnect WiFi cycling) + `HomeKit watchdog config refreshed` behind a user setting. **Event-occurred lines stay unconditional**: auto-recover (1/2 / 2/2 / give-up), hint-level transitions (iOS extended idle / gone quiet / silent), HAP reads resumed, pair-state-changed, controller-list-changed, WiFi disconnect, mDNS-refresh-requested intent log, dump-state-requested intent log, reconnect-requested intent log. Implementation: new `cfg_hkVerboseLogs` config key + cached `hkCfgVerboseLogs` static + `HK_DIAG_LOG()` dual-level macro that emits at INFO when toggle ON, DEBUG when OFF (so a developer can still see them by setting global log level to DEBUG without flipping the user toggle). Surfaced in Settings → HomeKit Watchdog → Verbose Logs row + `/status.json`. Honest framing: this does NOT reclaim BSS or flash (format strings still compiled in). What it buys: reduced log ring-buffer churn → more useful crash-log context (16 KB ring wraps every ~80 min of normal operation; quiet watchdog preserves much more pre-crash context), reduced SSE broadcast traffic to live log subscribers, reduced syslog UDP traffic, cleaner default-config syslog feed.
+
+**Build / portability (NEEDS BUILD VALIDATION before deploy)**
+
+- **MH5 — `-flto` + size-opt build flags.** Added `-Os`, `-flto`, `-ffunction-sections`, `-fdata-sections`, `-Wl,--gc-sections` to `[env:ratgdo_esp32dev]` build_flags. Expected `.text` reduction 5-15% on this firmware size. **Risk**: LTO can surface latent ODR violations or undefined-behavior that separate compilation tolerated. Audit recommended budgeting half a day for the first LTO build to triage any LTO-surfaced issues.
+
+**Concurrency (state-machine change — NEEDS HARDWARE SOAK)**
+
+- **F7 — split-stage WiFi reconnect, no more `delay(250)` on loopTask.** `homekit_force_reconnect` previously called `WiFi.disconnect(false); delay(250); WiFi.reconnect();` — the 250ms `delay()` blocked loopTask, stalling concurrent HTTP requests, comms_loop, and SSE broadcasts for the full window. v34 splits into stages: stage 1 issues `WiFi.disconnect()`, records timestamp, returns. New `homekit_drain_pending_reconnect_stage2()` (called every service_timer_loop tick on loopTask) checks elapsed time and fires `WiFi.reconnect()` when ≥250ms have passed. Net loopTask block: ~0ms (just the disconnect call). Audit had this as "no action / acceptable" but user explicitly requested it for v34.
+
+**Memory hygiene (instrumentation continuation)**
+
+- **MH6 — retune deferred to runtime data.** v33 added the `jsonPeak=…B` instrumentation; v34 does NOT retune `STATUS_JSON_BUFFER_SIZE` yet — needs days/weeks of jsonPeak data from real installs (v33+) to inform a safe cap. Audit explicitly says "do not apply without measuring."
+- **MH2 PSTR-wrap** — out of scope (ESP8266-cherry-pick work; not pursuing upstream PR currently).
+
+**Out of scope NOT in v34**: MH2 PSTR (ESP8266-only, no upstream PR pending).
+
 ### v3.4.4-forceclose.33 (2026-05-05)
 
 Mechanical cleanup pass — zero-build-risk audit follow-ups bucketed for this PR. **No behavior change for users.** Code review: GREEN.
