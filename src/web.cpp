@@ -1437,7 +1437,7 @@ void build_status_json(char *json)
         strncpy(ssidStr,  s_ssid.c_str(),  sizeof(ssidStr)  - 1); ssidStr[sizeof(ssidStr)   - 1] = '\0';
         strncpy(bssidStr, s_bssid.c_str(), sizeof(bssidStr) - 1); bssidStr[sizeof(bssidStr) - 1] = '\0';
     }
-    snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm, Channel %u", (int)WiFi.RSSI(), WiFi.channel());
+    snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm, Channel %d", (int)WiFi.RSSI(), (int)WiFi.channel());
     JSON_ADD_STR("macAddress", macStr);
     JSON_ADD_STR("wifiSSID", ssidStr);
     JSON_ADD_STR("wifiRSSI", rssiBuf);
