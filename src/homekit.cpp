@@ -65,7 +65,13 @@ void light_state_set(const homekit_value_t value);
 
 #else // not ESP8266
 
-static bool rebooting = false;
+// v40 (audit W13): volatile. Written by statusCallback (loopTask via
+// HomeSpan poll) on HS_REBOOTING; read by homekit_health_log (Ticker /
+// esp_timer task) every 180s and by other gates. Without volatile the
+// compiler is allowed to cache the value across calls within the same
+// Ticker invocation, missing the reboot window. Single-byte access is
+// atomic on Xtensa so volatile is sufficient (no need for atomic ops).
+static volatile bool rebooting = false;
 // v28: volatile for cross-context consistency (HomeSpan callbacks
 // write, homekit_health_log Ticker reads). Single-byte ⇒ atomic on
 // ESP32; volatile prevents the compiler from hoisting reads.
@@ -466,9 +472,22 @@ static void hap_get_characteristics_cb(const char *paths)
 // pairing transition, including unexpected unpair-from-iOS — the
 // startup HS_PAIRED status only fires once at boot, so without this
 // we wouldn't notice if a controller dropped the pairing later.
-static void hap_pair_cb(boolean isPaired)
+//
+// v40 (audit W11): parameter renamed from `isPaired` to `paired` to stop
+// shadowing the file-scope `::isPaired` global. Pre-v40 the assignment
+// pattern was missing entirely, AND the parameter shadow would have
+// blocked any future fix from working — any `isPaired = isPaired;` would
+// have just been a self-assignment of the parameter. Renamed param +
+// explicit assignment to the global. The 12 notify_homekit_* gates
+// (pre-v40: stuck at the last HS_PAIRED-set value until reboot) now
+// observe the live state. pairedControllersCount is cleared by the
+// controller-list-changed callback that fires shortly after — no need
+// to pre-empt it here (and pairedControllersCount is declared later
+// in this file, would be a forward-ref).
+static void hap_pair_cb(boolean paired)
 {
-    ESP_LOGW(TAG, "HomeKit pair state changed: now %s", isPaired ? "paired" : "UNPAIRED");
+    ESP_LOGW(TAG, "HomeKit pair state changed: now %s", paired ? "paired" : "UNPAIRED");
+    isPaired = paired;
 }
 
 // v31 final: captured at setup_homekit so homekit_health_log can
@@ -560,7 +579,6 @@ void homekit_refresh_watchdog_config()
     __atomic_store_n(&hkCfgStaleSecs,    userConfig->getHKHintStaleSecs(),    __ATOMIC_RELAXED);
     __atomic_store_n(&hkCfgLikelyNRSecs, userConfig->getHKHintLikelyNRSecs(), __ATOMIC_RELAXED);
     __atomic_store_n(&hkCfgVerboseLogs,  userConfig->getHKVerboseLogs(),      __ATOMIC_RELAXED);
-    __atomic_store_n(&hkCfgEnabled,      userConfig->getHKAutoRecover(),      __ATOMIC_RELEASE);
     // v23: reset hint-level + recovery-attempts state when thresholds
     // change. Both are only meaningful relative to the active thresholds.
     // Without these resets, lowering the trigger threshold mid-episode
@@ -568,9 +586,19 @@ void homekit_refresh_watchdog_config()
     // says "1 attempt already used"), and toggling the watchdog off→on
     // would carry over a stale level/counter from before. Wipe the
     // slate so each settings change is a fresh start.
+    //
+    // v40 (audit W17): MUST be reset BEFORE the RELEASE-store on
+    // hkCfgEnabled below. Pre-v40 these were reset AFTER the release-
+    // store, so a Ticker tick that observed `hkCfgEnabled=true` (just-
+    // refreshed) could still observe stale `hkRecoverAttempts` /
+    // `hkLastHintLevel` / `hkConsecutiveHealthyTicks` for one tick.
+    // Reordering moves them under the release-store's publication
+    // umbrella — when a reader observes the new hkCfgEnabled value,
+    // it also observes the freshly-cleared counters.
     hkLastHintLevel             = 0;
     hkRecoverAttempts           = 0;
     hkConsecutiveHealthyTicks   = 0;
+    __atomic_store_n(&hkCfgEnabled,      userConfig->getHKAutoRecover(),      __ATOMIC_RELEASE);
     HK_DIAG_LOG("HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u",
                 (int)__atomic_load_n(&hkCfgEnabled,      __ATOMIC_RELAXED),
                 (unsigned)__atomic_load_n(&hkCfgRecoverSecs,  __ATOMIC_RELAXED),
@@ -1047,13 +1075,27 @@ void statusCallback(HS_STATUS status)
         break;
     case HS_WIFI_CONNECTING:
         ESP_LOGI(TAG, "Status: WiFi connecting");
-        // Monitor IP address events, so we can show user IPv6 addresses
-        WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP6);
-        WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
-        // Monitor disconnect/reconnect transitions so HomeKit "No Response"
-        // events can be correlated with WiFi flaps in the syslog history.
-        WiFi.onEvent(WiFiStaDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-        WiFi.onEvent(WiFiStaConnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED);
+        // v40 (audit W12): one-shot guard. HS_WIFI_CONNECTING fires on
+        // EVERY WiFi connect/reconnect. Pre-v40 these four onEvent calls
+        // appended duplicate handler nodes to arduino-esp32's NetworkEvents
+        // list on every flap — slow heap leak (~24 B per duplicate), and
+        // every WiFi event was logged 1×, 2×, 3×, ... times after each
+        // reconnect. NetworkEvents has no dedup; the only fix is to
+        // register exactly once.
+        {
+            static bool wifiHandlersRegistered = false;
+            if (!wifiHandlersRegistered)
+            {
+                // Monitor IP address events, so we can show user IPv6 addresses
+                WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP6);
+                WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+                // Monitor disconnect/reconnect transitions so HomeKit "No Response"
+                // events can be correlated with WiFi flaps in the syslog history.
+                WiFi.onEvent(WiFiStaDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+                WiFi.onEvent(WiFiStaConnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED);
+                wifiHandlersRegistered = true;
+            }
+        }
         break;
     case HS_PAIRING_NEEDED:
         ESP_LOGI(TAG, "Status: Need to pair");
@@ -1141,7 +1183,11 @@ void testMoveDoor(const char *buf)
     }
     if (value >= 0 && value <= 100)
     {
-        Serial.printf("Move door to: %d%\n", value);
+        // v40 (audit W22): `%\n` is an invalid printf conversion specification
+        // (C99 §7.19.6.1¶9 / C++ inheriting) — UB, most implementations print
+        // a stray `%`, stricter ones may abort. Fixed to `%%\n` (literal `%`
+        // + newline) to match the obvious intent of "Move door to: NN%".
+        Serial.printf("Move door to: %d%%\n", value);
         gdo_door_move_to_target(value * 100);
     }
     else
