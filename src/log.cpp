@@ -46,6 +46,20 @@ uint32_t syslogFacility = SYSLOG_LOCAL0;
 // Lazy-allocated on first logToSyslog call when syslogEn=true. Saves
 // ~200 B BSS in the default config (syslogEn=false ships out of the box).
 static WiFiUDP *syslog = nullptr;
+// v36 (audit V1+V2): protect the syslog lifetime + the
+// WiFiUDP::beginPacket/print*/endPacket sequence with a mutex.
+// Closes:
+//   * V1 — use-after-free: task A mid-print, task B sets syslogEn=false,
+//     task C frees the WiFiUDP, task A dereferences freed pointer.
+//   * V2 — interleaved bytes: WiFiUDP isn't documented as thread-safe;
+//     concurrent beginPacket/print/endPacket from two tasks corrupts
+//     the in-flight datagram.
+// ESP8266 path is single-task cooperative — mutex compiles to nothing
+// there (TAKE_MUTEX/GIVE_MUTEX are already #defined to no-ops in
+// the ESP8266 #ifdef block).
+#ifndef ESP8266
+static SemaphoreHandle_t syslogMutex = nullptr;
+#endif
 bool suppressSerialLog = false;
 esp_log_level_t logLevel = ESP_LOG_VERBOSE;
 
@@ -209,6 +223,10 @@ LOG::LOG()
         rebootTime = 0;
     }
     logMutex = xSemaphoreCreateRecursiveMutex();
+    // v36 (audit V1+V2): mutex protects syslog object lifetime and the
+    // WiFiUDP beginPacket/print*/endPacket sequence. Plain (non-recursive)
+    // is sufficient — logToSyslog never re-enters itself.
+    syslogMutex = xSemaphoreCreateMutex();
     msgBuffer = static_cast<logBuffer *>(malloc(sizeof(logBuffer)));
     lineBuffer = static_cast<char *>(malloc(LINE_BUFFER_SIZE));
     set_arduino_panic_handler(panic_handler, NULL);
@@ -299,18 +317,15 @@ void LOG::logToBuffer(const char *fmt, va_list args)
     // task-handle so a different task entering during the broadcast
     // window doesn't get its own log silently dropped (the original
     // single bool guard would have done that once we released the mutex).
-    // F4: thread_local so each task gets its own LINE_BUFFER_SIZE buffer
-    // in TLS instead of paying stack-frame growth per logger task.
-    // Saves ~256 B per concurrent ESP_LOGx caller's stack frame; total
-    // RAM cost is one buffer per task that ever logs (loopTask, esp_timer,
-    // autoPoll, WiFi RX/TX, syslog) — same memory but moved off-stack.
-    // ESP8266 path falls back to stack-local — single-task cooperative
-    // RTOS, no TLS support in the older toolchain.
-#ifndef ESP8266
-    thread_local char outLine[LINE_BUFFER_SIZE];
-#else
+    // 256 B stack space per logger call. Fits comfortably in loopTask
+    // (8 KB) and esp_timer (4 KB) stacks. NOT a thread_local — see
+    // audit finding V4 (reverted F4 in v36) for OOM-abort rationale:
+    // ESP-IDF GCC's thread_local for non-trivial-construct storage uses
+    // emutls, which heap-allocates the TLS area on first access. Under
+    // heap exhaustion (the exact scenario where the watchdog is firing
+    // recovery logs), TLS alloc could fail and trigger
+    // __cxa_throw_bad_alloc() → abort. Stack-local always succeeds.
     char outLine[LINE_BUFFER_SIZE];
-#endif
     strncpy(outLine, lineBuffer, sizeof(outLine) - 1);
     outLine[sizeof(outLine) - 1] = '\0';
     GIVE_MUTEX();
@@ -638,66 +653,91 @@ void LOG::printMessageLog(Print &outputDev, bool slow)
 
 void logToSyslog(char *message)
 {
-    if (!syslogEn || !WiFi.isConnected()) {
-        // MH3 follow-up: if syslog was previously allocated and the user
-        // has now disabled it (or WiFi dropped permanently), free the
-        // ~200 B back to heap. Re-allocates on next enable.
-        if (syslog && !syslogEn) {
+    // v36 (audit V1+V2): single mutex-guarded section, single exit via
+    // `goto cleanup`. Every failure path falls through to the same
+    // give-mutex point so the lock can't be leaked on any return.
+    // Goto-cleanup pattern matches the precedent in comms.cpp:1658
+    // (`readIn:` label).
+#ifndef ESP8266
+    if (!syslogMutex) return;  // pre-init defensive
+    xSemaphoreTake(syslogMutex, portMAX_DELAY);
+#endif
+
+    // Disabled OR WiFi down: free the lazy-allocated WiFiUDP if it
+    // exists (V1 — must happen under the mutex so concurrent loggers
+    // can't dereference the freed pointer mid-`syslog->print()`).
+    if (!syslogEn || !WiFi.isConnected())
+    {
+        if (syslog && !syslogEn)
+        {
             delete syslog;
             syslog = nullptr;
         }
-        return;
+        goto cleanup;
     }
-    if (!syslog) {
+
+    if (!syslog)
+    {
         syslog = new (std::nothrow) WiFiUDP();
-        if (!syslog) return;  // alloc failed; skip silently
+        if (!syslog) goto cleanup;  // alloc failed; skip silently
     }
 
-    uint8_t PRI = syslogFacility * 8;
-    if (*message == '>')
-        PRI += SYSLOG_INFO;
-    else if (*message == '!')
-        PRI += SYSLOG_ERROR;
-    else if (*message == 'I')
-        PRI += SYSLOG_INFO;
-    else if (*message == 'E')
-        PRI += SYSLOG_ERROR;
-    else if (*message == 'W')
-        PRI += SYSLOG_WARN;
-    else if (*message == 'D')
-        PRI += SYSLOG_DEBUG;
-    else if (*message == 'V')
-        PRI += SYSLOG_DEBUG;
+    {
+        uint8_t PRI = syslogFacility * 8;
+        if (*message == '>')
+            PRI += SYSLOG_INFO;
+        else if (*message == '!')
+            PRI += SYSLOG_ERROR;
+        else if (*message == 'I')
+            PRI += SYSLOG_INFO;
+        else if (*message == 'E')
+            PRI += SYSLOG_ERROR;
+        else if (*message == 'W')
+            PRI += SYSLOG_WARN;
+        else if (*message == 'D')
+            PRI += SYSLOG_DEBUG;
+        else if (*message == 'V')
+            PRI += SYSLOG_DEBUG;
 
-    // Replace newline with null terminator
-    strtok(message, "\n");
-    strtok(message, "\r");
+        // Replace newline with null terminator
+        strtok(message, "\n");
+        strtok(message, "\r");
 
-    syslog->beginPacket(syslogIP, syslogPort);
-    // Use RFC5424 Format
-    syslog->print("<");
-    syslog->print(PRI);
-    syslog->print(">1 ");
+        // V2: WiFiUDP isn't thread-safe; the entire beginPacket → print*
+        // → endPacket sequence runs under the same mutex so concurrent
+        // tasks can't interleave bytes into one UDP datagram.
+        syslog->beginPacket(syslogIP, syslogPort);
+        // Use RFC5424 Format
+        syslog->print("<");
+        syslog->print(PRI);
+        syslog->print(">1 ");
 #if defined(USE_NTP_TIMESTAMP)
-    syslog->print((enableNTP && clockSet) ? timeString(0, true) : SYSLOG_NIL);
+        syslog->print((enableNTP && clockSet) ? timeString(0, true) : SYSLOG_NIL);
 #else
-    syslog->print(SYSLOG_NIL); // Time - let the syslog server insert time
+        syslog->print(SYSLOG_NIL); // Time - let the syslog server insert time
 #endif
-    syslog->print(" ");
-    syslog->print(device_name_rfc952); // hostname
+        syslog->print(" ");
+        syslog->print(device_name_rfc952); // hostname
 #ifdef ESP8266
-    syslog->print(" ratgdo"); // application name
+        syslog->print(" ratgdo"); // application name
 #else
-    syslog->print(" ratgdo32"); // application name
+        syslog->print(" ratgdo32"); // application name
 #endif
-    syslog->print(" " SYSLOG_NIL // process ID
-                 " " SYSLOG_NIL // message ID
-                 " " SYSLOG_NIL // structured data
+        syslog->print(" " SYSLOG_NIL // process ID
+                     " " SYSLOG_NIL // message ID
+                     " " SYSLOG_NIL // structured data
 #ifdef USE_UTF8_BOM
-                 " " SYSLOG_BOM); // BOM - indicates UTF-8 encoding
+                     " " SYSLOG_BOM); // BOM - indicates UTF-8 encoding
 #else
-                 " "); // No BOM
+                     " "); // No BOM
 #endif
-    syslog->print(message); // message
-    syslog->endPacket();
+        syslog->print(message); // message
+        syslog->endPacket();
+    }
+
+cleanup:
+#ifndef ESP8266
+    xSemaphoreGive(syslogMutex);
+#endif
+    return;
 }
