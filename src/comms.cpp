@@ -2927,7 +2927,13 @@ void update_auto_close_schedule()
 // to call from web request handlers, Ticker callbacks, etc.
 void request_auto_close_reschedule()
 {
-    autoCloseRescheduleRequested = true;
+    // v36 (audit V3): release-store. Pairs with the acquire-load in
+    // auto_close_drain_pending_reschedule. Tightens the discipline
+    // established by Finding C (v32) for the three HomeKit deferred
+    // flag pairs; this fourth flag was missed in that pass. Set from
+    // SNTP task (F6 callback), loopTask (/setgdo), and esp_timer task
+    // (auto-close one-shot Ticker wake) — three different contexts.
+    __atomic_store_n(&autoCloseRescheduleRequested, true, __ATOMIC_RELEASE);
 }
 
 // v23: drain — called every main loop tick from service_timer_loop.
@@ -2937,11 +2943,9 @@ void request_auto_close_reschedule()
 // detach/attach from request handler vs. tick callback.
 void auto_close_drain_pending_reschedule()
 {
-    if (autoCloseRescheduleRequested)
-    {
-        autoCloseRescheduleRequested = false;
-        update_auto_close_schedule();
-    }
+    if (!__atomic_load_n(&autoCloseRescheduleRequested, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&autoCloseRescheduleRequested, false, __ATOMIC_RELEASE);
+    update_auto_close_schedule();
 }
 
 // Auto-close check — only runs while we're scheduled (i.e. autoClose=on
