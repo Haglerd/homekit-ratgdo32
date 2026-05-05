@@ -12,7 +12,7 @@ This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. 
 
 ### v3.4.4-forceclose.44 (2026-05-05)
 
-Discipline hardening — closes the last v38-round-2 audit nit. **W9** added `volatile` to the two cross-task scalars in `comms.cpp:2640-2641` (`forceCloseAttempt`, `forceCloseHoldMsCached`). Both are written and read across loopTask + esp_timer task task boundaries; the surrounding `__atomic_*` flag barriers (`forceCloseInProgress`, `forceCloseGapPendingArmMs`, `forceCloseClearPending`) already provide happens-before edges so this is a discipline gap, not a runtime bug. The fix restores consistency with the other 11 cross-task scalars in `comms.cpp` that already carry `volatile`, and forbids future cross-call load hoisting if `-flto` is ever re-enabled. Zero codegen change on the current `-Os` (no LTO) toolchain. See audit-notes W9 for full mechanism.
+Discipline hardening — closes the last v38-round-2 audit nit. **W9** added `volatile` to the two cross-task scalars in `comms.cpp:2640-2641` (`forceCloseAttempt`, `forceCloseHoldMsCached`). Both are written and read across loopTask + esp_timer task boundaries; the surrounding `__atomic_*` flag barriers (`forceCloseInProgress`, `forceCloseGapPendingArmMs`, `forceCloseClearPending`) already provide happens-before edges so this is a discipline gap, not a runtime bug. The fix restores consistency with the other 11 cross-task scalars in `comms.cpp` that already carry `volatile`, and forbids future cross-call load hoisting if `-flto` is ever re-enabled. Zero codegen change on the current `-Os` (no LTO) toolchain. See audit-notes W9 for full mechanism.
 
 **Out of scope (still deferred)**
 
