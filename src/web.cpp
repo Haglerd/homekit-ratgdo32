@@ -631,11 +631,16 @@ void web_loop()
     {
         GIVE_MUTEX();
     }
-    static time_t mdnsDoorUpdateAt = 0;
-    if (lastDoorUpdateAt && !mdnsDoorUpdateAt)
+    // v43 (audit W34): renamed from `static time_t mdnsDoorUpdateAt` to
+    // a bool one-shot flag. The variable was never read as a time; only
+    // the truthiness was tested (`!mdnsDoorUpdateAt`) and assigned once
+    // when `lastDoorUpdateAt` first became non-zero. The time_t type was
+    // misleading.
+    static bool mdnsDoorUpdateInit = false;
+    if (lastDoorUpdateAt && !mdnsDoorUpdateInit)
     {
         // First time setting it... subsequent changes handled above.
-        mdnsDoorUpdateAt = lastDoorUpdateAt;
+        mdnsDoorUpdateInit = true;
         mdnsUpdatePending = true;
     }
     // Rate limiting - minimum interval between requests
@@ -1264,7 +1269,13 @@ void load_page(const char *page)
 
     bool cache = false;
     char cacheHdr[24] = "no-cache, no-store";
-    char matchHdr[8] = "";
+    // v43 (audit W37): defensive bump from [8] to [16]. Today's CRC32 ETag
+    // is 6 chars (urlsafe-b64 of 4 bytes, `=` padding stripped) so [8]
+    // fits, but is one byte from silent truncation if the encoding ever
+    // changes (full-base64 with `=` = 9 chars, MD5 hex = 32 chars). [16]
+    // comfortably accommodates any reasonable hash format. Zero runtime
+    // cost; one-line defensive sizing.
+    char matchHdr[16] = "";
     if ((CACHE_CONTROL > 0) &&
         (!strcmp_P(type, type_css) || !strcmp_P(type, type_html) || !strcmp_P(type, type_js) || strstr_P(type, PSTR("image"))))
     {
@@ -1695,9 +1706,12 @@ bool helperGarageDoorState(const std::string &key, const char *value, configSett
 // close (no protocol-level hold pattern exists).
 bool helperForceClose(const std::string &key, const char *value, configSetting *action)
 {
-    int hold_ms = atoi(value);
-    if (hold_ms <= 0) hold_ms = 3500; // default
-    door_command_force_close((uint32_t)hold_ms);
+    // v43 (audit W23): drop the helper-side clamp. door_command_force_close
+    // (comms.cpp:2832-2833) is the single source of truth for hold_ms bounds
+    // (`<1000 → 3500`, `>10000 → 10000`). Pre-v43 the helper also clamped
+    // `<= 0 → 3500` but ignored the upper bound, so dual-validation invited
+    // future drift between the two clamps.
+    door_command_force_close((uint32_t)atoi(value));
     return true;
 }
 
@@ -2923,15 +2937,14 @@ void handle_firmware_upload()
     }
     else if (_authenticatedUpdate && upload.status == UPLOAD_FILE_WRITE && !_updaterError.length())
     {
-        // Progress dot dot dot
-        Serial.print(".");
+        // v43 (audit W30): dropped Serial.print(".") progress noise.
+        // ESP_LOGI percentage line below is the authoritative indicator.
         if (firmwareSize > 0)
         {
             uploadProgress += upload.currentSize;
             uint32_t uploadPercent = (uploadProgress * 100) / firmwareSize;
             if (uploadPercent >= nextPrintPercent)
             {
-                Serial.print("\n"); // newline after the dot dot dots
                 ESP_LOGI(TAG, "%s progress: %d", verify ? "Verify" : "Update", uploadPercent);
                 nextPrintPercent += 5;
                 // Report percentage to browser client if it is listening
@@ -2966,7 +2979,8 @@ void handle_firmware_upload()
     }
     else if (_authenticatedUpdate && upload.status == UPLOAD_FILE_END && !_updaterError.length())
     {
-        Serial.print("\n"); // newline after last of the dot dot dots
+        // v43 (audit W30): dropped Serial.print("\n") that closed the
+        // dropped progress-dots line.
         if (!verify)
         {
             if (Update.end(true))

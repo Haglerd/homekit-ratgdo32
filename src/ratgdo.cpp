@@ -444,6 +444,10 @@ void service_timer_loop()
     homekit_drain_pending_state_dump();
     // v34 F7: drives the second half of the WiFi-reconnect cycle
     // ~250ms after the disconnect, without blocking loopTask.
+    // v43 (audit W38): on the same tick that homekit_force_reconnect set
+    // reconnectStage=1, this drain always bails — the elapsed-time gate
+    // at homekit.cpp:1010 (`(uint32_t)_millis() - reconnectStageStartMs
+    // < 250`) returns until ≥250ms have passed.
     homekit_drain_pending_reconnect_stage2();
 
     // Check heap

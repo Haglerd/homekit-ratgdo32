@@ -663,7 +663,14 @@ static void homekit_health_log()
     uint32_t loopHWM   = loopTaskHandleForHWM
                           ? (uint32_t)uxTaskGetStackHighWaterMark(loopTaskHandleForHWM)
                           : 0;
-    TaskHandle_t tmrSvc = xTaskGetHandle("Tmr Svc");
+    // v43 (audit W18): arduino-esp32 Ticker dispatches via esp_timer task —
+    // current task IS the timer task here. xTaskGetHandle("Tmr Svc") still
+    // resolves but points at the FreeRTOS Tmr Svc daemon, which on
+    // arduino-esp32 has minimal traffic; the HWM logged here would be that
+    // unrelated task's HWM, not the esp_timer task running this Ticker.
+    // Keep the variable name and the `tmrHWM=` log key to avoid breaking
+    // external grep/log-tooling.
+    TaskHandle_t tmrSvc = xTaskGetCurrentTaskHandle();
     uint32_t tmrSvcHWM  = tmrSvc
                           ? (uint32_t)uxTaskGetStackHighWaterMark(tmrSvc)
                           : 0;
