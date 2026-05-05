@@ -10,6 +10,10 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.41 (2026-05-05)
+
+Hotfix for a v40 regression: the Logs UX fix called `checkAuth()` from `functions.js`, but `logs.html` only loads `logs.js` — not `functions.js`. ReferenceError, JS died, page stuck spinning. v41 inlines the equivalent `/auth` fetch directly in `logs.js:111-126` so no cross-file dependency. Same Digest-prompt-and-stamp-IP behavior, contained to logs.js.
+
 ### v3.4.4-forceclose.40 (2026-05-05)
 
 Audit cleanup pass + Logs UX. Closes ten W11-W26 findings from the audit-notes "v36 post-closeout fresh-eye review" + a v39 follow-up UX fix in the device-UI Logs page.
