@@ -112,6 +112,21 @@ async function loadLogs() {
     tmpLogMsgs.length = 0;
     // Load all the logs in parallel, showing progress indicator while we do...
     loaderElem.style.visibility = "visible";
+    // v40: force a Digest auth challenge BEFORE the SSE subscribe, so the
+    // browser surfaces its native password prompt and the device's per-IP
+    // recent-auth allowlist (v39) gets stamped. Without this, the EventSource
+    // connection in step 2 below silently fails with a 401 (EventSource has
+    // no API to retry-with-auth, and the prior fetch() at this site quietly
+    // swallowed the 401 too) — user had to navigate to Settings or another
+    // auth'd page first to trigger Digest. Calling the existing checkAuth()
+    // fixes this: same pattern that the firmware-update + HomeKit-pair flows
+    // already use to gate sensitive actions. No-password installs short-
+    // circuit at AUTHENTICATE() inside /auth and return 200 immediately.
+    if (!await checkAuth(false)) {
+        console.warn("Logs require authentication. Please enter your password when prompted.");
+        loaderElem.style.visibility = "hidden";
+        return;
+    }
     console.log("Subscribe to Server Sent Events");
     // v27: heartbeat=10 (was 0). The orphan sweep on the firmware needs
     // a Ticker driving SSEheartbeat for class-5b cleanup (TCP-dropped

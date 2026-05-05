@@ -175,6 +175,14 @@ const int rtcSize = sizeof(rtcRebootLog) + sizeof(rtcCrashLog) + sizeof(rebootTi
 // at the take site rather than wrapped in a helper.)
 volatile uint32_t logMtxMaxWaitMs = 0;
 
+// v40 (audit W19): counter for syslog mutex timeouts. logToSyslog used to
+// take the mutex with portMAX_DELAY, which would pile up every other
+// logger task indefinitely if a wedged WiFi/UDP send (DNS SERVFAIL on
+// stale syslog hostname, switch port flap) blocked the mutex holder.
+// Now it bounded to 50ms; on timeout we increment this counter and
+// drop the line. Diagnostic exposure follows the logMtxMaxWaitMs pattern.
+volatile uint32_t syslogDrops = 0;
+
 // v37: post-panic snapshot guard. The Arduino panic handler is invoked
 // from the panic chain BEFORE the actual abort/restart, but other
 // FreeRTOS tasks (lwIP `tiT`, mDNS, HomeSpan autoPoll) keep running on
@@ -750,7 +758,19 @@ void logToSyslog(char *message)
     // (`readIn:` label).
 #ifndef ESP8266
     if (!syslogMutex) return;  // pre-init defensive
-    xSemaphoreTake(syslogMutex, portMAX_DELAY);
+    // v40 (audit W19): bounded mutex timeout instead of portMAX_DELAY.
+    // A wedged UDP send (lwIP buffer pressure, syslog server unreachable)
+    // would otherwise block every concurrent logger indefinitely. 50ms
+    // is generous vs. typical sub-millisecond UDP send latency on LAN;
+    // if drops climb in the diag log, the timeout can be tuned. The
+    // V1+V2 critical section is unreachable on timeout (we return before
+    // entering it) so the use-after-free / interleave properties from
+    // v36 are preserved.
+    if (xSemaphoreTake(syslogMutex, pdMS_TO_TICKS(50)) != pdTRUE)
+    {
+        __atomic_fetch_add(&syslogDrops, 1, __ATOMIC_RELAXED);
+        return;
+    }
 #endif
 
     // Disabled OR WiFi down: free the lazy-allocated WiFiUDP if it
