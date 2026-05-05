@@ -10,6 +10,14 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.35 (2026-05-05)
+
+**Hotfix release.** v34's CI build failed at the link step — the `-flto` flag added in MH5 is fundamentally incompatible with the fork's existing `-Wl,--wrap=esp_panic_handler` flag (used for ESP32 panic capture). LTO inlines / eliminates the wrapped function so the linker can't resolve `__wrap_esp_panic_handler` (and `app_main` got eliminated too). Net: v34 release exists with manifest only, no bins → users can't OTA to v34.
+
+**v35 reverts only `-flto`.** Other v34 changes (hkVerboseLogs toggle + UI, F7 split-stage WiFi reconnect, the v33 device-side OTA URL hotfix in `functions.js`, `-Os`/`-ffunction-sections`/`-fdata-sections`/`-Wl,--gc-sections` size flags) all stay. Net flash savings reduce from estimated 5-15% (full LTO) to ~1-3% (gc-sections only) — correctness preserved, modest size win still in.
+
+The fork can't enable LTO without dropping the panic-handler wrap, which is load-bearing for the v22+ crash-log preservation feature. Marking MH5 LTO as **not pursuable in this firmware**.
+
 ### v3.4.4-forceclose.34 (2026-05-05)
 
 The "needs-build-validation" bucket of audit follow-ups, plus a user-spec'd watchdog log gating toggle, plus a HOTFIX for the v33 device-side OTA breakage.
