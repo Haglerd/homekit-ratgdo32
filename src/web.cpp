@@ -767,10 +767,76 @@ void handle_notfound()
     return;
 }
 
+// v39: per-IP recent-auth allowlist. EventSource (browser SSE API) cannot
+// participate in Digest challenge/response — it has no API for retrying
+// with Authorization headers and the browser's auth-cache replay is
+// inconsistent across implementations. So an `AUTHENTICATE()` gate on
+// the SSE log subscribe path (added in v37) hard-broke the web-UI live
+// log viewer for users with a password set: every EventSource attempt
+// got a 401 with no recovery path.
+//
+// Fix: when AUTHENTICATE() succeeds for ANY handler, record the client
+// IP with a 5-minute TTL. The SSE log subscribe path then checks the
+// allowlist instead of running Digest itself. Browser flow:
+//   1. User navigates to a log/admin page  → Digest challenge → enters
+//      password → AUTHENTICATE() succeeds → IP recorded.
+//   2. Web UI's JS opens EventSource to /rest/events/subscribe?log
+//      → server checks IP is in allowlist → allow.
+//   3. An attacker on a DIFFERENT LAN IP cannot read the live SSE log
+//      stream without first AUTHENTICATE()-ing from that IP.
+//
+// 4 slots × (IPAddress + uint32_t ttl) is ~80 B BSS — supports up to
+// four concurrent auth'd clients. Oldest-evict on overflow. ESP8266
+// + ESP32 share the same code; AUTHENTICATE() macro is the only
+// arch-specific part.
+#define AUTH_ALLOWLIST_SLOTS    4
+#define AUTH_ALLOWLIST_TTL_MS   (5UL * 60UL * 1000UL)
+struct AuthAllowEntry {
+    IPAddress ip;
+    uint32_t  expiresMs;
+};
+static AuthAllowEntry authAllowlist[AUTH_ALLOWLIST_SLOTS] = {};
+
+static void recordAuthSuccess(const IPAddress &ip)
+{
+    uint32_t now = (uint32_t)_millis();
+    uint32_t expires = now + AUTH_ALLOWLIST_TTL_MS;
+    int      oldestIdx       = 0;
+    uint32_t oldestExpiresMs = authAllowlist[0].expiresMs;
+    for (int i = 0; i < AUTH_ALLOWLIST_SLOTS; i++) {
+        if (authAllowlist[i].ip == ip) {
+            authAllowlist[i].expiresMs = expires;
+            return;
+        }
+        if (authAllowlist[i].expiresMs < oldestExpiresMs) {
+            oldestIdx       = i;
+            oldestExpiresMs = authAllowlist[i].expiresMs;
+        }
+    }
+    authAllowlist[oldestIdx].ip        = ip;
+    authAllowlist[oldestIdx].expiresMs = expires;
+}
+
+static bool isAuthAllowedForIP(const IPAddress &ip)
+{
+    uint32_t now = (uint32_t)_millis();
+    for (int i = 0; i < AUTH_ALLOWLIST_SLOTS; i++) {
+        if (authAllowlist[i].ip == ip && authAllowlist[i].expiresMs > now) {
+            return true;
+        }
+    }
+    return false;
+}
+
 #ifdef ESP8266
-#define AUTHENTICATE()                                                                                                                  \
-    if (userConfig->getPasswordRequired() && !server.authenticateDigest(userConfig->getwwwUsername(), userConfig->getwwwCredentials())) \
-        return server.requestAuthentication(DIGEST_AUTH, www_realm);
+#define AUTHENTICATE()                                                                                                                      \
+    do {                                                                                                                                    \
+        if (userConfig->getPasswordRequired()) {                                                                                            \
+            if (!server.authenticateDigest(userConfig->getwwwUsername(), userConfig->getwwwCredentials()))                                  \
+                return server.requestAuthentication(DIGEST_AUTH, www_realm);                                                                \
+            recordAuthSuccess(server.client().remoteIP());                                                                                  \
+        }                                                                                                                                   \
+    } while (0)
 #else
 String *ratgdoAuthenticate(HTTPAuthMethod mode, String enteredUsernameOrReq, String extraParams[])
 {
@@ -782,9 +848,14 @@ String *ratgdoAuthenticate(HTTPAuthMethod mode, String enteredUsernameOrReq, Str
     return pw;
 }
 
-#define AUTHENTICATE()                                                                 \
-    if (userConfig->getPasswordRequired() && !server.authenticate(ratgdoAuthenticate)) \
-        return server.requestAuthentication(DIGEST_AUTH, www_realm);
+#define AUTHENTICATE()                                                                          \
+    do {                                                                                        \
+        if (userConfig->getPasswordRequired()) {                                                \
+            if (!server.authenticate(ratgdoAuthenticate))                                       \
+                return server.requestAuthentication(DIGEST_AUTH, www_realm);                    \
+            recordAuthSuccess(server.client().remoteIP());                                      \
+        }                                                                                       \
+    } while (0)
 #endif
 
 // Same-origin / CSRF guard for state-changing endpoints. Parses the
@@ -2281,12 +2352,29 @@ void handle_subscribe()
             heartbeatIntervalArgIdx = i;
     }
 
-    // Log-stream subscriptions require auth — same policy as /showlog,
-    // /showrebootlog, /crashlog. Door-status SSE (logViewer == false)
-    // remains open, matching /status.json.
-    if (logViewer)
+    // v39: log-stream subscribe checks the recent-auth IP allowlist
+    // instead of running Digest itself. EventSource (browser SSE API)
+    // can't participate in Digest challenge/response — the v37 attempt
+    // to use AUTHENTICATE() here returned 401 to every EventSource and
+    // hard-broke the live log viewer for users with a password set.
+    //
+    // The flow now: user navigates to any auth'd page (`/showlog`,
+    // `/setgdo`, `/reboot`, etc.) → AUTHENTICATE() macro succeeds →
+    // recordAuthSuccess() stamps their IP in `authAllowlist` with
+    // 5-min TTL. The web UI's JS then opens EventSource to ?log=1
+    // from the same origin → this check passes → SSE stream opens.
+    // An attacker on a different LAN IP can't read the SSE log feed
+    // without first AUTHENTICATE()-ing from their IP. No-password
+    // installs short-circuit at the getPasswordRequired() check, same
+    // as the AUTHENTICATE() macro. Door-status SSE (logViewer == false)
+    // stays open, matching /status.json.
+    if (logViewer && userConfig->getPasswordRequired() &&
+        !isAuthAllowedForIP(server.client().remoteIP()))
     {
-        AUTHENTICATE();
+        ESP_LOGW(TAG, "SSE log subscribe rejected: IP %s not in recent-auth allowlist (auth via /showlog or another auth'd page first)",
+                 server.client().remoteIP().toString().c_str());
+        server.send_P(401, type_txt, PSTR("Unauthorized: open an authenticated page first to authorize this IP for SSE log access"));
+        return;
     }
 
     // 4. heartbeat interval (F5 coerce)
