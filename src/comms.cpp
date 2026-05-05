@@ -2637,8 +2637,8 @@ void door_command(DoorAction action)
 //
 // Only meaningful on Sec+1.0. Sec+2.0 has no equivalent protocol message,
 // so it falls back to the normal close path.
-static int forceCloseAttempt = 0;
-static uint32_t forceCloseHoldMsCached = 3500;
+static volatile int forceCloseAttempt = 0;
+static volatile uint32_t forceCloseHoldMsCached = 3500;
 static volatile bool forceCloseInProgress = false;
 // Deferred gap-timer arm (Ticker → loopTask). 0 = no pending arm;
 // non-zero = arm forceCloseGapTimer for that ms. force_close_drain_pending_arm
