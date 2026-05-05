@@ -245,6 +245,15 @@ SSESubscription subscription[SSE_MAX_CHANNELS];
 SSESubscription *firmwareUpdateSub = NULL;
 uint32_t subscriptionCount = 0;
 
+// Public OTA-in-progress check used by the HK watchdog to inhibit
+// auto-recover (audit F5 — a WiFi cycle during an active upload aborts
+// the transfer and triggers rollback). Single pointer load = atomic on
+// Xtensa; no synchronization needed for a hint-quality signal.
+bool firmware_update_in_progress()
+{
+    return firmwareUpdateSub != NULL;
+}
+
 // Performance management - removed redundant connection tracking
 #define MIN_REQUEST_INTERVAL_MS 100
 
