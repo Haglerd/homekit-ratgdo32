@@ -10,6 +10,23 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.39 (2026-05-05)
+
+Hotfix release. Fixes the regression v37 introduced in the device-UI live log viewer for users with a password set.
+
+**Fixed**
+
+- **SSE log subscribe via EventSource — auth restored without breaking the browser.** v37 added `if (logViewer) AUTHENTICATE();` to `handle_subscribe` to gate the live SSE log feed behind the same Digest auth as `/showlog`. The mechanism worked for `curl --digest -u user:pass` but **hard-broke the browser's EventSource API** — every `?log=1` subscribe got a 401, and EventSource has no way to participate in Digest challenge/response (no API for the page to set custom headers, no built-in retry on 401). Result: the device-UI live log viewer was unreachable for any password-protected install on v37/v38. v39 keeps the security gate but routes around the EventSource limitation:
+    - `AUTHENTICATE()` macro in `web.cpp:771-792` (both ESP8266 and ESP32 variants) now records the client IP into a 4-slot `authAllowlist` table after a successful Digest challenge. 5-minute TTL, oldest-evict on overflow. ~96 B BSS — zero heap impact, no malloc/free, no thread-local storage.
+    - `handle_subscribe` log-stream branch (`web.cpp:2358`) replaces the broken `AUTHENTICATE()` call with a check against the allowlist via `isAuthAllowedForIP(server.client().remoteIP())`. Returns 401 with a clear "open an authenticated page first" message if the IP isn't in the table.
+    - Browser flow: user navigates to `/showlog` (or any other auth'd page like `/setgdo` settings) → Digest challenge → enters password → AUTHENTICATE() succeeds → IP recorded in allowlist with 5-min TTL. Web UI's JS opens EventSource to `?log=1` from the same origin → IP-allowlist check passes → live SSE stream opens cleanly. An attacker on a different LAN IP cannot read the SSE log feed without first succeeding Digest from their own IP. No-password installs short-circuit at `getPasswordRequired() == false`, same as the rest of the auth pipeline.
+
+This invents a small per-IP-allowlist mechanism (no precedent in the codebase) but the existing Digest auth doesn't work over EventSource at all, so SOME new mechanism was unavoidable. Rejected alternatives: (a) revert v37's SSE auth gate entirely — would leave the live log feed publicly readable, inconsistent with `/showlog`'s Digest gate; (b) full session-cookie machinery — significantly more code than the IP-allowlist for the same threat model on a home LAN.
+
+**Out of scope (still deferred)**
+
+- Boot-time heap exhaustion → `tiT` IllegalInstruction in mDNS receive (architectural). v36 fragmentation incident from "v37 follow-up findings" — separate concern, no v39 action.
+
 ### v3.4.4-forceclose.38 (2026-05-05)
 
 Audit cleanup pass — closes all seven W1-W7 findings from the v36 post-closeout fresh-eye review (`audit-notes/2026-05-04-fork-vs-upstream-attribution.md`, "v36 post-closeout fresh-eye review" section). Three "Important"-severity items (W1, W4, W7) and four "Nit"-severity (W2, W3, W5, W6).
