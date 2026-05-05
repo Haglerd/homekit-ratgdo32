@@ -3064,6 +3064,24 @@ static void checkAutoClose()
 }
 
 
+#else // USE_GDOLIB defined — provide no-op stubs so the six fork-added
+      // entry points still link. Auto-close + force-close infrastructure
+      // is Sec+1.0 packet-internal; there is no equivalent under gdolib.
+      // v43 (audit W31): without these stubs, enabling -D USE_GDOLIB
+      // produces six linker errors for the symbols declared in comms.h
+      // (`update_auto_close_schedule`, `request_auto_close_reschedule`,
+      // `auto_close_drain_pending_reschedule`, `door_command_force_close`,
+      // `force_close_drain_pending_arm`, `force_close_drain_pending_clear`)
+      // because every one of them is unconditionally referenced from
+      // setup_comms / web.cpp / utilities.cpp / ratgdo.cpp.
+
+void update_auto_close_schedule()        {}
+void request_auto_close_reschedule()     {}
+void auto_close_drain_pending_reschedule() {}
+void door_command_force_close(uint32_t /*hold_ms*/) {}
+void force_close_drain_pending_arm()     {}
+void force_close_drain_pending_clear()   {}
+
 #endif // not USE_GDOLIB
 
 void door_command_close()
