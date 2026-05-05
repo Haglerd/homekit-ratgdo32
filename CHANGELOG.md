@@ -10,6 +10,38 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.40 (2026-05-05)
+
+Audit cleanup pass + Logs UX. Closes ten W11-W26 findings from the audit-notes "v36 post-closeout fresh-eye review" + a v39 follow-up UX fix in the device-UI Logs page.
+
+**Critical fixes (HIGH severity)**
+
+- **W11 — `hap_pair_cb` parameter shadowed `::isPaired` global.** The fork added this callback specifically to track live unpair-from-iOS events, but the parameter `boolean isPaired` shadowed the file-scope `static volatile bool isPaired` so the callback never updated the global. All 12 `notify_homekit_*` gates and `/status.json paired:` were stuck at the last `HS_PAIRED`-set value until reboot. Renamed param to `paired` + explicit `isPaired = paired;` assignment in `homekit.cpp:475-491`. The whole reason the fork added this callback is now actually working for the first time.
+- **W12 — `WiFi.onEvent` re-registered on every `HS_WIFI_CONNECTING`.** Four event handlers were added to arduino-esp32's `NetworkEvents` list inside the status callback's `HS_WIFI_CONNECTING` branch — which fires on every WiFi connect/reconnect. `NetworkEvents` has no dedup; pre-v40 every WiFi flap appended four duplicate handler nodes (~24 B each, slow heap leak), and every WiFi event was logged 1x, 2x, 3x... times after each reconnect. v40 wraps the registrations in a `static bool wifiHandlersRegistered = false;` guard at `homekit.cpp:1078-1097`. Handlers persist across `WiFi.disconnect()`, so registering once is correct.
+- **W14 — Force-close `forceCloseInProgress` leak in the press-1↔press-2 gap window.** During the 1500ms gap between press 1 release and press 2, `TTCtimer` is detached and `forceCloseGapTimer` is the active one. The pre-v40 cleanup in `update_door_state(CURR_CLOSING)` was gated on `TTCtimer.active()`, so a door starting CLOSING during the gap missed the cleanup → `forceCloseInProgress` leaked AND the gap timer fired press 2 onto a now-closing door, toggling it back to open. v40 separates the two concerns: TTCtimer detach + state-resend stays gated on `TTCtimer.active()` (only meaningful when a timer is live); `clear_force_close_state` runs unconditionally on every CURR_CLOSING transition (`comms.cpp:1069-1091`). The function early-returns on `forceCloseInProgress=false` so it's a no-op cost when no force-close is in flight.
+- **W15 — `open_door` / `close_door` bypass / `toggle_door` leak path.** Three door-action sites (`comms.cpp:3160`, `:3325`, `:3389`) detach `TTCtimer` to cancel a TTC delay, but never invoked `request_force_close_clear`. If a force-close was using TTCtimer for press 1 hold, the detach killed the pending release callback as a side effect — the only path that clears `forceCloseInProgress` on normal completion. Same v17 leak pattern, never propagated. Added `request_force_close_clear()` after each detach with a contextual reason string.
+- **W16 — Frontend duplicate switch-case made `updateAutoCloseStatusRow()` unreachable.** `functions.js` had two switch blocks matching `autoClose*` keys: one at line ~572 (correct, sets the form fields) and a duplicate at line ~811 (which had the `updateAutoCloseStatusRow()` call — the intended home-page status row refresh). JS switch matches first-and-break, so the duplicate never fired. Home-page Auto-Close status row never updated after initial page load. v40 deletes the unreachable block + adds `updateAutoCloseStatusRow()` calls inside the earlier `autoClose` / `autoCloseMinutes` / `autoCloseStartMinutes` / `autoCloseEndMinutes` / `autoCloseIgnoreWindow` cases (`functions.js:572-602`).
+
+**Important fixes**
+
+- **W13 — `rebooting` static bool now `volatile`.** Written by `statusCallback` (loopTask) on `HS_REBOOTING`, read by `homekit_health_log` (Ticker / esp_timer task). Without volatile the compiler can cache the value across reads, missing the reboot window in the diag log. Single-byte access is atomic on Xtensa so volatile is sufficient.
+- **W17 — Watchdog state resets reordered BEFORE the release-store.** v38 W3 added release/acquire pairing on the `hkCfg*` config family with `hkCfgEnabled` as the RELEASE anchor — but the resets of `hkLastHintLevel` / `hkRecoverAttempts` / `hkConsecutiveHealthyTicks` happened AFTER the release-store, so a Ticker tick observing fresh `hkCfgEnabled=true` could observe stale counters for one tick. v40 reorders the resets to before the RELEASE on `hkCfgEnabled` so they get published with the rest of the config (`homekit.cpp:567-606`).
+- **W19 — `logToSyslog` mutex bounded to 50ms.** v36 V1+V2 fix took the syslog mutex with `portMAX_DELAY`, which would block every concurrent logger indefinitely if a wedged UDP send (DNS SERVFAIL on stale hostname, lwIP buffer pressure) held the mutex. v40 uses `pdMS_TO_TICKS(50)`; on timeout, increments a `volatile uint32_t syslogDrops` counter and silently drops the line. The V1+V2 critical section is unreachable on timeout (we return before entering it) so the use-after-free + interleave properties are preserved. Counter is exposed for diag log surfacing in a future release; for now log-volume health gives the same signal.
+- **W26 — Hint threshold order auto-fix.** The HomeKit hint-level cascade (`homekit_health_log`) evaluates `LikelyNR > Stale > Quiet` to assign level 3 / 2 / 1. Out-of-order user input (e.g. Quiet=1000, Stale=500, LikelyNR=300) silently subverted the intent — every idle tick jumped straight to level-3 Silent and the intermediate hints never fired. v40 adds an order-check after the per-key clamp pass at `web.cpp:1944-1973`: if not `Quiet < Stale < LikelyNR`, sort the three values ascending (3-element insertion sort), reassign in order, and log WARN so the user can see the auto-fix happened.
+
+**Nit fixes**
+
+- **W22 — `Serial.printf("Move door to: %d%\n", ...)` UB.** Bare `%\n` is an invalid printf conversion specification (C99 §7.19.6.1¶9). Most implementations emit a stray `%`, stricter ones may abort. Fixed to `%%\n` (literal `%` + newline) at `homekit.cpp:1144`. Dev-only path under `#ifdef USE_GDOLIB`.
+
+**UX (v39 follow-up)**
+
+- **`loadLogs()` calls `checkAuth()` first.** v39 introduced a per-IP recent-auth allowlist for the SSE log subscribe path (because EventSource can't do Digest auth). But the Logs tab JS opened EventSource immediately on tab load — pre-v40 the browser silently failed (EventSource doesn't surface 401 to the user) and required navigating to Settings or another auth'd page first to trigger the Digest prompt. v40 invokes the existing `checkAuth()` helper at the top of `loadLogs()` (`logs.js:111-119`), which forces a regular `fetch('auth')` call → browser fires the Digest prompt natively → user enters password → IP gets stamped via the v39 mechanism → EventSource opens cleanly. Same pattern that the firmware-update + HomeKit-pair flows already use to gate sensitive actions.
+
+**Out of scope (still deferred)**
+
+- Boot-time heap exhaustion → `tiT` IllegalInstruction in mDNS receive — architectural, requires boot-time-allocator profiling.
+- W18 (`xTaskGetHandle("Tmr Svc")` lookup mismatch), W20 (service_timer_loop OTA gate), W21 (ESP8266 #ifdef portability), W23 (helperForceClose redundant clamp), W24 (handle_unsubscribe String alloc), W25 (web_loop rate limit) — deferred to a future audit pass; not blocking real-world behavior on current installs.
+
 ### v3.4.4-forceclose.39 (2026-05-05)
 
 Hotfix release. Fixes the regression v37 introduced in the device-UI live log viewer for users with a password set.
