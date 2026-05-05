@@ -1696,7 +1696,10 @@ void sweep_sse_orphans()
 {
     // v28: truncate now to uint32_t to match the timestamp field width
     // (changed from _millis_t int64_t in v28 to avoid tearing risk).
-    // Subtraction is wrap-safe modulo 2^32.
+    // v30: age comparisons cast (now - timestamp) to int32_t below so
+    // a writer stamping AFTER our snapshot produces a negative age,
+    // not a 4.2B-ms underflow. The 49.7-day uint32 wraparound itself is
+    // still handled correctly by mod-2^32 arithmetic.
     uint32_t now = (uint32_t)_millis();
     uint32_t currentlyAlloc = 0;
     uint32_t reapedThisTick = 0;
@@ -1713,14 +1716,27 @@ void sweep_sse_orphans()
             continue;
         }
         currentlyAlloc++;
+        // v30: signed-subtraction guard. The sweep captures `now` once
+        // at the top, but writers (Ticker callbacks for SSEheartbeat,
+        // BUFFER_FULL stamps from SSEBroadcastState) can update
+        // subscribedAt/lastActivity during the loop. If a writer
+        // stamps a value AFTER our `now` snapshot, `now - timestamp`
+        // wraps to ~4.2 billion ms in uint32 space and trips a
+        // spurious reap (observed on v29 boot: idle=4294967294ms).
+        // Cast to int32_t so timestamps newer than `now` produce a
+        // negative age; comparison against the unsigned timeout fails
+        // and the slot stays alive (the next sweep tick will see the
+        // updated state and apply the real check).
+        int32_t preAge = (int32_t)(now - s.subscribedAt);
+        int32_t idleAge = (int32_t)(now - s.lastActivity);
         // 5a) pre-handshake abandoned
         if (!s.SSEconnected && s.subscribedAt != 0 &&
-            (now - s.subscribedAt) > SSE_PREHANDSHAKE_TIMEOUT_MS)
+            preAge > (int32_t)SSE_PREHANDSHAKE_TIMEOUT_MS)
         {
-            ESP_LOGW(TAG, "SSE orphan (pre-handshake) channel=%u uuid=%s ip=%s age=%ums — reaping",
+            ESP_LOGW(TAG, "SSE orphan (pre-handshake) channel=%u uuid=%s ip=%s age=%dms — reaping",
                      (unsigned)i, s.clientUUID.c_str(),
                      s.clientIP.toString().c_str(),
-                     (unsigned)(now - s.subscribedAt));
+                     (int)preAge);
             s.pendingRemove = true;
             sseOrphansReaped++;
             reapedThisTick++;
@@ -1739,12 +1755,12 @@ void sweep_sse_orphans()
         }
         // 5c) idle past the watchdog
         if (s.SSEconnected && s.lastActivity != 0 &&
-            (now - s.lastActivity) > SSE_IDLE_TIMEOUT_MS)
+            idleAge > (int32_t)SSE_IDLE_TIMEOUT_MS)
         {
-            ESP_LOGI(TAG, "SSE orphan (idle) channel=%u uuid=%s ip=%s idle=%ums — reaping",
+            ESP_LOGI(TAG, "SSE orphan (idle) channel=%u uuid=%s ip=%s idle=%dms — reaping",
                      (unsigned)i, s.clientUUID.c_str(),
                      s.clientIP.toString().c_str(),
-                     (unsigned)(now - s.lastActivity));
+                     (int)idleAge);
             s.pendingRemove = true;
             sseOrphansReaped++;
             reapedThisTick++;
