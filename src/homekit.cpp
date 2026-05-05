@@ -547,12 +547,20 @@ static volatile bool     hkCfgVerboseLogs   = false;
 
 void homekit_refresh_watchdog_config()
 {
-    hkCfgEnabled      = userConfig->getHKAutoRecover();
-    hkCfgRecoverSecs  = userConfig->getHKAutoRecoverSecs();
-    hkCfgQuietSecs    = userConfig->getHKHintQuietSecs();
-    hkCfgStaleSecs    = userConfig->getHKHintStaleSecs();
-    hkCfgLikelyNRSecs = userConfig->getHKHintLikelyNRSecs();
-    hkCfgVerboseLogs  = userConfig->getHKVerboseLogs();
+    // v38 (audit W3): release/acquire ordering pair. Writers run on
+    // loopTask (settings-save / boot bootstrap); readers run on
+    // esp_timer Ticker (homekit_health_log every 180s). Same pattern
+    // as cachedAutoClose* in comms.cpp — RELEASE on the LAST store,
+    // RELAXED on earlier stores; reader does ACQUIRE on the same flag
+    // first then RELAXED on the rest. hkCfgEnabled is the natural
+    // ordering anchor because the reader (homekit_health_log) tests
+    // it first to gate auto-recover behavior.
+    __atomic_store_n(&hkCfgRecoverSecs,  userConfig->getHKAutoRecoverSecs(),  __ATOMIC_RELAXED);
+    __atomic_store_n(&hkCfgQuietSecs,    userConfig->getHKHintQuietSecs(),    __ATOMIC_RELAXED);
+    __atomic_store_n(&hkCfgStaleSecs,    userConfig->getHKHintStaleSecs(),    __ATOMIC_RELAXED);
+    __atomic_store_n(&hkCfgLikelyNRSecs, userConfig->getHKHintLikelyNRSecs(), __ATOMIC_RELAXED);
+    __atomic_store_n(&hkCfgVerboseLogs,  userConfig->getHKVerboseLogs(),      __ATOMIC_RELAXED);
+    __atomic_store_n(&hkCfgEnabled,      userConfig->getHKAutoRecover(),      __ATOMIC_RELEASE);
     // v23: reset hint-level + recovery-attempts state when thresholds
     // change. Both are only meaningful relative to the active thresholds.
     // Without these resets, lowering the trigger threshold mid-episode
@@ -564,8 +572,11 @@ void homekit_refresh_watchdog_config()
     hkRecoverAttempts           = 0;
     hkConsecutiveHealthyTicks   = 0;
     HK_DIAG_LOG("HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u",
-                (int)hkCfgEnabled, (unsigned)hkCfgRecoverSecs,
-                (unsigned)hkCfgQuietSecs, (unsigned)hkCfgStaleSecs, (unsigned)hkCfgLikelyNRSecs);
+                (int)__atomic_load_n(&hkCfgEnabled,      __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&hkCfgRecoverSecs,  __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&hkCfgQuietSecs,    __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&hkCfgStaleSecs,    __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&hkCfgLikelyNRSecs, __ATOMIC_RELAXED));
 }
 
 static void homekit_health_log()
@@ -679,11 +690,15 @@ static void homekit_health_log()
     // disruptive for a daemon to do on its own.
     // v22: read cached values (refreshed at boot + on settings-save)
     // instead of taking the userConfig mutex inside this Ticker callback.
-    const bool     hkEnabled      = hkCfgEnabled;
-    const uint32_t hkRecoverSecs  = hkCfgRecoverSecs;
-    const uint32_t hkQuietSecs    = hkCfgQuietSecs;
-    const uint32_t hkStaleSecs    = hkCfgStaleSecs;
-    const uint32_t hkLikelyNRSecs = hkCfgLikelyNRSecs;
+    // v38 (audit W3): ACQUIRE on hkCfgEnabled pairs with the RELEASE
+    // store in homekit_refresh_watchdog_config. Synchronizes-with the
+    // four RELAXED stores from the writer; the rest of these reads
+    // can be RELAXED.
+    const bool     hkEnabled      = __atomic_load_n(&hkCfgEnabled,      __ATOMIC_ACQUIRE);
+    const uint32_t hkRecoverSecs  = __atomic_load_n(&hkCfgRecoverSecs,  __ATOMIC_RELAXED);
+    const uint32_t hkQuietSecs    = __atomic_load_n(&hkCfgQuietSecs,    __ATOMIC_RELAXED);
+    const uint32_t hkStaleSecs    = __atomic_load_n(&hkCfgStaleSecs,    __ATOMIC_RELAXED);
+    const uint32_t hkLikelyNRSecs = __atomic_load_n(&hkCfgLikelyNRSecs, __ATOMIC_RELAXED);
 
     // Tiered diagnostic hints — ALWAYS logged regardless of whether
     // auto-recover is enabled. Lets the user observe how silent
