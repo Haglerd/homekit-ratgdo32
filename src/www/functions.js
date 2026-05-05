@@ -1017,15 +1017,30 @@ async function checkVersion(progress = "dotdot1") {
             document.getElementById("firmwareDescription").innerHTML = marked.parse(latest.body);
         }
         if (asset?.name) {
-            // v34 (MH7 completion): bins now live on the GitHub release
-            // attachments, not docs/firmware/ on Pages. Construct the
-            // direct release-download URL — matches the format release.yml
-            // writes into manifest.json. Older v32 devices hit the OLD
-            // Pages-relative URL via this code path; OTA from v32 to v34+
-            // requires the web installer (haglerd.github.io/...) which
-            // fetches manifest.json directly. Future device-side
-            // "Update from GitHub" works once any v34+ build is running.
-            serverStatus.downloadURL = "https://github.com/" + gitUser + "/" + gitRepo + "/releases/download/" + latest.tag_name + "/" + asset.name;
+            // v37 (CORS hotfix): use Pages URL, not the github.com release
+            // download URL. github.com responds to release-download requests
+            // with a 302 to objects.githubusercontent.com. The 302 itself
+            // does NOT carry Access-Control-Allow-Origin, even though the
+            // final redirect target does — and browser CORS rules require
+            // the header on every response in the chain. Result: a fetch()
+            // from the device UI (origin http://<device-ip>) to github.com
+            // is hard-blocked by CORS, breaking the device-side
+            // "Update from GitHub" button (audit verified 2026-05-05 on
+            // v36 install attempt).
+            //
+            // GitHub Pages serves docs/firmware/ assets WITH
+            // Access-Control-Allow-Origin: * directly (no redirect chain),
+            // so the Pages URL works cross-origin. We commit the four
+            // flash bins (firmware.bin / bootloader.bin / partitions.bin /
+            // firmware.md5) to docs/firmware/ on every release tag — see
+            // release.yml's "Commit firmware bins" step (MH7 redux).
+            //
+            // Manifest.json paths still use github.com release URLs —
+            // those are consumed by the web installer at github.io,
+            // which uses ESP Web Tools fetch semantics that handle the
+            // 302 redirect chain correctly. Manifest URLs do NOT need
+            // to change. Only this device-side fetch path does.
+            serverStatus.downloadURL = "https://" + gitUser.toLowerCase() + ".github.io/" + gitRepo + "/firmware/" + asset.name;
             msg = "You have newest release";
             if (serverStatus.firmwareVersion < latest.tag_name) {
                 // Newest version at GitHub is greater from that installed
