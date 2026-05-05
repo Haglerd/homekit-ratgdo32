@@ -588,8 +588,12 @@ static void homekit_health_log()
     // sseOrphansReaped: per-window counter, atomic-exchange-zeroed below.
     extern volatile uint32_t sseSlotsAlloc;
     extern volatile uint32_t sseOrphansReaped;
-    uint32_t mtxWait  = __atomic_exchange_n(&logMtxMaxWaitMs,  0u, __ATOMIC_RELAXED);
-    uint32_t sseReaped = __atomic_exchange_n(&sseOrphansReaped, 0u, __ATOMIC_RELAXED);
+    // MH6 instrumentation: peak JSON length this window. Inform future
+    // STATUS_JSON_BUFFER_SIZE retune decision in v34.
+    extern volatile uint32_t statusJsonPeakLen;
+    uint32_t mtxWait     = __atomic_exchange_n(&logMtxMaxWaitMs,    0u, __ATOMIC_RELAXED);
+    uint32_t sseReaped   = __atomic_exchange_n(&sseOrphansReaped,   0u, __ATOMIC_RELAXED);
+    uint32_t jsonPeak    = __atomic_exchange_n(&statusJsonPeakLen,  0u, __ATOMIC_RELAXED);
     uint32_t sseAlloc = sseSlotsAlloc;
 #ifndef ESP8266
     size_t maxAllocBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -632,12 +636,13 @@ static void homekit_health_log()
     // and was being silently truncated mid-tickDrift token.
     // diag-sse: SSE pipeline + log-mutex pressure indicators.
     // diag-hk:  watchdog state + stack HWMs + tick cadence drift.
-    ESP_LOGI(TAG, "HomeKit diag-sse: logMtxMaxWait=%ums sseSlowWrites=%u sseBufferFullSkips=%u sseSlotsAlloc=%u sseOrphansReaped=%u",
+    ESP_LOGI(TAG, "HomeKit diag-sse: logMtxMaxWait=%ums sseSlowWrites=%u sseBufferFullSkips=%u sseSlotsAlloc=%u sseOrphansReaped=%u jsonPeak=%uB",
              (unsigned)mtxWait,
              (unsigned)sseSlowWrites,
              (unsigned)sseBufferFullSkips,
              (unsigned)sseAlloc,
-             (unsigned)sseReaped);
+             (unsigned)sseReaped,
+             (unsigned)jsonPeak);
     ESP_LOGI(TAG, "HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms",
              (unsigned)hkRecoverAttempts,
              (unsigned)hkLastHintLevel,
