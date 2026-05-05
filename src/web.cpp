@@ -328,6 +328,10 @@ volatile uint32_t sseBufferFullSkips = 0;
 // whether the slot leak that caused the v26 25s-post-boot wedge is back.
 volatile uint32_t sseSlotsAlloc = 0;
 volatile uint32_t sseOrphansReaped = 0;
+// MH6 instrumentation (v33): peak JSON length seen during a build —
+// used to inform a future STATUS_JSON_BUFFER_SIZE retune. Updated via
+// CAS-loop max from handle_status; read+zeroed each health-log window.
+volatile uint32_t statusJsonPeakLen = 0;
 // v29: tri-state version of clientWrite. Distinguishes "lwIP send buffer
 // can't accept the full payload right now" (BUFFER_FULL — peer is alive
 // but slow / link is congested, e.g. Tailscale tunnel) from "client.write
@@ -1468,6 +1472,13 @@ void handle_status()
     status_json_send[sizeof(status_json_send) - 1] = '\0';
     GIVE_MUTEX();
     jsonLen = strlen(status_json_send);
+    // MH6 instrumentation: track peak across the health-log window.
+    {
+        uint32_t prev = __atomic_load_n(&statusJsonPeakLen, __ATOMIC_RELAXED);
+        while ((uint32_t)jsonLen > prev &&
+               !__atomic_compare_exchange_n(&statusJsonPeakLen, &prev, (uint32_t)jsonLen,
+                                            false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    }
 
     server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
     server.send_P(200, type_json, status_json_send);

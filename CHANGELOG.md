@@ -10,6 +10,28 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.33 (2026-05-05)
+
+Mechanical cleanup pass — zero-build-risk audit follow-ups bucketed for this PR. **No behavior change for users.** Code review: GREEN.
+
+**Fixed (concurrency)**
+
+- **F6 — NTP/DST sync re-arms auto-close.** `time_is_set` SNTP callback now calls `request_auto_close_reschedule()` after updating `clockSet`. NTP correction or DST jump shifts the auto-close window-start boundary; the existing one-shot Ticker (armed against the pre-correction wallclock) would wake at the wrong absolute time. Drain runs on loopTask and re-detaches/re-attaches the Ticker safely. Both ESP8266 + ESP32 callback paths covered.
+
+**Memory hygiene**
+
+- **F4 — `thread_local` outLine in `LOG::logToBuffer`.** Was `char outLine[LINE_BUFFER_SIZE]` stack-local (256 B per concurrent ESP_LOGx caller's stack frame). Now `thread_local` for ESP32 — each task gets its own buffer in TLS instead of paying repeated stack-frame growth. ESP8266 falls back to stack-local (single-task cooperative RTOS, no per-task TLS). Net: same RAM total, but moved off-stack, which matters for tight stacks like Tmr Svc.
+- **MH3 follow-up — free `WiFiUDP syslog` when toggled off.** v32 added lazy-allocate; v33 adds the symmetric free path: when a future `logToSyslog` call sees `syslogEn=false` AND a previously-allocated `syslog` pointer, `delete syslog; syslog = nullptr;`. Re-allocates next time syslog is enabled. ~200 B heap reclaimed when the user toggles syslog off after enabling it.
+- **MH6 instrumentation (NOT a retune).** New `volatile uint32_t statusJsonPeakLen` — CAS-loop atomic-max writer in `handle_status` after each successful build, atomic-exchange-zeroed by `homekit_health_log` each window. Added as `jsonPeak=…B` to the `HomeKit diag-sse` log line. Purpose: collect peak data across days/weeks of real usage so v34 can decide whether `STATUS_JSON_BUFFER_SIZE` (currently 2560 B ESP32 / 2048 B ESP8266) can be retuned safely without flying blind. Audit explicitly says "do not apply MH6 retune without measuring" — this is the measurement.
+
+**Workflow**
+
+- **MH7 option 1 — release.yml: bins on GitHub release attachments only, manifest paths absolute.** The per-release "Commit firmware bins to docs/firmware/" workflow step is removed. Manifest path-update steps now write absolute `https://github.com/Haglerd/homekit-ratgdo32/releases/download/<tag>/<filename>` URLs instead of relative `firmware/<filename>` paths. Bins continue to upload to the GitHub release attachments via the existing `upload-release-assets` step. Net effect: bounded `.git` growth going forward (was ~5 MB/release × ~50 releases/year). Older bins in `docs/firmware/` stay (historical).
+
+**Intentionally NOT in v33 (analysis revealed audit was wrong)**
+
+- **MH1 ping-pong status_json** — audit's premise was "all writers/readers on loopTask." Verified incorrect: `SSEheartbeat` is a `status_json` writer (`web.cpp:1992-2020`) running from Ticker / esp_timer task. 2-buffer ping-pong races a loopTask reader against the esp_timer writer when the active flag flips mid-fanout. Current 3-buffer design (status_json + per-reader localJson + status_json_send) is correct and necessary. Skipping MH1 — savings (~2.5 KB BSS) not worth a new race surface.
+
 ### v3.4.4-forceclose.32 (2026-05-05)
 
 Audit follow-up cleanup of v31 — concurrency hygiene the v31 work surfaced after deployment, plus two memory-headroom items and a sweep of the version-prefix comment debt that accumulated v22-v31. **No new features, no behavior changes for users.** All atomic ordering pairs verified, all call sites swapped, all headers in sync. Code review: GREEN, ship it.

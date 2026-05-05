@@ -80,6 +80,10 @@ bool get_auto_timezone()
 void time_is_set(bool from_sntp)
 {
     clockSet = time(NULL);
+    // F6: a clock correction can shift the auto-close window-start
+    // boundary; ask the scheduler to re-arm. request_auto_close_reschedule
+    // is just a flag set — safe from any context, drained on loopTask.
+    request_auto_close_reschedule();
 }
 
 uint32_t sntp_update_delay_MS_rfc_not_less_than_15000()
@@ -91,6 +95,10 @@ void time_is_set(struct timeval *tv)
 {
     // Keep this callback function short and simple. Do not use our logging functions, as it may hang.
     clockSet = tv->tv_sec;
+    // F6: NTP correction or DST jump shifts the auto-close window-start
+    // boundary. Re-arm via the loopTask drain (current sleep-until-window-start
+    // Ticker was set against the pre-correction wallclock).
+    request_auto_close_reschedule();
 }
 #endif
 
