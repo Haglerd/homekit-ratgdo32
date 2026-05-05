@@ -10,6 +10,15 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.44 (2026-05-05)
+
+Discipline hardening — closes the last v38-round-2 audit nit. **W9** added `volatile` to the two cross-task scalars in `comms.cpp:2640-2641` (`forceCloseAttempt`, `forceCloseHoldMsCached`). Both are written and read across loopTask + esp_timer task task boundaries; the surrounding `__atomic_*` flag barriers (`forceCloseInProgress`, `forceCloseGapPendingArmMs`, `forceCloseClearPending`) already provide happens-before edges so this is a discipline gap, not a runtime bug. The fix restores consistency with the other 11 cross-task scalars in `comms.cpp` that already carry `volatile`, and forbids future cross-call load hoisting if `-flto` is ever re-enabled. Zero codegen change on the current `-Os` (no LTO) toolchain. See audit-notes W9 for full mechanism.
+
+**Out of scope (still deferred)**
+
+- Boot-time heap exhaustion → `tiT` mDNS-OOM — architectural; needs boot-time-allocator profiling traces from a workbench.
+- W25 (`web_loop` 10/sec rate limit) — needs soak data on burst-reconnect storm; no field evidence the gate is masking a real issue today.
+
 ### v3.4.4-forceclose.43 (2026-05-05)
 
 Audit cleanup pass — closes 17 of the 19 round-3 findings from the audit-notes "v39 round-3 findings (still open)" section (`audit-notes/2026-05-04-fork-vs-upstream-attribution.md`). Most are Nit severity; W20 / W32 / W36 are the only items with any runtime behavior implications. Builds on v42's cache-bust fix so the W28 `logs.js` regex change actually reaches deployed devices.
