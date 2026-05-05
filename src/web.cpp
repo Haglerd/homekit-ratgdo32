@@ -1899,31 +1899,35 @@ void handle_setgdo()
         // already enforces these bounds, but a hand-crafted POST can bypass
         // them; defending here keeps NVRAM from accepting nonsense like
         // autoCloseMinutes=99999999 or autoCloseStartMinutes=-1.
+        // v43 (audit W27): bounds pulled from config.h constants —
+        // AUTO_CLOSE_MAX_MINUTES, AUTO_CLOSE_MAX_TOD_MIN.
         if (key == "autoCloseMinutes" ||
             key == "autoCloseStartMinutes" ||
             key == "autoCloseEndMinutes")
         {
             long n = strtol(value.c_str(), nullptr, 10);
             long lo = (key == "autoCloseMinutes") ? 1 : 0;
-            long hi = (key == "autoCloseMinutes") ? 720 : 1439;
+            long hi = (key == "autoCloseMinutes") ? (long)AUTO_CLOSE_MAX_MINUTES : (long)AUTO_CLOSE_MAX_TOD_MIN;
             if (n < lo) n = lo;
             if (n > hi) n = hi;
             value = std::to_string(n);
         }
         // v23: same defensive clamp for HomeKit watchdog timer keys.
         // Without this, a hand-crafted POST hkAutoRecoverSecs=0 (or any
-        // value < 60) would make the watchdog auto-fire on every health
-        // tick → WiFi cycles every 3 minutes forever → device unreachable
-        // by HomeKit until manual settings rescue. Range [60, 7200] matches
-        // the form bounds in src/www/index.html.
+        // value < HK_WATCHDOG_MIN_SECS) would make the watchdog auto-fire
+        // on every health tick → WiFi cycles every 3 minutes forever →
+        // device unreachable by HomeKit until manual settings rescue.
+        // v43 (audit W27): bounds pulled from config.h constants —
+        // HK_WATCHDOG_MIN_SECS, HK_WATCHDOG_MAX_SECS. Range matches the
+        // form bounds in src/www/index.html (mirrored — see config.h note).
         if (key == "hkAutoRecoverSecs" ||
             key == "hkHintQuietSecs" ||
             key == "hkHintStaleSecs" ||
             key == "hkHintLikelyNRSecs")
         {
             long n = strtol(value.c_str(), nullptr, 10);
-            if (n < 60) n = 60;
-            if (n > 7200) n = 7200;
+            if (n < (long)HK_WATCHDOG_MIN_SECS) n = (long)HK_WATCHDOG_MIN_SECS;
+            if (n > (long)HK_WATCHDOG_MAX_SECS) n = (long)HK_WATCHDOG_MAX_SECS;
             value = std::to_string(n);
         }
 
