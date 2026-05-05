@@ -1941,6 +1941,40 @@ void handle_setgdo()
     {
         userConfig->set(cfg_wifiChanged, wifiChanged);
         ESP8266_SAVE_CONFIG();
+        // v40 (audit W26): enforce ordering Quiet < Stale < LikelyNR on the
+        // HomeKit hint thresholds before refreshing the watchdog config.
+        // The cascade in homekit_health_log evaluates LikelyNR > Stale >
+        // Quiet to assign hint level 3 / 2 / 1; out-of-order values let
+        // the user input cross-fire (e.g. Quiet=1000, Stale=500, LikelyNR=300
+        // makes every idle tick jump straight to level-3 Silent and the
+        // intermediate hints never fire). The per-key clamp pass above
+        // enforces [60, 7200] bounds; this enforces ORDER. Auto-fix to
+        // the user's intent: re-sort the three values ascending so the
+        // smallest becomes Quiet, middle becomes Stale, largest becomes
+        // LikelyNR. Logged at WARN if a fix was needed so the user can
+        // see their input got reordered.
+        {
+            uint32_t q  = userConfig->getHKHintQuietSecs();
+            uint32_t s  = userConfig->getHKHintStaleSecs();
+            uint32_t nr = userConfig->getHKHintLikelyNRSecs();
+            if (!(q < s && s < nr))
+            {
+                uint32_t sorted[3] = {q, s, nr};
+                // Tiny 3-element insertion sort, no <algorithm>/<utility>
+                // header dependency. uint32_t swap via a temp is fine here.
+                #define WEB_SWAP_U32(a, b) do { uint32_t tmp__ = (a); (a) = (b); (b) = tmp__; } while (0)
+                if (sorted[0] > sorted[1]) WEB_SWAP_U32(sorted[0], sorted[1]);
+                if (sorted[1] > sorted[2]) WEB_SWAP_U32(sorted[1], sorted[2]);
+                if (sorted[0] > sorted[1]) WEB_SWAP_U32(sorted[0], sorted[1]);
+                #undef WEB_SWAP_U32
+                ESP_LOGW(TAG, "HomeKit hint thresholds out of order (Quiet=%u Stale=%u LikelyNR=%u); auto-resorting to %u/%u/%u",
+                         (unsigned)q, (unsigned)s, (unsigned)nr,
+                         (unsigned)sorted[0], (unsigned)sorted[1], (unsigned)sorted[2]);
+                userConfig->set(cfg_hkHintQuietSecs,    (int)sorted[0]);
+                userConfig->set(cfg_hkHintStaleSecs,    (int)sorted[1]);
+                userConfig->set(cfg_hkHintLikelyNRSecs, (int)sorted[2]);
+            }
+        }
         // v22 hooks — after settings save, re-arm anything that caches
         // a config value at boot. Cheap (refreshing a handful of static
         // vars / setting a flag) and only runs when the user actually

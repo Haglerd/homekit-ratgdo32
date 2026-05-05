@@ -569,11 +569,21 @@ function setElementsFromStatus(status) {
             case "useToggle":
             case "useSWserial":
             case "obstFromStatus":
+                document.getElementById(key).checked = value;
+                break;
+            // v40 (audit W16): autoClose keys split out so updateAutoCloseStatusRow()
+            // can fire as each one comes through /status.json. Pre-v40 the
+            // updateAutoCloseStatusRow() call was on a duplicate switch-case
+            // block deeper in the function (cases shadowed by these earlier
+            // matches), so the home-page Auto-Close status row never refreshed
+            // after initial page load. Now it updates on every relevant change.
             case "autoClose":
                 document.getElementById(key).checked = value;
+                updateAutoCloseStatusRow();
                 break;
             case "autoCloseMinutes":
                 document.getElementById(key).value = value;
+                updateAutoCloseStatusRow();
                 break;
             case "autoCloseStartMinutes":
             case "autoCloseEndMinutes": {
@@ -584,10 +594,12 @@ function setElementsFromStatus(status) {
                 const fieldId = (key === "autoCloseStartMinutes") ? "autoCloseStart" : "autoCloseEnd";
                 const el = document.getElementById(fieldId);
                 if (el) el.value = `${hh}:${mm}`;
+                updateAutoCloseStatusRow();
                 break;
             }
             case "autoCloseIgnoreWindow":
                 document.getElementById(key).checked = value;
+                updateAutoCloseStatusRow();
                 break;
             case "hkAutoRecover":
                 document.getElementById(key).checked = value;
@@ -808,25 +820,12 @@ function setElementsFromStatus(status) {
             case "closeHistory":
                 // No-op: Not displayed in UI
                 break;
-            case "autoClose":
-            case "autoCloseMinutes":
-            case "autoCloseStartMinutes":
-            case "autoCloseEndMinutes":
-            case "autoCloseIgnoreWindow":
-                // Auto-close keys flow through here as part of /status.json.
-                // Re-render the home-page status row whenever any of them change.
-                updateAutoCloseStatusRow();
-                break;
-            case "hkAutoRecover":
-            case "hkAutoRecoverSecs":
-            case "hkHintQuietSecs":
-            case "hkHintStaleSecs":
-            case "hkHintLikelyNRSecs":
-            case "hkVerboseLogs":
-                // HomeKit watchdog config flows through /status.json. No
-                // home-page widget for it — the values just get reflected
-                // back into the settings form on next page load.
-                break;
+            // v40 (audit W16): the duplicate autoClose* / hk* case blocks
+            // that previously sat here are deleted. They were unreachable —
+            // the same case values match earlier in this switch and the
+            // first match wins. updateAutoCloseStatusRow() is now called
+            // from the earlier autoClose* cases (~line 572-602) so the
+            // home-page status row updates correctly.
             default:
                 try {
                     if (setGDOcmds[key] == undefined) {

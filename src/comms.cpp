@@ -1067,25 +1067,37 @@ void update_door_state(GarageDoorCurrentState current_state)
     switch (current_state)
     {
     case GarageDoorCurrentState::CURR_CLOSING:
-        // If we are in a time-to-close delay timeout, cancel the timeout
+        // v40 (audit W14): two-phase cleanup on CURR_CLOSING. Pre-v40 the
+        // TTCtimer.active() gate ALSO controlled clear_force_close_state,
+        // which left the gap window between press 1 release and press 2
+        // unprotected — during the gap, forceCloseGapTimer is the active
+        // one (TTCtimer is detached), so the gate failed → state didn't
+        // clear → gap timer fired press 2 onto an already-closing door
+        // → Sec+1.0 toggled it back open. Worse, forceCloseInProgress
+        // also leaked.
+        //
+        // Phase 1: TTCtimer detach — STILL gated on TTCtimer.active()
+        // because the detach is only meaningful when a timer is live
+        // (it's logged for diagnostics). The "force me to resend state"
+        // line also stays inside this gate since it's tied to the TTC
+        // delay's prior state suppression.
+        //
+        // Phase 2: clear_force_close_state — UNCONDITIONAL on every
+        // CURR_CLOSING transition. The function early-returns via
+        // ACQUIRE-load on `forceCloseInProgress` if no force-close is
+        // in flight, so the cost is one atomic load. This catches the
+        // gap-window case AND the press-1-hold case AND any future
+        // stage that doesn't yet exist. Drops a redundant press 2 onto
+        // a closing door and unwinds the leak in one place.
         if (TTCtimer.active())
         {
             ESP_LOGI(TAG, "Door closing, canceling TTC delay timer");
             TTCtimer.detach();
-            // PRIMARY LEAK FIX: TTCtimer is shared between regular TTC
-            // delays AND the force-close press/release timing. When the
-            // door starts physically closing partway through the hold
-            // press, this branch detaches the timer without firing the
-            // pending release callback — the only path that clears
-            // forceCloseInProgress on normal completion. Without this
-            // cleanup, every successful force-close leaks the flag and
-            // every subsequent /setgdo forceClose POST is silently
-            // rejected with "FORCE CLOSE: ignoring request — a sequence
-            // is already in progress" until the next reboot.
-            clear_force_close_state("door=Closing detected during force-close press window");
             // This will force us to send current state to browser, so it reports correct state.
             last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
         }
+        // v40 (W14): unconditional unwind covers gap-timer window too.
+        clear_force_close_state("door=Closing detected (TTC, force-close press hold, OR gap window)");
         // If we were in a automatic close timeout, cancel and reset that.
         cancel_builtin_TTC_countdown();
         // Fall through to "opening"
@@ -3158,6 +3170,11 @@ GarageDoorCurrentState open_door()
         // Effect of open is to cancel the timeout (leaving door open)
         ESP_LOGI(TAG, "Door assumed to be open, canceling TTC delay timer");
         TTCtimer.detach();
+        // v40 (audit W15): if a force-close was using TTCtimer for its
+        // press hold, the in-progress flag would otherwise leak — the
+        // TTC release callback never fires after detach. Same v17 pattern,
+        // never propagated to this open_door site.
+        request_force_close_clear("open_door during TTC/force-close window");
         // Reset light to state it was at before delay start.
         set_light(TTCwasLightOn);
         // This will force us to send current state to browser, so it reports correct state.
@@ -3316,6 +3333,10 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
     {
         ESP_LOGI(TAG, "Canceling TTC delay timer for hardwired control");
         TTCtimer.detach();
+        // v40 (audit W15): same v17 leak pattern propagated here. If the
+        // timer being killed was a force-close press 1 hold, the release
+        // callback is gone — request_force_close_clear unwinds the state.
+        request_force_close_clear("close_door bypass_ttc during force-close window");
         set_light(TTCwasLightOn);
     }
 
@@ -3377,6 +3398,10 @@ GarageDoorCurrentState toggle_door(bool bypass_ttc)
     {
         ESP_LOGI(TAG, "Canceling TTC delay timer prior to toggle");
         TTCtimer.detach();
+        // v40 (audit W15): third site for the same v17 leak pattern.
+        // toggle_door (hardwired control) cancelling TTCtimer can clobber
+        // a force-close press hold; request_force_close_clear unwinds.
+        request_force_close_clear("toggle_door during force-close window");
         set_light(TTCwasLightOn);
     }
 
