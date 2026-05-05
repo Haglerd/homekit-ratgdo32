@@ -140,6 +140,12 @@ public:
     void clearCrashLog();
     void printCrashLog(Print &outDevice = Serial);
     void saveMessageLog();
+    // v37: called once from setup() after init completes successfully.
+    // Resets the message ring buffer so a steady-state crash log no
+    // longer drags HomeKit/WiFi/HomeSpan/mDNS configuration noise from
+    // early boot. Early-boot crashes (before this call) still capture
+    // the full boot trace — useful when the crash IS in init.
+    void clearMessageBuffer();
 };
 extern LOG *ratgdoLogger;
 

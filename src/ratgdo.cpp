@@ -339,6 +339,16 @@ void loop()
             startupBeeped = true;
         }
 #endif
+        // v37: clear the message ring buffer once boot init is complete
+        // so a steady-state crash captured later only contains post-init
+        // context (no more 12 seconds of HomeKit service configuration,
+        // mDNS service registration, and "Looking for security+ 1.0
+        // DIGITAL wall panel" retries dragged into every crash log).
+        // Early-boot crashes that fire BEFORE this point still preserve
+        // the full boot trace — useful when the crash IS in init, which
+        // is exactly the case for the v33-or-earlier "tiT mdns OOM"
+        // crash documented in audit-notes.
+        ratgdoLogger->clearMessageBuffer();
     }
 
     comms_loop();
