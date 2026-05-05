@@ -3060,6 +3060,15 @@ static void checkAutoClose()
              openMinutes, minMinutes,
              ignoreWindow ? "(ignoreWindow=on)" : "and in time window");
     autoCloseFiredThisCycle = true;
+    // v43 (audit W32): cheap re-check immediately before firing. The Ticker
+    // runs on esp_timer task; loopTask can transition the door out of
+    // CURR_OPEN between this Ticker tick's earlier read of current_state
+    // and the press fire. On Sec+1.0, a press on a now-CLOSED door
+    // TOGGLES → door re-opens unintentionally. Bail silently if the door
+    // has already moved. (Race window is tight; full atomic-discipline pass
+    // on doorOpenedAtMillis / autoCloseFiredThisCycle deliberately deferred
+    // — the audit doc explicitly prefers this cheap re-check.)
+    if (garage_door.current_state != CURR_OPEN) return;
     door_command_force_close(3500);
 }
 

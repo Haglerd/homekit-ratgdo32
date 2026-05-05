@@ -979,8 +979,15 @@ void homekit_drain_pending_state_dump()
 // all stalled. v34 issues the disconnect, records a timestamp, and
 // returns. homekit_drain_pending_reconnect_stage2() (called every
 // service_timer_loop tick on loopTask) checks elapsed time and fires
-// WiFi.reconnect() when ≥250ms have passed. Net loopTask block time:
-// ~0ms (just the disconnect call itself).
+// WiFi.reconnect() when ≥250ms have passed.
+//
+// v43 (audit W36): pass `timeoutLength=0` to make disconnect
+// fire-and-forget. arduino-esp32's `WiFi.disconnect(eraseap=false,
+// wifioff=false)` (2-arg form) defaults `timeoutLength=100` and blocks
+// for up to 100 ms waiting for the SYSTEM_EVENT_STA_DISCONNECTED event.
+// 100 ms is well under any watchdog but the v34 comment claimed
+// "~0 ms"; with timeoutLength=0 the call returns immediately and
+// stage 2 still drives the re-associate at ≥250 ms.
 static volatile uint8_t  reconnectStage        = 0;  // 0=idle, 1=disconnect-issued
 static volatile uint32_t reconnectStageStartMs = 0;
 
@@ -1001,7 +1008,9 @@ void homekit_force_reconnect(const char *reason)
     ESP_LOGW(TAG, "HomeKit reconnect requested (%s) — cycling WiFi", reason ? reason : "unspecified");
     // Don't erase WiFi credentials — pass false. The reconnect call will
     // re-associate using the same SSID/password from NVRAM.
-    WiFi.disconnect(false);
+    // v43 (audit W36): explicit (wifioff=false, eraseap=false,
+    // timeoutLength=0) — fire-and-forget, no 100 ms wait.
+    WiFi.disconnect(false, false, 0);
     reconnectStageStartMs = (uint32_t)_millis();
     __atomic_store_n(&reconnectStage, (uint8_t)1, __ATOMIC_RELEASE);
     HK_DIAG_LOG("HomeKit reconnect: disconnect issued, re-associate in ~250ms");
