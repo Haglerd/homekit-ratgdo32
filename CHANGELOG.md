@@ -10,6 +10,10 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.42 (2026-05-05)
+
+Build-pipeline hotfix (no firmware behavior change). `build_web_content.py` was computing each web asset's URL cache-bust hash from its on-disk source, before the `?v=CRC-32` placeholders inside the file were substituted with real per-file CRCs. So when a JS file changed but its parent HTML's source didn't, the parent HTML's URL hash + ETag stayed identical across builds — even though the served body now referenced a different child JS hash. Combined with `web.cpp` `CACHE_CONTROL = 30 days`, browsers held the stale parent HTML in disk cache for a month, never re-fetched, and kept loading the old JS by URL — masking the v41 `logs.js` fix entirely on already-deployed installs. v42 iterates the CRC computation post-substitution to a fixed point so any change in a referenced file propagates into the parent's cache key, busting browser cache reliably across firmware updates. See `audit-notes/2026-05-04-fork-vs-upstream-attribution.md` finding W39 for full mechanism + the cousin-bug check on `wifiap.html` (clean — no cross-file symbol references like the v40 `checkAuth` regression).
+
 ### v3.4.4-forceclose.41 (2026-05-05)
 
 Hotfix for a v40 regression: the Logs UX fix called `checkAuth()` from `functions.js`, but `logs.html` only loads `logs.js` — not `functions.js`. ReferenceError, JS died, page stuck spinning. v41 inlines the equivalent `/auth` fetch directly in `logs.js:111-126` so no cross-file dependency. Same Digest-prompt-and-stamp-IP behavior, contained to logs.js.
