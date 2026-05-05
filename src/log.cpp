@@ -15,13 +15,14 @@
 
 // C/C++ language includes
 #include <stdint.h>
+#include <new>  // std::nothrow for lazy-allocated WiFiUDP syslog
 
 // Arduino includes
 #include <WiFiUdp.h>
 #ifndef ESP8266
 #include <esp32-hal.h>
 #include <esp_core_dump.h>
-#include <esp_timer.h>  // v24: esp_timer_get_time for log mutex wait instrumentation
+#include <esp_timer.h>  // esp_timer_get_time for log mutex wait instrumentation
 #endif
 
 // RATGDO project includes
@@ -42,7 +43,9 @@ bool syslogEn = false;
 uint32_t syslogPort = 514;
 char syslogIP[IP4ADDR_STRLEN_MAX] = "";
 uint32_t syslogFacility = SYSLOG_LOCAL0;
-WiFiUDP syslog;
+// Lazy-allocated on first logToSyslog call when syslogEn=true. Saves
+// ~200 B BSS in the default config (syslogEn=false ships out of the box).
+static WiFiUDP *syslog = nullptr;
 bool suppressSerialLog = false;
 esp_log_level_t logLevel = ESP_LOG_VERBOSE;
 
@@ -228,7 +231,18 @@ void LOG::logToBuffer(const char *fmt, va_list args)
     TAKE_MUTEX();
 #ifndef ESP8266
     uint32_t mtxDt = (uint32_t)(esp_timer_get_time() / 1000ULL) - mtxT0;
-    if (mtxDt > logMtxMaxWaitMs) logMtxMaxWaitMs = mtxDt;
+    // CAS loop atomic-max — pairs with __atomic_exchange_n reader
+    // in homekit_health_log. Plain RMW raced both reader-vs-writer
+    // and writer-vs-writer. Diagnostic-only counter so __ATOMIC_RELAXED
+    // is sufficient.
+    uint32_t prev = __atomic_load_n(&logMtxMaxWaitMs, __ATOMIC_RELAXED);
+    while (mtxDt > prev &&
+           !__atomic_compare_exchange_n(&logMtxMaxWaitMs, &prev, mtxDt,
+                                        false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+    {
+        // prev was updated to the current value by the failed CAS;
+        // re-test against the new reading and try again.
+    }
 #endif
     // parse the format string into lineBuffer
     vsnprintf(lineBuffer, LINE_BUFFER_SIZE, fmt, args);
@@ -615,6 +629,10 @@ void logToSyslog(char *message)
 {
     if (!syslogEn || !WiFi.isConnected())
         return;
+    if (!syslog) {
+        syslog = new (std::nothrow) WiFiUDP();
+        if (!syslog) return;  // alloc failed; skip silently
+    }
 
     uint8_t PRI = syslogFacility * 8;
     if (*message == '>')
@@ -636,24 +654,24 @@ void logToSyslog(char *message)
     strtok(message, "\n");
     strtok(message, "\r");
 
-    syslog.beginPacket(syslogIP, syslogPort);
+    syslog->beginPacket(syslogIP, syslogPort);
     // Use RFC5424 Format
-    syslog.print("<");
-    syslog.print(PRI);
-    syslog.print(">1 ");
+    syslog->print("<");
+    syslog->print(PRI);
+    syslog->print(">1 ");
 #if defined(USE_NTP_TIMESTAMP)
-    syslog.print((enableNTP && clockSet) ? timeString(0, true) : SYSLOG_NIL);
+    syslog->print((enableNTP && clockSet) ? timeString(0, true) : SYSLOG_NIL);
 #else
-    syslog.print(SYSLOG_NIL); // Time - let the syslog server insert time
+    syslog->print(SYSLOG_NIL); // Time - let the syslog server insert time
 #endif
-    syslog.print(" ");
-    syslog.print(device_name_rfc952); // hostname
+    syslog->print(" ");
+    syslog->print(device_name_rfc952); // hostname
 #ifdef ESP8266
-    syslog.print(" ratgdo"); // application name
+    syslog->print(" ratgdo"); // application name
 #else
-    syslog.print(" ratgdo32"); // application name
+    syslog->print(" ratgdo32"); // application name
 #endif
-    syslog.print(" " SYSLOG_NIL // process ID
+    syslog->print(" " SYSLOG_NIL // process ID
                  " " SYSLOG_NIL // message ID
                  " " SYSLOG_NIL // structured data
 #ifdef USE_UTF8_BOM
@@ -661,6 +679,6 @@ void logToSyslog(char *message)
 #else
                  " "); // No BOM
 #endif
-    syslog.print(message); // message
-    syslog.endPacket();
+    syslog->print(message); // message
+    syslog->endPacket();
 }
