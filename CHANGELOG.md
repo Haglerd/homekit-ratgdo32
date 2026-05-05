@@ -10,6 +10,31 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.32 (2026-05-05)
+
+Audit follow-up cleanup of v31 — concurrency hygiene the v31 work surfaced after deployment, plus two memory-headroom items and a sweep of the version-prefix comment debt that accumulated v22-v31. **No new features, no behavior changes for users.** All atomic ordering pairs verified, all call sites swapped, all headers in sync. Code review: GREEN, ship it.
+
+**Fixed (concurrency)**
+
+- **Audit findings A + G — `clear_force_close_state` deferred to loopTask.** v31 deferred the gap-timer ARM but `clear_force_close_state` was still called directly from esp_timer task at four TTC-timer-callback sites in `send_force_close_release_then_maybe_retry` / `send_force_close_press`. That meant `Ticker.detach()` could still race on the gap timer between loopTask's `force_close_drain_pending_arm` and esp_timer's `clear_force_close_state` — same physical-world door-reversal failure mode v31 was meant to close, just relocated. New `request_force_close_clear(reason)` setter for esp_timer-context callers + `force_close_drain_pending_clear()` drained on loopTask via `service_timer_loop`. `clear_force_close_state` now loopTask-only. Reason is a string-literal pointer (single 32-bit pointer write — atomic on Xtensa).
+- **Audit finding B — acquire-load on `forceCloseInProgress` in drain.** v31's `__atomic_test_and_set` writer was paired with a plain volatile load in `force_close_drain_pending_arm`, breaking the release/acquire chain. Both drains and `clear_force_close_state` now use `__atomic_load_n(&forceCloseInProgress, __ATOMIC_ACQUIRE)`.
+- **Audit finding C — release/acquire on HomeKit deferred-flag setters/drains.** Setters (`homekit_request_reconnect`, `_request_refresh_mdns`, `_request_dump_state`) now write `reason` first, then `__atomic_store_n(&flag, true, __ATOMIC_RELEASE)`. Drains use `__atomic_load_n(&flag, __ATOMIC_ACQUIRE)` then read reason — guarantees the reason is never stale relative to the observed flag.
+- **Audit finding D — atomic counter writers.** v31 made the readers atomic via `__atomic_exchange_n` but writers were still plain RMW. Writer for `logMtxMaxWaitMs` is now a CAS loop atomic-max via `__atomic_compare_exchange_n` (RELAXED ordering — diagnostic counter, no ordering needed). All three `sseOrphansReaped` writers in `sweep_sse_orphans` now use `__atomic_fetch_add(..., 1, __ATOMIC_RELAXED)`.
+- **Audit finding F5 — watchdog inhibited during OTA.** `homekit_health_log`'s auto-recover branch (when `hkAutoRecover=true`) could fire during a slow OTA upload — iOS HAP reads typically pause during the upload, `last_hap_read_ago` keeps growing past the trigger threshold, watchdog cycles WiFi mid-upload → upload aborts → device falls into the rollback path. New `firmware_update_in_progress()` helper exposed from web.cpp; the watchdog branch now gates on `&& !firmware_update_in_progress()`. Single pointer load = atomic on Xtensa, no synchronization needed for a hint-quality signal.
+
+**Memory hygiene**
+
+- **MH3 — Lazy-allocate `WiFiUDP syslog`.** Was 200 B BSS always. Now `static WiFiUDP *syslog = nullptr` + lazy `new (std::nothrow)` on first `logToSyslog` call when `syslogEn=true && WiFi.isConnected()`. Default install (syslogEn=false) saves ~196 B BSS forever. Once enabled, allocates 200 B heap.
+- **MH4 — `enforce_same_origin` shared host buffer.** Per-call `originHost[64]` + `refererHost[64]` consolidated to one `extractedHost[64]` — Origin and Referer are checked sequentially and `extractHostFromUrl` zeros the buffer on entry. Saves 64 B stack/POST. Cross-origin rejection log still uniquely identifies the attempt (Origin + Referer + Host headers retained).
+
+**Cleanup (no functional change)**
+
+- **Comment debt sweep**: 151 → 87 fork-versioned comment leaders (`// v22:` … `// v31.2:`). Deleted multi-paragraph evolution blocks targeted by the audit: `enforce_same_origin` 40-line block, `sweep_sse_orphans` 23-line skew-detection block, `handle_subscribe` 7-line v27 ORDER NOTE + 20-line v28 INADDR_NONE block, force-close 17-line v31 deferred-arm block, HomeKit deferred-flag 16-line v24→v31 block, `comms.cpp` v23 deferred-reschedule + v31.2 cache-extension blocks, `ratgdo.cpp` drain-comment narration. Historical context belongs in commit messages and `audit-notes/`, not source.
+- **ESP_LOG version-prefix strip**: `"v27: heartbeat=0 coerced to %u..."` → `"heartbeat=0 coerced to %u for %s"` (web.cpp:2285). `"v27: unsubscribe beacon..."` → `"unsubscribe beacon for UUID %s on channel %u"` (web.cpp:2447). Implementation-detail parentheticals trimmed: `(via main-loop drain)`, `(deferred to main-loop arm)`, `expect '(re)connected to AP' shortly`.
+- **ESP_LOGI → ESP_LOGD demotes** for routine state (force-close release-sent + press hold; auto-close scheduler narration in 5 sites + boot/refresh/bootstrap; HK watchdog config refresh; controller list change; WiFi reconnected; mDNS refresh complete; HomeSpan state dump; HomeKit reconnect WiFi cycling). KEPT INFO on entry/completion lines: `FORCE CLOSE: starting`, `skipping second press`, `2-attempt sequence complete`, plus the 3 HomeKit health/diag-sse/diag-hk lines and all WARN-level orphan reaps + CSRF rejections.
+
+**Out of scope (intentionally deferred)**: MH1 (ping-pong status_json, risky), MH2 PSTR-wrap (ESP8266-specific, schedule for upstream PR), MH5 build flags (-flto needs build verification), MH6 buffer retune (needs measurement first).
+
 ### v3.4.4-forceclose.31 (2026-05-05)
 
 External-audit-driven cleanup of fork-introduced concurrency, security, and portability debt accumulated across v22-v30. All ten audit findings + three follow-up review items addressed. ESP32 build verified clean against the existing test bench; behavior changes are conservative (no new features, only correctness/observability/portability hardening).

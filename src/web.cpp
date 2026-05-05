@@ -195,31 +195,13 @@ constexpr char gitTaggedURL[] = "https://raw.githubusercontent.com/" _GITUSER "/
 // Just reloading page causes register on new channel.  So we need a reasonable number
 // to accommodate "extra" until old one is detected as disconnected.
 #define SSE_MAX_CHANNELS 8
-// v27: orphan-slot sweep timeouts. Run from service_timer_loop, independent
+// Orphan-slot sweep timeouts. Run from service_timer_loop independent
 // of the per-slot heartbeat Ticker (which doesn't fire when heartbeat=0).
-//   PREHANDSHAKE: slot has been subscribed but the EventSource never came
-//                 back to /events/N. Browser was closed mid-flight or the
-//                 GET hung. 15s is well past any realistic round-trip.
-//   IDLE        : slot is fully connected but hasn't received any
-//                 broadcast/heartbeat traffic in 5min. Belt-and-suspenders
-//                 for a wedged TCP socket whose client.connected() still
-//                 returns true. 5min > 60s max heartbeat so a healthy
-//                 client never trips this.
-// v28: was 15000UL — tightened to 5000UL after observing real-world
-// reconnect-storm where 8 slots filled (e.g. browser EventSource auto-
-// retrying after a 503 storm) faster than the sweep could drain them.
-// 5s is well above the typical EventSource handshake (<500ms even on
-// cellular), so a slow legitimate client just hits a fresh subscribe
-// retry — same recovery as 15s, but storms can't outpace the sweep.
-// v29: SSE_IDLE_TIMEOUT_MS raised 120000 → 300000 (2min → 5min) as
-// defense-in-depth on top of the BUFFER_FULL stamping fix in clientWriteEx.
-// The primary fix is in clientWriteEx — callers now stamp lastActivity
-// on OK or BUFFER_FULL (both = "broadcast loop reached this slot and
-// tried"). 5min idle is past most NAT-binding refresh intervals; a
-// genuinely-wedged slot still gets caught well before users notice
-// stale data, and class 5b (client.connected() == false once lwIP
-// KeepAlive fires, typically <60s) remains the actual safety net for
-// dead sockets with stale lwIP cached state.
+//   PREHANDSHAKE: subscribed but EventSource never came back to /events/N.
+//   IDLE        : connected but no broadcast/heartbeat traffic — class 5b
+//                 (client.connected() == false) is the primary safety net;
+//                 this is belt-and-suspenders for a wedged TCP socket
+//                 whose lwIP cache hasn't caught up.
 #define SSE_PREHANDSHAKE_TIMEOUT_MS  5000UL
 #define SSE_IDLE_TIMEOUT_MS         300000UL
 struct SSESubscription
@@ -262,6 +244,15 @@ SSESubscription subscription[SSE_MAX_CHANNELS];
 // During firmware update note which subscribed client is updating
 SSESubscription *firmwareUpdateSub = NULL;
 uint32_t subscriptionCount = 0;
+
+// Public OTA-in-progress check used by the HK watchdog to inhibit
+// auto-recover (audit F5 — a WiFi cycle during an active upload aborts
+// the transfer and triggers rollback). Single pointer load = atomic on
+// Xtensa; no synchronization needed for a hint-quality signal.
+bool firmware_update_in_progress()
+{
+    return firmwareUpdateSub != NULL;
+}
 
 // Performance management - removed redundant connection tracking
 #define MIN_REQUEST_INTERVAL_MS 100
@@ -779,64 +770,20 @@ String *ratgdoAuthenticate(HTTPAuthMethod mode, String enteredUsernameOrReq, Str
         return server.requestAuthentication(DIGEST_AUTH, www_realm);
 #endif
 
-// v23: same-origin / CSRF guard for state-changing endpoints.
-// v31 audit-driven rewrite. Two real bypasses in the v23 implementation:
-//
-//   (1) substring match — `origin.indexOf(hostOnly) >= 0` passed any URL
-//       whose path/query/fragment merely *contained* the device's host
-//       as a substring. e.g. with Host="ratgdo", an attacker page at
-//       `http://evil.example/?ratgdo` cleared the check.
-//   (2) missing-headers passthrough — when both Origin and Referer were
-//       absent, the guard returned true to avoid breaking "legacy curl."
-//       Default-no-password installs reach state-changing endpoints with
-//       this guard as the only CSRF defense, so a classic <form> POST
-//       with `Referrer-Policy: no-referrer` (or HTTPS→HTTP downgrade
-//       stripping Referer) carried no Origin and no Referer → guard
-//       returned true → drive-by from any same-LAN page landed
-//       (forceClose included).
-//
-// v31 fixes both:
-//   - Parses the host out of Origin/Referer (scheme://HOST[:port][/path…])
-//     and compares it byte-for-byte against the lowercased, port-stripped
-//     Host header. No substrings, no concatenation tricks.
-//   - Treats absence of BOTH Origin AND Referer as a hard fail. Modern
-//     browsers always send Origin on cross-origin state-changing methods
-//     and same-origin POSTs from a page; the device's own web UI is
-//     fine. Legacy curl users who really need to call state-changing
-//     endpoints can opt in by passing `--header "Origin: http://<host>"`.
-//
-// Returns true if the request should proceed; returns false (and sends
-// 403) if it should be rejected.
-//
-// v31.1 follow-up: bracketed IPv6 host tokens go through canonicalization
-// to (1) strip RFC 6874 zone IDs (anything from '%' onward inside the
-// brackets — `[fe80::1%eth0]` → `[fe80::1]` — so `%25eth0`/`%eth0`
-// don't defeat host equality), and (2) reject empty `[]` as malformed.
-//
-// v31.2: zero-heap rewrite. Pre-v31.2 each call allocated 6 Arduino
-// String objects (origin, referer, myHost, hostOnly, originHost,
-// refererHost) — invisible on ESP32 with ~140 KB free heap, but real
-// fragmentation pressure on ESP8266 with ~30-40 KB and known
-// allocator sensitivity. Behavior identical to v31.1; only the
-// implementation differs (stack-local char[] buffers throughout).
+// Same-origin / CSRF guard for state-changing endpoints. Parses the
+// host out of Origin/Referer (scheme://HOST[:port][/path…]) and
+// compares byte-for-byte against the lowercased, port-stripped Host
+// header. Bracket-aware IPv6 with RFC 6874 zone-ID strip; rejects
+// degenerate `[]`/`[%foo]`. Treats absence of BOTH Origin AND Referer
+// as a hard fail. Returns true to proceed, false (with 403 sent) to
+// reject. Stack-local char buffers — no heap allocations per POST.
 
-// v31.2: zero-heap version. Writes lowercased host (with brackets
-// retained for IPv6) to `out`, null-terminated. Returns true on
-// success, false on malformed / degenerate input (in which case
-// `out[0]` is set to '\0').
-//
-// Preserves v31.1 behavior:
-//   - Bracket-aware IPv6 parsing — host = '[' + addr + ']'
-//   - RFC 6874 zone-ID strip — drop '%eth0' / '%25eth0' tail
-//     before the closing ']'
-//   - Degenerate fail-close — '[]', '[%foo]', and anything
-//     under 3 chars (smallest valid IPv6 bracket form is
-//     '[::]' = 4 chars) reject
-//   - IPv4 / hostname parsing stops at first '/', '?', '#', ':'
-//   - Output is lowercased
-//
-// 64-byte buffer bound is well above realistic Origin/Referer
-// host lengths on a LAN device.
+// Writes lowercased host (brackets retained for IPv6) to `out`,
+// null-terminated. Returns true on success, false on malformed input
+// (`out[0]` set to '\0'). Bracket-aware: IPv6 hosts include the `[…]`,
+// RFC 6874 `%eth0`/`%25eth0` zone IDs are stripped. IPv4/hostname
+// parsing stops at the first '/', '?', '#', ':'. Empty bracket pairs
+// or anything < 3 chars after canonicalization is rejected.
 static bool extractHostFromUrl(const char *url, char *out, size_t outSize)
 {
     if (!url || !out || outSize < 4) {
@@ -970,28 +917,27 @@ static bool enforce_same_origin(const char *uriForLog)
         }
     }
 
-    // Extract Origin/Referer hosts and compare exact-match.
-    char originHost[64]  = {0};
-    char refererHost[64] = {0};
+    // Extract Origin/Referer host and compare exact-match. One shared
+    // 64-byte buffer — checks are sequential and extractHostFromUrl
+    // zeros out[0] on entry, so reusing the buffer across the two calls
+    // is safe (saves 64 B stack/POST vs separate originHost+refererHost).
+    char extractedHost[64] = {0};
     bool sameOrigin = false;
 
     if (origin[0] != '\0' &&
-        extractHostFromUrl(origin, originHost, sizeof(originHost)) &&
-        strcmp(originHost, hostOnly) == 0) {
+        extractHostFromUrl(origin, extractedHost, sizeof(extractedHost)) &&
+        strcmp(extractedHost, hostOnly) == 0) {
         sameOrigin = true;
     }
     if (!sameOrigin && referer[0] != '\0' &&
-        extractHostFromUrl(referer, refererHost, sizeof(refererHost)) &&
-        strcmp(refererHost, hostOnly) == 0) {
+        extractHostFromUrl(referer, extractedHost, sizeof(extractedHost)) &&
+        strcmp(extractedHost, hostOnly) == 0) {
         sameOrigin = true;
     }
 
     if (!sameOrigin) {
-        ESP_LOGW(TAG, "CSRF: rejecting %s — Origin=%s (host=%s) Referer=%s (host=%s) Host=%s",
-                 uriForLog,
-                 origin,  originHost,
-                 referer, refererHost,
-                 myHost);
+        ESP_LOGW(TAG, "CSRF: rejecting %s — Origin=%s Referer=%s Host=%s",
+                 uriForLog, origin, referer, myHost);
         server.send_P(403, type_txt, PSTR("Forbidden: cross-origin"));
         return false;
     }
@@ -1913,27 +1859,12 @@ void process_sse_pending_removes()
 // pre-increment before all rejection paths exhausted), log + correct.
 void sweep_sse_orphans()
 {
-    // v28: truncate now to uint32_t to match the timestamp field width
-    // (changed from _millis_t int64_t in v28 to avoid tearing risk).
-    // v31: skew-detection guard. v30 tried to fix the TOCTOU race
-    // (writer stamps subscribedAt/lastActivity AFTER our `now` snapshot
-    // → `now - timestamp` underflows to ~4.29 billion in uint32 →
-    // spurious reap, observed live as `idle=4294967294ms`) by casting
-    // both subtractions to int32_t. That worked for the race but
-    // introduced the OPPOSITE failure: any slot that legitimately
-    // ages past 2^31 ms (~24.85 days) flips negative under the cast,
-    // `negative > timeout` is false, and the slot is never reaped
-    // (sweep silently disables itself for that slot). Class-5b
-    // (`!client.connected()`) is still the safety net for wedged TCP,
-    // but the diagnostic guarantee was broken.
-    //
-    // v31 detects the racing-writer case explicitly via signed skew:
-    // `int32_t skew = (int32_t)(stamp - now)` is positive iff the
-    // writer's stamp is strictly newer than our snapshot. Skip the
-    // slot for that tick — next sweep sees a settled state and
-    // applies the real check. Otherwise compute `age = now - stamp`
-    // in unsigned arithmetic (mod-2^32 wrap-safe AND no signed-overflow
-    // concern at any age).
+    // Skew-detection guard: writers (Ticker SSEheartbeat, BUFFER_FULL
+    // stamps from SSEBroadcastState) update subscribedAt/lastActivity
+    // mid-loop. `int32_t skew = (int32_t)(stamp - now)` is positive iff
+    // the writer's stamp is newer than our snapshot — skip and let the
+    // next tick handle it. Otherwise compute unsigned `age = now - stamp`
+    // (mod-2^32 wrap-safe at any age).
     uint32_t now = (uint32_t)_millis();
     uint32_t currentlyAlloc = 0;
     uint32_t reapedThisTick = 0;
@@ -1965,7 +1896,7 @@ void sweep_sse_orphans()
                              s.clientIP.toString().c_str(),
                              (unsigned)age);
                     s.pendingRemove = true;
-                    sseOrphansReaped++;
+                    __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
                     reapedThisTick++;
                     continue;
                 }
@@ -1978,7 +1909,7 @@ void sweep_sse_orphans()
                      (unsigned)i, s.clientUUID.c_str(),
                      s.clientIP.toString().c_str());
             s.pendingRemove = true;
-            sseOrphansReaped++;
+            __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
             reapedThisTick++;
             continue;
         }
@@ -1997,7 +1928,7 @@ void sweep_sse_orphans()
                              s.clientIP.toString().c_str(),
                              (unsigned)age);
                     s.pendingRemove = true;
-                    sseOrphansReaped++;
+                    __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
                     reapedThisTick++;
                     continue;
                 }
@@ -2023,10 +1954,7 @@ void SSEheartbeat(SSESubscription *s)
     if (!s)
         return;
 
-    // v28: was `if (!(s->clientIP))` — same INADDR_NONE-vs-zero
-    // mismatch as the subscribe scan. Compare to the canonical free
-    // marker so a heartbeat scheduled before removeSSEsubscription
-    // ran doesn't accidentally fire on a slot that's logically free.
+    // Skip slots already marked free (clientIP == INADDR_NONE).
     if (s->clientIP == IPAddress(INADDR_NONE))
         return;
 
@@ -2227,16 +2155,11 @@ void handle_subscribe()
         return handle_notfound(); // We ran out of channels
     }
 
-    // v27 ORDER NOTE: every validation now runs BEFORE we touch any slot
-    // state or subscriptionCount. Pre-v27 layout interleaved validations
-    // (heartbeat range, client.connected) with the allocate-and-increment
-    // path — when a validation rejected, the counter was already bumped
-    // and the slot half-committed, leaking until the next reboot. v27
-    // pulls everything up so we can `return` from any rejection without
-    // unwinding partial state.
+    // All validations run BEFORE touching slot state or subscriptionCount,
+    // so any rejection can `return` without unwinding partial state.
 
     // 1. clientIP
-    if (clientIP == IPAddress(INADDR_NONE))  // v25: explicit cast — sys/socket.h now defines INADDR_NONE as u32_t, ambiguous with the IPAddress overload
+    if (clientIP == IPAddress(INADDR_NONE))  // explicit cast: sys/socket.h's u32_t INADDR_NONE is ambiguous with the IPAddress overload
     {
         ESP_LOGE(TAG, "Sending %s, for: %s as clientIP missing", response400invalid, server.uri().c_str());
         server.send_P(400, type_txt, response400invalid);
@@ -2282,7 +2205,7 @@ void handle_subscribe()
             // Ticker running on every slot to detect class-5b drops in real-time.
             // Coerce to MIN. logs.html ships v27-and-later with heartbeat=10 so
             // this branch only fires for older logs.html (cache) or third-party clients.
-            ESP_LOGI(TAG, "v27: heartbeat=0 coerced to %u for client %s — orphan sweep needs Ticker liveness driver",
+            ESP_LOGD(TAG, "heartbeat=0 coerced to %u for %s",
                      (unsigned)SSE_HEARTBEAT_MIN_SEC, clientIP.toString().c_str());
             heartbeatInterval = SSE_HEARTBEAT_MIN_SEC;
         }
@@ -2433,18 +2356,10 @@ void handle_unsubscribe()
     int matched = 0;
     for (uint32_t i = 0; i < SSE_MAX_CHANNELS; i++)
     {
-        // v28: same INADDR_NONE-vs-zero distinction as line 2003 — must
-        // explicitly compare to IPAddress(INADDR_NONE) to recognize the
-        // "freed" marker. The previous `&& subscription[i].clientIP`
-        // gating was technically the inverse problem (an IPAddress that
-        // is INADDR_NONE evaluates as truthy, so this branch fired even
-        // for freed slots) — harmless because we additionally checked
-        // UUID equality, but tightening for consistency with the rest
-        // of the v28 fix.
         if (subscription[i].clientUUID == uuid &&
             subscription[i].clientIP != IPAddress(INADDR_NONE))
         {
-            ESP_LOGD(TAG, "v27: unsubscribe beacon for UUID %s on channel %u — flag pendingRemove",
+            ESP_LOGD(TAG, "unsubscribe beacon for UUID %s on channel %u",
                      uuid.c_str(), (unsigned)i);
             subscription[i].pendingRemove = true;
             matched++;
