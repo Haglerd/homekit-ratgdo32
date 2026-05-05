@@ -299,7 +299,18 @@ void LOG::logToBuffer(const char *fmt, va_list args)
     // task-handle so a different task entering during the broadcast
     // window doesn't get its own log silently dropped (the original
     // single bool guard would have done that once we released the mutex).
+    // F4: thread_local so each task gets its own LINE_BUFFER_SIZE buffer
+    // in TLS instead of paying stack-frame growth per logger task.
+    // Saves ~256 B per concurrent ESP_LOGx caller's stack frame; total
+    // RAM cost is one buffer per task that ever logs (loopTask, esp_timer,
+    // autoPoll, WiFi RX/TX, syslog) — same memory but moved off-stack.
+    // ESP8266 path falls back to stack-local — single-task cooperative
+    // RTOS, no TLS support in the older toolchain.
+#ifndef ESP8266
+    thread_local char outLine[LINE_BUFFER_SIZE];
+#else
     char outLine[LINE_BUFFER_SIZE];
+#endif
     strncpy(outLine, lineBuffer, sizeof(outLine) - 1);
     outLine[sizeof(outLine) - 1] = '\0';
     GIVE_MUTEX();
@@ -627,8 +638,16 @@ void LOG::printMessageLog(Print &outputDev, bool slow)
 
 void logToSyslog(char *message)
 {
-    if (!syslogEn || !WiFi.isConnected())
+    if (!syslogEn || !WiFi.isConnected()) {
+        // MH3 follow-up: if syslog was previously allocated and the user
+        // has now disabled it (or WiFi dropped permanently), free the
+        // ~200 B back to heap. Re-allocates on next enable.
+        if (syslog && !syslogEn) {
+            delete syslog;
+            syslog = nullptr;
+        }
         return;
+    }
     if (!syslog) {
         syslog = new (std::nothrow) WiFiUDP();
         if (!syslog) return;  // alloc failed; skip silently

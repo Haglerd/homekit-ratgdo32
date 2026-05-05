@@ -37,6 +37,13 @@ jobs:
           value: ${{ steps.tag.outputs.latestTag }}
           value_type: string
 
+      # MH7 (v33+): bin paths are now absolute GitHub release URLs.
+      # Releases are uploaded to the github.com release attachments later
+      # in this same workflow; web-installer fetches them cross-origin
+      # (GitHub release CDN serves Access-Control-Allow-Origin: *).
+      # Eliminates the per-release commit to docs/firmware/ that grew
+      # the .git pack ~100 MB/year. Older bins stay in docs/firmware/
+      # for historical record but the manifest no longer references them.
       - name: Update firmware/*.bootloader.bin version on manifest.json
         uses: amochkin/action-json@v1
         id: builds_parts_path_0
@@ -44,7 +51,7 @@ jobs:
           mode: write
           file: docs/manifest.json
           property: builds.0.parts.0.path
-          value: firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin
+          value: https://github.com/Haglerd/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin
           value_type: string
 
       - name: Update firmware/*.partitions.bin version on manifest.json
@@ -54,7 +61,7 @@ jobs:
           mode: write
           file: docs/manifest.json
           property: builds.0.parts.1.path
-          value: firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin
+          value: https://github.com/Haglerd/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin
           value_type: string
 
       - name: Update firmware/*.bin version on manifest.json
@@ -64,7 +71,7 @@ jobs:
           mode: write
           file: docs/manifest.json
           property: builds.0.parts.3.path
-          value: firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin
+          value: https://github.com/Haglerd/homekit-ratgdo32/releases/download/${{ steps.tag.outputs.latestTag }}/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin
           value_type: string
           
       - name: Output created (or overwritten) manifest.json
@@ -151,55 +158,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           release-tag: ${{ steps.tag.outputs.latestTag }}
 
-      # The previous workflow ran 5 separate `wow-actions/download-upload`
-      # steps (each one a Contents-API commit per binary). Those failed
-      # under branch protection: the Contents API path triggers rule
-      # validation that times out with "Unable to validate Block force
-      # pushes / Restrict deletions" errors even though the commit
-      # itself wouldn't violate any rule. Replaced with one direct
-      # git-push step (same pattern as the manifest.json commit above
-      # which works fine), and bundled into a SINGLE commit so the
-      # release contributes one entry to history instead of 5.
-      - name: Commit firmware bins to docs/firmware/
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Stash the built firmware files before resetting HEAD — the
-          # earlier action-json + manifest-commit steps left
-          # docs/manifest.json modified in-tree, which makes a plain
-          # `git checkout` refuse with "local changes would be
-          # overwritten." -fB force-checkout is safe here because
-          # origin/main already has the same manifest update from the
-          # prior step in this same job.
-          mkdir -p /tmp/fwbins
-          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin /tmp/fwbins/
-          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin /tmp/fwbins/
-          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin /tmp/fwbins/
-          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 /tmp/fwbins/
-          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf /tmp/fwbins/
-          git fetch origin main
-          # -f discards uncommitted in-tree edits (the manifest.json
-          # bump that's already on origin/main from the earlier step).
-          # Without -f this exited 1 with "local changes would be
-          # overwritten" and continue-on-error swallowed it silently —
-          # which left docs/firmware/ stale by one release on every
-          # build (v18 and v19 both shipped without bins committed).
-          git checkout -fB main origin/main
-          mkdir -p docs/firmware
-          cp /tmp/fwbins/* docs/firmware/
-          git add docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin \
-                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin \
-                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin \
-                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 \
-                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
-          if ! git diff --cached --quiet; then
-            git commit -m "Upload firmware bins for ${{ steps.tag.outputs.latestTag }}"
-            git push origin main
-          else
-            echo "firmware bins already present on main, skipping commit"
-          fi
-        shell: bash
+      # MH7 (v33+): the per-release docs/firmware/ commit step has been
+      # removed. Bins live on the GitHub release attachments only — the
+      # manifest.json (above) points at https://github.com/Haglerd/...
+      # release-download URLs. Net effect: bounded .git growth going
+      # forward (was adding ~5 MB per release × ~50 releases/year =
+      # ~250 MB/year before the change).
 
       # Keep the .elf as a workflow artifact for crash backtrace decoding
       # (addr2line consumers). Not on the release because elf files are
