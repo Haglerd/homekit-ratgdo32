@@ -702,7 +702,10 @@ static void homekit_health_log()
     // Auto-recover ACTIONS — only run if explicitly enabled. Defaults
     // ship disabled; the hints above run unconditionally so the user
     // can decide whether to enable based on real-world data.
+    // F5: inhibited during OTA — a WiFi cycle mid-upload aborts the
+    // transfer and falls into the rollback path.
     if (hkEnabled &&
+        !firmware_update_in_progress() &&
         lastReadAgo > (int32_t)hkRecoverSecs &&
         WiFi.isConnected() &&
         paired_controllers > 0)
