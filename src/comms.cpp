@@ -186,6 +186,53 @@ static volatile bool autoCloseRescheduleRequested = false;
 // update_auto_close_schedule() and request_auto_close_reschedule()
 // prototypes live in comms.h so web.cpp + ratgdo.cpp can call them.
 
+// v31: cached auto-close config for the Ticker-context reader
+// (checkAutoClose). userSettings::get is mutex-free on the upstream
+// side while the set overloads do take the mutex — concurrent reader
+// vs writer on the std::variant inside std::map is a data race
+// (audit finding #8). Most upstream readers run on loopTask same as
+// the writers, so the race is rarely hit upstream. The fork's
+// checkAutoClose Ticker reader changes that — it can collide with a
+// /setgdo POST mid-write and observe a torn variant index. Mirror
+// the homekit watchdog cache pattern: cached statics refreshed at
+// boot and via the existing settings-save hook in handle_setgdo.
+// Single-threaded refresh (loopTask only) → cached values are stable
+// for any Ticker tick reading them.
+// v31.2 cache extension: now covers all 4 auto-close config
+// keys so NO Ticker-context read of userConfig remains in the
+// auto-close path. Pre-extension cache covered only Minutes +
+// IgnoreWindow; checkAutoClose also calls autoCloseInWindow()
+// which read StartMinutes + EndMinutes directly from
+// userConfig — same race as audit #8, just on different keys.
+// Defaults match userSettings constructor defaults (1320 =
+// 22:00, 360 = 06:00) so the cache is safe to read before
+// the first refresh fires (e.g. if any future caller invokes
+// autoCloseInWindow before setup_comms completes).
+static volatile uint32_t cachedAutoCloseMinutes      = 0;
+static volatile bool     cachedAutoCloseIgnoreWindow = false;
+static volatile uint32_t cachedAutoCloseStartMinutes = 1320;  // 22:00
+static volatile uint32_t cachedAutoCloseEndMinutes   = 360;   // 06:00
+// v31 final: cache the on/off toggle too. Read by
+// update_auto_close_schedule on loopTask; not racing, but
+// keeps every auto-close config read going through one
+// mechanism. Default false matches userSettings constructor.
+static volatile bool     cachedAutoCloseEnabled      = false;
+
+void comms_refresh_auto_close_config()
+{
+    cachedAutoCloseMinutes      = userConfig->getAutoCloseMinutes();
+    cachedAutoCloseIgnoreWindow = userConfig->getAutoCloseIgnoreWindow();
+    cachedAutoCloseStartMinutes = userConfig->getAutoCloseStartMinutes();
+    cachedAutoCloseEndMinutes   = userConfig->getAutoCloseEndMinutes();
+    cachedAutoCloseEnabled      = userConfig->getAutoClose();
+    ESP_LOGI(TAG, "AUTO-CLOSE config refreshed: enabled=%d minutes=%u start=%u end=%u ignoreWindow=%d",
+             (int)cachedAutoCloseEnabled,
+             (unsigned)cachedAutoCloseMinutes,
+             (unsigned)cachedAutoCloseStartMinutes,
+             (unsigned)cachedAutoCloseEndMinutes,
+             (int)cachedAutoCloseIgnoreWindow);
+}
+
 void cancel_builtin_TTC_countdown()
 {
     if (builtInTTCcountdown.active())
@@ -800,6 +847,11 @@ void setup_comms()
              openHistory(1), openHistory(2), openHistory(3), openHistory(4), openHistory(5), openHistory(6), garage_door.openDuration);
     ESP_LOGI(TAG, "Door close history (%d): %lums, %lums, %lums, %lums, %lums, %lums; Median: %dsecs", closeHistory.count,
              closeHistory(1), closeHistory(2), closeHistory(3), closeHistory(4), closeHistory(5), closeHistory(6), garage_door.closeDuration);
+
+    // v31: seed the Ticker-safe auto-close config cache before the
+    // first tick fires. After this, checkAutoClose reads from the
+    // cache instead of taking userConfig (audit #8 race).
+    comms_refresh_auto_close_config();
 
     // v22: window-aware scheduler instead of unconditional 60s tick.
     // When autoClose is OFF, no ticker is attached. When ON with
@@ -2583,6 +2635,24 @@ void door_command(DoorAction action)
 static int forceCloseAttempt = 0;
 static uint32_t forceCloseHoldMsCached = 3500;
 static volatile bool forceCloseInProgress = false;
+// v31: deferred-arm pattern for the gap-timer (audit #3 — door-reversal
+// race). Pre-v31, send_force_close_release_then_maybe_retry called
+// forceCloseGapTimer.once_ms() directly from esp_timer task context,
+// racing against clear_force_close_state() running on loopTask. The
+// observed sequence: Ticker callback decides "schedule attempt 2" →
+// loopTask preempts and clear_force_close_state() detaches the gap
+// timer + sets forceCloseInProgress=false (door physically closing) →
+// Ticker resumes and unconditionally re-arms the gap timer → 1.5s
+// later attempt 2 fires on a closing door → wall-button press toggles
+// it back toward Open. Physical-world door-reversal consequence.
+//
+// Fix: instead of arming the gap timer from Ticker context, set this
+// pending-arm value and let force_close_drain_pending_arm() (called
+// from service_timer_loop on loopTask) re-check forceCloseInProgress
+// AND THEN arm the timer in single-threaded context. clear_force_close_state
+// runs on the same loopTask, so the {check + arm} block can't race.
+// 0 = no pending arm; non-zero = arm forceCloseGapTimer for that ms.
+static volatile uint32_t forceCloseGapPendingArmMs = 0;
 constexpr uint32_t FORCE_CLOSE_GAP_MS = 1500;
 static void send_force_close_press();
 
@@ -2603,9 +2673,37 @@ static void clear_force_close_state(const char *reason)
 {
     if (!forceCloseInProgress) return;
     ESP_LOGI(TAG, "FORCE CLOSE: clearing in-progress flag (%s)", reason);
-    forceCloseInProgress = false;
+    // v31.2: __atomic_clear pairs with __atomic_test_and_set in
+    // door_command_force_close. Release ordering ensures any state
+    // reset above (forceCloseAttempt, forceCloseGapTimer.detach,
+    // pending-arm wipe) is visible to whichever core re-acquires
+    // the flag next.
     forceCloseAttempt = 0;
     forceCloseGapTimer.detach();
+    // v31: also wipe any pending-arm request so a Ticker that already
+    // requested an arm before we got here doesn't get satisfied by the
+    // next drain tick.
+    forceCloseGapPendingArmMs = 0;
+    __atomic_clear(&forceCloseInProgress, __ATOMIC_RELEASE);
+}
+
+// v31: drain the deferred gap-timer arm request. Called from
+// service_timer_loop (loopTask). Re-checks forceCloseInProgress AFTER
+// the request was set — if clear_force_close_state ran in the
+// meantime (door went CLOSING), the request is silently dropped and
+// no second press fires.
+void force_close_drain_pending_arm()
+{
+    if (forceCloseGapPendingArmMs == 0) return;
+    uint32_t armMs = forceCloseGapPendingArmMs;
+    forceCloseGapPendingArmMs = 0;
+    if (!forceCloseInProgress)
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: gap-arm request dropped (sequence already cleared)");
+        return;
+    }
+    forceCloseGapTimer.detach();
+    forceCloseGapTimer.once_ms(armMs, send_force_close_press);
 }
 
 static void send_force_close_release_then_maybe_retry()
@@ -2653,9 +2751,12 @@ static void send_force_close_release_then_maybe_retry()
 
     if (forceCloseAttempt < 2)
     {
-        ESP_LOGI(TAG, "FORCE CLOSE: scheduling attempt %d after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
-        forceCloseGapTimer.detach();
-        forceCloseGapTimer.once_ms(FORCE_CLOSE_GAP_MS, send_force_close_press);
+        ESP_LOGI(TAG, "FORCE CLOSE: requesting attempt %d after %lums idle gap (deferred to main-loop arm)", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
+        // v31: deferred arm. Set the request; force_close_drain_pending_arm()
+        // on loopTask re-checks forceCloseInProgress and arms the gap
+        // timer in single-threaded context. Closes the door-reversal
+        // race documented at the top of this section.
+        forceCloseGapPendingArmMs = FORCE_CLOSE_GAP_MS;
     }
     else
     {
@@ -2709,17 +2810,28 @@ void door_command_force_close(uint32_t hold_ms)
     // Reject overlapping calls — if a sequence is already in flight, a second
     // POST during the press/release/gap windows could stomp the timer state
     // and emit duplicate or partial presses.
-    if (forceCloseInProgress)
+    // v31.2: atomic test-and-set replaces the v22 check-then-set pattern.
+    // On dual-core ESP32 the WebServer task and the auto-close Ticker
+    // (esp_timer task) run concurrently on different cores; pre-v31.2
+    // both could pass `if (forceCloseInProgress)` and both set true,
+    // launching two parallel sequences (doubled relay presses on the
+    // same physical button). __atomic_test_and_set is one indivisible
+    // operation: returns the OLD value and atomically sets the byte to
+    // its "set" value. If the OLD value was already nonzero, another
+    // caller already owns the flag — we bail. Acquire ordering pairs
+    // with the __atomic_clear in clear_force_close_state below.
+    if (__atomic_test_and_set(&forceCloseInProgress, __ATOMIC_ACQUIRE))
     {
         ESP_LOGW(TAG, "FORCE CLOSE: ignoring request — a sequence is already in progress");
         return;
     }
+    // We now own the busy flag (TAS atomically set it).
 
     if (hold_ms < 1000) hold_ms = 3500;
     if (hold_ms > 10000) hold_ms = 10000;
     forceCloseHoldMsCached = hold_ms;
     forceCloseAttempt = 0;
-    forceCloseInProgress = true;
+    // forceCloseInProgress = true is implicit — TAS above already set it.
     forceCloseGapTimer.detach();
 
     ESP_LOGI(TAG, "FORCE CLOSE: starting 2-attempt sequence (hold=%lums, gap=%lums)", hold_ms, FORCE_CLOSE_GAP_MS);
@@ -2740,8 +2852,13 @@ static bool autoCloseInWindow(uint32_t *outNowMOD)
     struct tm lt;
     localtime_r(&now, &lt);
     uint32_t nowMOD = (uint32_t)lt.tm_hour * 60 + (uint32_t)lt.tm_min;
-    uint32_t startMOD = userConfig->getAutoCloseStartMinutes();
-    uint32_t endMOD = userConfig->getAutoCloseEndMinutes();
+    // v31.2: read from the Ticker-safe cache. autoCloseInWindow is
+    // called from checkAutoClose (Ticker context) AND from
+    // update_auto_close_schedule (loopTask). The cache is refreshed
+    // synchronously on loopTask, so loopTask callers see fresh
+    // values either way; Ticker callers no longer race on userConfig.
+    uint32_t startMOD = cachedAutoCloseStartMinutes;
+    uint32_t endMOD   = cachedAutoCloseEndMinutes;
     if (outNowMOD) *outNowMOD = nowMOD;
     // v23: treat start == end as "always in window" — matches user
     // intent for "00:00 to 00:00 means all day," and avoids the silent
@@ -2768,7 +2885,13 @@ static uint32_t autoCloseSecsUntilNextStart()
     struct tm lt;
     localtime_r(&now, &lt);
     uint32_t nowSecOfDay = (uint32_t)lt.tm_hour * 3600 + (uint32_t)lt.tm_min * 60 + (uint32_t)lt.tm_sec;
-    uint32_t startMOD = userConfig->getAutoCloseStartMinutes();
+    // v31.2: read from cache for consistency with autoCloseInWindow.
+    // This call site is loopTask-only (caller is
+    // update_auto_close_schedule, single-threaded post-v31 #5), so
+    // the cache vs userConfig distinction doesn't matter here for
+    // race-safety — using the cache keeps all auto-close key reads
+    // unified.
+    uint32_t startMOD = cachedAutoCloseStartMinutes;
     uint32_t startSecOfDay = startMOD * 60;
     uint32_t delta;
     if (startSecOfDay > nowSecOfDay) {
@@ -2793,11 +2916,13 @@ static uint32_t autoCloseSecsUntilNextStart()
 void update_auto_close_schedule()
 {
     autoCloseTicker.detach();
-    if (!userConfig->getAutoClose()) {
+    // v31 final: read from cache for full consistency. All five
+    // auto-close config reads in comms.cpp now go through the cache.
+    if (!cachedAutoCloseEnabled) {
         ESP_LOGI(TAG, "AUTO-CLOSE: disabled, no schedule");
         return;
     }
-    if (userConfig->getAutoCloseIgnoreWindow()) {
+    if (cachedAutoCloseIgnoreWindow) {
         autoCloseTicker.attach_ms(60U * 1000U, checkAutoClose);
         ESP_LOGI(TAG, "AUTO-CLOSE: ignoreWindow=on — 60s recurring tick scheduled");
         return;
@@ -2818,8 +2943,18 @@ void update_auto_close_schedule()
                  nowMOD / 60, nowMOD % 60);
     } else {
         uint32_t secs = autoCloseSecsUntilNextStart();
-        autoCloseTicker.once_ms((uint32_t)(secs * 1000U), update_auto_close_schedule);
-        ESP_LOGI(TAG, "AUTO-CLOSE: outside window (now=%02u:%02u) — sleeping %us until window-start, then will re-schedule",
+        // v31: route the wake-up through request_auto_close_reschedule
+        // instead of calling update_auto_close_schedule directly. The
+        // one-shot Ticker fires in esp_timer task context; if the
+        // callback runs update_auto_close_schedule directly, it
+        // self-detaches + reattaches the very Ticker that just fired —
+        // the same FreeRTOS self-manipulation anti-pattern that crashed
+        // SSEheartbeat in v22 (uxListRemove panic, no crash dump).
+        // request_auto_close_reschedule just sets a flag; the actual
+        // scheduler runs from service_timer_loop on the main task,
+        // single-threaded, where detach+attach is safe.
+        autoCloseTicker.once_ms((uint32_t)(secs * 1000U), request_auto_close_reschedule);
+        ESP_LOGI(TAG, "AUTO-CLOSE: outside window (now=%02u:%02u) — sleeping %us until window-start, then will re-schedule (via main-loop drain)",
                  nowMOD / 60, nowMOD % 60, secs);
     }
 }
@@ -2868,7 +3003,10 @@ static void checkAutoClose()
     // through the window and we need to stop firing when we cross the
     // closing edge. (The one-shot exit-of-window re-schedule is driven
     // by update_auto_close_schedule but we stop firing immediately too.)
-    bool ignoreWindow = userConfig->getAutoCloseIgnoreWindow();
+    // v31: read from the Ticker-safe cache (refreshed at boot + on
+    // settings save via comms_refresh_auto_close_config) instead of
+    // hitting userConfig from this Ticker context — see audit #8.
+    bool ignoreWindow = cachedAutoCloseIgnoreWindow;
     if (!ignoreWindow && !autoCloseInWindow(NULL)) {
         // v23: only re-schedule if NTP is actually synced. Without a
         // real wallclock the scheduler falls back to a 60s tick anyway,
@@ -2886,7 +3024,7 @@ static void checkAutoClose()
     }
 
     uint32_t openMinutes = (nowMillis - doorOpenedAtMillis) / 60000U;
-    uint32_t minMinutes = userConfig->getAutoCloseMinutes();
+    uint32_t minMinutes = cachedAutoCloseMinutes; // v31: Ticker-safe cache
     if (openMinutes < minMinutes) return; // not yet — silent
 
     ESP_LOGW(TAG, "AUTO-CLOSE: door open %u min (>= %u) %s — firing force-close",
