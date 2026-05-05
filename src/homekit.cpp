@@ -471,6 +471,14 @@ static void hap_pair_cb(boolean isPaired)
     ESP_LOGW(TAG, "HomeKit pair state changed: now %s", isPaired ? "paired" : "UNPAIRED");
 }
 
+// v31 final: captured at setup_homekit so homekit_health_log can
+// query loopTask's stack high-water mark from Ticker context (where
+// xTaskGetCurrentTaskHandle would return the timer service task
+// instead of loopTask). setup_homekit is called from setup() on the
+// Arduino loopTask, so xTaskGetCurrentTaskHandle() there returns
+// the right handle.
+TaskHandle_t loopTaskHandleForHWM = NULL;
+
 // v24: cached paired controller count, refreshed by hap_controller_change_cb.
 // homekit_health_log used to iterate homeSpan.controllerListBegin/End from
 // the esp_timer Ticker context every 180s, which acquires HomeSpan's
@@ -528,6 +536,18 @@ static Ticker homekitHealthTicker;
 constexpr uint8_t  HK_AUTO_RECOVER_MAX   = 2;
 static uint8_t     hkRecoverAttempts     = 0;
 static uint8_t     hkLastHintLevel       = 0;     // 0=none, 1=QUIET, 2=STALE, 3=LIKELY_NR
+// v31: require N consecutive health-log ticks below quietSecs before
+// clearing hkRecoverAttempts. Pre-v31 a single sub-60s read would
+// reset the counter, so a flapping hub delivering one sporadic read
+// every few minutes could land it in the trailing window of any
+// single 180s tick and re-arm the watchdog forever — hours of
+// repeated WiFi cycles with no escalation cap. v31.1 bumped from
+// N=2 to N=3 after audit follow-up: a hub flapping on a ~6 min
+// cadence could still land healthy reads in two consecutive
+// trailing windows; N=3 at 180s cadence requires ≥9 min of
+// sustained healthy reads, well past the typical flap interval.
+constexpr uint8_t  HK_HEALTHY_TICKS_TO_RESET = 3;
+static uint8_t     hkConsecutiveHealthyTicks = 0;
 
 // Cached watchdog config. Refreshed at boot in setup_homekit and on
 // settings save via homekit_refresh_watchdog_config(). Read in the
@@ -552,8 +572,9 @@ void homekit_refresh_watchdog_config()
     // says "1 attempt already used"), and toggling the watchdog off→on
     // would carry over a stale level/counter from before. Wipe the
     // slate so each settings change is a fresh start.
-    hkLastHintLevel   = 0;
-    hkRecoverAttempts = 0;
+    hkLastHintLevel             = 0;
+    hkRecoverAttempts           = 0;
+    hkConsecutiveHealthyTicks   = 0;
     ESP_LOGI(TAG, "HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u (state reset)",
              (int)hkCfgEnabled, (unsigned)hkCfgRecoverSecs,
              (unsigned)hkCfgQuietSecs, (unsigned)hkCfgStaleSecs, (unsigned)hkCfgLikelyNRSecs);
@@ -608,17 +629,48 @@ static void homekit_health_log()
     // any new clients getting "no free slots" = sweep is broken.
     extern volatile uint32_t sseSlotsAlloc;
     extern volatile uint32_t sseOrphansReaped;
-    uint32_t mtxWait = logMtxMaxWaitMs;
-    logMtxMaxWaitMs = 0; // reset for next window
+    // v31: __atomic_exchange_n closes the lost-sample race between the
+    // logger task's `if (mtxDt > logMtxMaxWaitMs) logMtxMaxWaitMs = mtxDt`
+    // and our read-then-zero. Single Xtensa instruction, no mutex.
+    // sseOrphansReaped uses the same pattern (low-impact race, but
+    // consistent with the diagnostic-counter convention).
+    uint32_t mtxWait  = __atomic_exchange_n(&logMtxMaxWaitMs,  0u, __ATOMIC_RELAXED);
+    uint32_t sseReaped = __atomic_exchange_n(&sseOrphansReaped, 0u, __ATOMIC_RELAXED);
     uint32_t sseAlloc = sseSlotsAlloc;
-    uint32_t sseReaped = sseOrphansReaped;
-    sseOrphansReaped = 0; // windowed reset
 #ifndef ESP8266
     size_t maxAllocBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 #else
     size_t maxAllocBlock = 0; // ESP8266: heap_caps API not available
 #endif
-    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu maxBlock=%lu uptime=%us paired=%s controllers=%u last_hap_read_ago=%ds logMtxMaxWait=%ums sseSlowWrites=%u sseBufferFullSkips=%u sseSlotsAlloc=%u sseOrphansReaped=%u tickDrift=%dms",
+    // v31 final: stack high-water-mark observability. Returns
+    // the smallest free-stack value seen by each task since
+    // boot, in BYTES — ESP-IDF's uxTaskGetStackHighWaterMark
+    // wrapper returns bytes natively (vanilla FreeRTOS returns
+    // words; ESP-IDF overrode that). Climbing values are NOT a
+    // concern (they reflect transient peaks, not leaks); values
+    // trending toward zero indicate near-overflow. Most relevant
+    // for loopTask given the recent v31.2 ~512 B CSRF-guard
+    // stack frame addition. loopTask handle was captured at
+    // setup_homekit time so this Ticker-context query gets the
+    // right task (NULL would return the timer service task = us).
+    uint32_t loopHWM   = loopTaskHandleForHWM
+                          ? (uint32_t)uxTaskGetStackHighWaterMark(loopTaskHandleForHWM)
+                          : 0;
+    TaskHandle_t tmrSvc = xTaskGetHandle("Tmr Svc");
+    uint32_t tmrSvcHWM  = tmrSvc
+                          ? (uint32_t)uxTaskGetStackHighWaterMark(tmrSvc)
+                          : 0;
+    TaskHandle_t apTask = homeSpan.getAutoPollTask();
+    uint32_t apHWM      = apTask
+                          ? (uint32_t)uxTaskGetStackHighWaterMark(apTask)
+                          : 0;
+
+    // v31: split into two ESP_LOGI calls because the combined line
+    // exceeds LINE_BUFFER_SIZE=256 (the original line was already
+    // being truncated mid-token at sseOrphansReaped). Line 1 keeps
+    // the wifi/heap/uptime/HomeKit-state snapshot; line 2 carries
+    // the SSE + watchdog + stack diagnostics. Both well under 256.
+    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu maxBlock=%lu uptime=%us paired=%s controllers=%u last_hap_read_ago=%ds",
              wifiState,
              rssi,
              (unsigned long)esp_get_free_heap_size(),
@@ -626,12 +678,25 @@ static void homekit_health_log()
              nowSec,
              isPaired ? "yes" : "no",
              (unsigned)paired_controllers,
-             lastReadAgo,
+             lastReadAgo);
+    // v31 final fix: split into two diag lines because the
+    // combined line at ~272 chars exceeds LINE_BUFFER_SIZE=256
+    // and was being silently truncated mid-tickDrift token.
+    // diag-sse: SSE pipeline + log-mutex pressure indicators.
+    // diag-hk:  watchdog state + stack HWMs + tick cadence drift.
+    ESP_LOGI(TAG, "HomeKit diag-sse: logMtxMaxWait=%ums sseSlowWrites=%u sseBufferFullSkips=%u sseSlotsAlloc=%u sseOrphansReaped=%u",
              (unsigned)mtxWait,
              (unsigned)sseSlowWrites,
              (unsigned)sseBufferFullSkips,
              (unsigned)sseAlloc,
-             (unsigned)sseReaped,
+             (unsigned)sseReaped);
+    ESP_LOGI(TAG, "HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms",
+             (unsigned)hkRecoverAttempts,
+             (unsigned)hkLastHintLevel,
+             (unsigned)hkConsecutiveHealthyTicks,
+             (unsigned)loopHWM,
+             (unsigned)tmrSvcHWM,
+             (unsigned)apHWM,
              (int)tickDriftMs);
 
     // Self-healing watchdog. Trigger only when:
@@ -696,8 +761,11 @@ static void homekit_health_log()
     {
         if (hkRecoverAttempts == 0)
         {
-            ESP_LOGW(TAG, "HomeKit auto-recover (1/2): no HAP read in %ds, refreshing mDNS", lastReadAgo);
-            homekit_refresh_mdns("auto-recover: no HAP read in threshold window");
+            ESP_LOGW(TAG, "HomeKit auto-recover (1/2): no HAP read in %ds, requesting mDNS refresh", lastReadAgo);
+            // v31: defer through main-loop drain. updateDatabase() from
+            // esp_timer task is the same anti-pattern audit #7b flags
+            // for the web handlers.
+            homekit_request_refresh_mdns(DEFERRED_REASON_WATCHDOG);
             hkRecoverAttempts = 1;
         }
         else if (hkRecoverAttempts == 1)
@@ -705,7 +773,7 @@ static void homekit_health_log()
             ESP_LOGW(TAG, "HomeKit auto-recover (2/2): mDNS refresh didn't help, cycling WiFi (last_hap_read_ago=%ds)", lastReadAgo);
             // v24: defer the cycle — homekit_force_reconnect blocks
             // ~750ms which would stall every other Ticker callback.
-            homekit_request_reconnect("auto-recover: mDNS refresh insufficient");
+            homekit_request_reconnect(DEFERRED_REASON_WATCHDOG);
             hkRecoverAttempts = 2;
         }
         else
@@ -713,10 +781,30 @@ static void homekit_health_log()
             ESP_LOGW(TAG, "HomeKit auto-recover: still no HAP read after %d attempts; giving up (user reboot may be required)", hkRecoverAttempts);
         }
     }
-    else if (lastReadAgo >= 0 && lastReadAgo < 60 && hkRecoverAttempts > 0)
+    else if (hkRecoverAttempts > 0)
     {
-        ESP_LOGI(TAG, "HomeKit auto-recover: HAP reads resumed (last_hap_read_ago=%ds), clearing recovery counter", lastReadAgo);
-        hkRecoverAttempts = 0;
+        // v31: require N consecutive healthy ticks before clearing the
+        // recovery counter. A single sporadic read inside the trailing
+        // window of one tick (pre-v31 logic) is not enough — a flapping
+        // hub could re-arm the watchdog indefinitely. Healthy = lastReadAgo
+        // is positive (we've seen at least one read) AND below quietSecs
+        // (the user-configured "iOS extended idle" threshold).
+        if (lastReadAgo > 0 && lastReadAgo < (int32_t)hkQuietSecs)
+        {
+            hkConsecutiveHealthyTicks++;
+            if (hkConsecutiveHealthyTicks >= HK_HEALTHY_TICKS_TO_RESET)
+            {
+                ESP_LOGI(TAG, "HomeKit auto-recover: %u consecutive healthy ticks (last_hap_read_ago=%ds), clearing recovery counter",
+                         (unsigned)hkConsecutiveHealthyTicks, lastReadAgo);
+                hkRecoverAttempts         = 0;
+                hkConsecutiveHealthyTicks = 0;
+            }
+        }
+        else
+        {
+            // Any non-healthy tick resets the consecutive count.
+            hkConsecutiveHealthyTicks = 0;
+        }
     }
 }
 
@@ -796,18 +884,59 @@ void homekit_dump_state(const char *reason)
 // and can starve the timer-task queue. v23 deferred this with a
 // one-shot Ticker, which moved the work but left it in esp_timer
 // context. v24 routes the request to a flag drained by main loop.
-static volatile bool reconnectHKRequested = false;
-static char reconnectHKReason[64] = {0};
+// v31: enum reason replaces the v24 char[64] strncpy buffer. Both the
+// flag and the reason are single-byte volatiles → atomic on ESP32 →
+// no torn-write race when the web handler and the watchdog Ticker
+// concurrently request a reconnect. If two requests collide, the
+// later writer's reason wins (same semantic as v24's strncpy), but
+// neither writer can leave the buffer in a half-written state.
+//
+// v31 audit #7b: same pattern is reused for two new deferred-flag
+// pairs covering homekit_refresh_mdns + homekit_dump_state. Pre-v31
+// these were called directly from the web request handler task
+// (handle_refresh_mdns, handle_dump_homekit_state) and from the
+// watchdog Ticker (auto-recover) — both touching HomeSpan internals
+// (updateDatabase, processSerialCommand) outside the autoPoll task
+// the API documents as the only safe caller. Now both web handlers
+// and the watchdog set the request flag; the actual homeSpan.* call
+// runs from service_timer_loop on loopTask. Upstream's existing
+// helperFactoryReset processSerialCommand("F") and OTA shutdown
+// vTaskDelete(getAutoPollTask()) call sites are deliberately left
+// alone — those are pre-existing upstream patterns (issue C in the
+// audit), not fork debt.
+static volatile bool                  reconnectHKRequested  = false;
+static volatile HomekitDeferredReason reconnectHKReason     = DEFERRED_REASON_UNSPECIFIED;
+static volatile bool                  refreshMdnsRequested  = false;
+static volatile HomekitDeferredReason refreshMdnsReason     = DEFERRED_REASON_UNSPECIFIED;
+static volatile bool                  dumpStateRequested    = false;
+static volatile HomekitDeferredReason dumpStateReason       = DEFERRED_REASON_UNSPECIFIED;
 
-void homekit_request_reconnect(const char *reason)
+static const char *deferredReasonString(HomekitDeferredReason r)
 {
-    if (reason) {
-        strncpy(reconnectHKReason, reason, sizeof(reconnectHKReason) - 1);
-        reconnectHKReason[sizeof(reconnectHKReason) - 1] = '\0';
-    } else {
-        reconnectHKReason[0] = '\0';
+    switch (r)
+    {
+        case DEFERRED_REASON_WEB_UI:    return "via web UI";
+        case DEFERRED_REASON_WATCHDOG:  return "watchdog auto-recover";
+        default:                         return "unspecified (deferred)";
     }
+}
+
+void homekit_request_reconnect(HomekitDeferredReason reason)
+{
+    reconnectHKReason    = reason;
     reconnectHKRequested = true;
+}
+
+void homekit_request_refresh_mdns(HomekitDeferredReason reason)
+{
+    refreshMdnsReason    = reason;
+    refreshMdnsRequested = true;
+}
+
+void homekit_request_dump_state(HomekitDeferredReason reason)
+{
+    dumpStateReason    = reason;
+    dumpStateRequested = true;
 }
 
 // Called from main-loop service_timer_loop. Performs the actual
@@ -816,11 +945,33 @@ void homekit_request_reconnect(const char *reason)
 void homekit_drain_pending_reconnect()
 {
     if (!reconnectHKRequested) return;
+    HomekitDeferredReason r = reconnectHKReason;
     reconnectHKRequested = false;
-    char reason[sizeof(reconnectHKReason)];
-    strncpy(reason, reconnectHKReason, sizeof(reason) - 1);
-    reason[sizeof(reason) - 1] = '\0';
-    homekit_force_reconnect(reason[0] ? reason : "unspecified (deferred)");
+    homekit_force_reconnect(deferredReasonString(r));
+}
+
+// v31: drain mdns refresh + dump state from main-loop context.
+// Both invoke HomeSpan APIs (updateDatabase / processSerialCommand)
+// that are not documented as re-entrant from arbitrary tasks; the
+// autoPoll task is the documented owner. loopTask is at minimum
+// safer than esp_timer / WebServer task and matches the v24
+// reconnect deferral pattern. updateDatabase is fast (<100ms);
+// dump_state runs three CLI commands and can take a couple seconds.
+// Both are rare (recovery / diagnostic actions), not on the hot path.
+void homekit_drain_pending_mdns_refresh()
+{
+    if (!refreshMdnsRequested) return;
+    HomekitDeferredReason r = refreshMdnsReason;
+    refreshMdnsRequested = false;
+    homekit_refresh_mdns(deferredReasonString(r));
+}
+
+void homekit_drain_pending_state_dump()
+{
+    if (!dumpStateRequested) return;
+    HomekitDeferredReason r = dumpStateReason;
+    dumpStateRequested = false;
+    homekit_dump_state(deferredReasonString(r));
 }
 
 // User-triggered "Reconnect HomeKit" recovery — invoked from the
@@ -1221,6 +1372,11 @@ void setup_homekit()
 {
     if (homekit_setup_done || softAPmode)
         return;
+
+    // v31 final: capture loopTask handle here (we're called from
+    // setup() on the Arduino loopTask) so homekit_health_log can
+    // query its stack high-water mark from Ticker context later.
+    loopTaskHandleForHWM = xTaskGetCurrentTaskHandle();
 
     ESP_LOGI(TAG, "=== Setup HomeKit accessories and services ===");
 

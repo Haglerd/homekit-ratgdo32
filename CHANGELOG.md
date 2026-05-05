@@ -10,6 +10,51 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.31 (2026-05-05)
+
+External-audit-driven cleanup of fork-introduced concurrency, security, and portability debt accumulated across v22-v30. All ten audit findings + three follow-up review items addressed. ESP32 build verified clean against the existing test bench; behavior changes are conservative (no new features, only correctness/observability/portability hardening).
+
+**Fixed (concurrency / runtime correctness)**
+
+- **SSE orphan sweep silent-disable regression introduced by v30.** v30's `int32_t` cast on `(now - timestamp)` fixed the TOCTOU race against writers but flipped any slot legitimately aged past 2³¹ ms (~24.85 days) to a negative comparison → `negative > timeout` is false → slot never reaped (sweep silently disables itself). v31 replaces the cast with explicit skew detection: `int32_t skew = (int32_t)(stamp - now); if (skew > 0) continue;` then unsigned `age = now - stamp` for the timeout test. Race fix preserved, long-uptime regression eliminated, mod-2³² wrap still handled correctly.
+- **Force-close shared state race (door-reversal risk).** `forceCloseInProgress`/`forceCloseAttempt`/`forceCloseGapTimer` were mutated from both the comms loop (loopTask, `update_door_state(CURR_CLOSING)` → `clear_force_close_state`) and the TTCtimer Ticker callback chain (release → retry/cleanup) without synchronization. Observed race: Ticker decided "schedule attempt 2" → loopTask preempted and cleared force-close state → Ticker resumed and re-armed the gap timer → 1.5 s later attempt 2 fired on a door already physically closing → wall-button-press toggled it back toward Open. Fix: deferred-arm pattern — Ticker sets `forceCloseGapPendingArmMs`, new `force_close_drain_pending_arm` runs on loopTask under `service_timer_loop`, re-checks `forceCloseInProgress` before arming. Plus `__atomic_test_and_set` on the busy flag itself replaces the v22 check-then-set, eliminating the dual-core race where two cores could both pass the check before either set true (doubled-relay-press scenario).
+- **`handle_status` torn-buffer race (Homebridge-visible).** v24's mutex-release-before-`server.send_P` mitigated broadcast-stall but introduced a TOCTOU: web_loop on the loopTask was free to take the mutex and overwrite `status_json` mid-send, so Homebridge intermittently saw torn JSON (half-old, half-new) → schema-rejected accessory updates. Fix: snapshot `status_json` into a dedicated `status_json_send` buffer (BSS on ESP32, mutex-held-across-send on ESP8266 to save heap) before releasing the mutex. Both invariants preserved.
+- **`handle_status` ESP8266 portability gate.** Above fix is `#ifndef ESP8266` — ESP8266's heap can't afford another 2 KB BSS, and its SSE path can't sustain enough concurrent subscribers to expose the deadlock surface that motivated v24's mutex release. ESP8266 holds the mutex across the send, with a defense-in-depth `json[BUFSZ-1] = '\0'` against `build_status_json` regressions.
+- **Auto-close Ticker self-reschedule anti-pattern.** `update_auto_close_schedule`'s outside-window branch armed itself as the one-shot's callback, repeating the FreeRTOS self-detach pattern that crashed `SSEheartbeat` in v22 (uxListRemove panic). Routed via `request_auto_close_reschedule` → main-loop drain.
+- **`userSettings::get` data-race mitigation (Ticker-context auto-close reads).** `userSettings::get` is mutex-free upstream while `set` takes the mutex (variant-tear race when read concurrent with write). The fork's new `checkAutoClose` Ticker reader and `autoCloseInWindow` made this reachable in practice. Mitigation: `comms_refresh_auto_close_config` caches all 5 auto-close keys into volatile statics, refreshed at boot + on `/setgdo` save. All Ticker-context reads now hit the cache. Upstream issue draft kept in `audit-notes/` for the underlying class fix.
+- **HomeKit watchdog sustained-recovery gate.** `hkRecoverAttempts` reset on a single sub-60 s read in any 180 s window, so a flapping iOS hub delivering one sporadic read could re-arm the watchdog forever (hours of repeated WiFi cycles, no escalation cap). Tightened to require `HK_HEALTHY_TICKS_TO_RESET = 3` consecutive ticks below `hkQuietSecs` before clearing — at 180 s cadence that's ≥9 min sustained healthy reads, well past typical hub flap interval.
+- **HomeSpan-from-web-task entry points deferred.** New fork endpoints `/refreshHomeKitMDNS` and `/dumpHomeKitState` called `homeSpan.updateDatabase`/`processSerialCommand` from the WebServer task — outside HomeSpan's documented autoPoll-task safe zone. Routed through new request-flag + drain pattern matching v24's reconnect deferral. Same applied to the watchdog auto-recover's `homekit_refresh_mdns` call (was running from esp_timer task). Upstream's pre-existing `helperFactoryReset` and OTA `vTaskDelete(getAutoPollTask())` deliberately left alone (audit issue C, upstream-side).
+- **Per-task log recursion guard.** v24's single-slot `static volatile TaskHandle_t inFnTask` was wiped when a second concurrent task entered, then a re-entry by the first task could recurse through `clientWriteEx`'s slow-write `ESP_LOGW` — exactly the load v24 was deployed to instrument. Replaced with an 8-slot CAS-protected table (`__atomic_compare_exchange_n` for slot acquisition, `__atomic_store_n` release on exit). Per-task isolation; table-exhaustion silently drops broadcast/syslog rather than risk recursion.
+- **`reconnectHKReason` torn-write race.** `strncpy` from web handler concurrent with main-loop drain produced occasional garbled log strings. Replaced `char[64]` with `volatile HomekitDeferredReason` enum (single-byte, atomic on Xtensa). Two-writer last-wins semantic preserved; torn writes eliminated. Same enum pattern reused for the new mdns/dump-state defer pairs.
+- **`logMtxMaxWaitMs` lost-sample race.** Read-then-zero from `homekit_health_log` was non-atomic; logger task could write the max between the read and the zero. Replaced with `__atomic_exchange_n(&logMtxMaxWaitMs, 0, __ATOMIC_RELAXED)` — single Xtensa instruction. Same pattern applied to `sseOrphansReaped`.
+
+**Fixed (security)**
+
+- **`enforce_same_origin` rewritten — two real bypasses closed.** Pre-v31:
+  1. **Substring match.** `origin.indexOf(hostOnly) >= 0` passed any URL whose path/query merely contained the device's hostname as a substring. With `Host: ratgdo`, an attacker page at `http://evil.example/?ratgdo` cleared the check.
+  2. **Missing-headers passthrough.** When both `Origin` and `Referer` were absent, the guard returned true. Default-no-password installs reach state-changing endpoints (incl. `/setgdo` `forceClose`) with this guard as the only CSRF defense, so a `<form>` POST with `Referrer-Policy: no-referrer` bypassed it from any same-LAN page.
+  
+  v31 parses `Origin`/`Referer` URLs with a real host extractor, compares lowercased + port-stripped host fields exactly, and treats absence of both `Origin` AND `Referer` as a hard fail. Bracket-aware IPv6 parsing (`[::1]:8080` → `[::1]`), RFC 6874 zone-ID stripping (`[fe80::1%eth0]` → `[fe80::1]`), degenerate-input fail-close (`[]` → reject). Companion zero-heap rewrite: stack-local `char[]` buffers throughout, no Arduino String allocations — eliminates the 6 `String` allocs per state-changing POST that were the dominant per-request heap-fragmentation surface on ESP8266.
+
+**Added (observability)**
+
+- **HomeKit health log split into 3 lines** (under 256-byte LINE_BUFFER_SIZE — the original combined line was already truncating mid-token at `sseOrphansReaped` pre-v31). New schema:
+  - `HomeKit health: wifi=…  rssi=…  heap=…  maxBlock=…  uptime=…  paired=…  controllers=…  last_hap_read_ago=…`
+  - `HomeKit diag-sse: logMtxMaxWait=…  sseSlowWrites=…  sseBufferFullSkips=…  sseSlotsAlloc=…  sseOrphansReaped=…`
+  - `HomeKit diag-hk:  recoverAttempts=…  hintLevel=…  hkHealthyTicks=…  loopHWM=…B  tmrHWM=…B  apHWM=…B  tickDrift=…ms`
+- **Watchdog state visibility:** `recoverAttempts`/`hintLevel`/`hkHealthyTicks` on every health line — confirms tuning is right without grepping for WARN-level auto-recover lines.
+- **Per-task stack high-water marks (bytes):** `loopHWM`/`tmrHWM`/`apHWM` for loopTask, FreeRTOS Tmr Svc, and HomeSpan autoPoll — climbing toward zero indicates near-overflow. ESP-IDF wrapper returns bytes natively (no `* sizeof(StackType_t)` multiplier needed).
+
+**Changed (build / portability)**
+
+- **Advisory compiler warnings:** `-Wsign-compare`, `-Wsign-conversion`, `-Wshadow` added to `[env:ratgdo_esp32dev]` build_flags (intentionally NOT errors — library deps emit some that we can't fix in the fork). Would have caught the v30 `int32_t` cast bug at compile time.
+- **`web_loop` SSE fanout buffer stack→BSS.** `localJson[2560]` per-loop stack alloc → `static`. ESP32: 31% of loopTask stack reclaimed; ESP8266 cherry-pick critical (50% of cont-task's ~4 KB).
+- **`audit-notes/` gitignored** — local fork-attribution scratch space, not for upstream.
+
+**ESP8266 portability notes (for cherry-pick to `Haglerd/homekit-ratgdo`)**
+
+The skew-detection (`#0`), atomic counter ops (`#9`/`#10`/F1), per-task recursion guard (F3), and same-origin URL parsing (`#2b`) are all fully portable — stdint types, GCC built-ins, and standard C string ops only. The HomeKit watchdog/health-log block, the HomeSpan defer pairs, and the new stack-HWM observability are ESP32-only (depend on HomeSpan, FreeRTOS task handles, and esp_heap_caps). The `handle_status` ESP8266 branch (mutex-held-across-send + defense-in-depth terminator) is the recommended port; the ESP32 dedicated-buffer variant is too heap-expensive for ESP8266.
+
 ### v3.4.4-forceclose.30 (2026-05-04)
 
 **Fixed (critical)**
