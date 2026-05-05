@@ -291,7 +291,10 @@ async function clearCrashLog() {
 // stream. Used by both the live SSE subscription and the initial fetch
 // of /showlog when the HomeKit tab opens.
 function isHomeKitLine(line) {
-    return /ratgdo-homekit|HomeKit |HomeSpan|WiFi |Wifi |wifi |force-close to clear|HomeKit reconnect/i.test(line);
+    // v43 (audit W28): collapsed `WiFi |Wifi |wifi ` (redundant under /i),
+    // dropped `HomeKit reconnect` (subsumed by `HomeKit `), removed
+    // `force-close to clear` (no firmware ESP_LOG emits that string).
+    return /ratgdo-homekit|HomeKit |HomeSpan|WiFi /i.test(line);
 }
 
 async function reconnectHomeKit() {

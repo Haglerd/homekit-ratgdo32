@@ -420,6 +420,17 @@ void LOG::logToBuffer(const char *fmt, va_list args)
     // the two passes — only the current task can install its own
     // handle, so nothing else can transition slots into the
     // "matches curTask" state in the gap.
+#ifndef ESP8266
+    // v43 (audit W21): the recursion-guard slot table uses ESP-IDF /
+    // FreeRTOS APIs (`TaskHandle_t`, `xTaskGetCurrentTaskHandle`,
+    // `__atomic_*` on `volatile TaskHandle_t`) unavailable on
+    // Arduino-ESP8266 (NONOS-SDK, no FreeRTOS). Fork ships ESP32-only
+    // today, but every other fork addition in this file is
+    // `#ifndef ESP8266`-gated — match that convention. ESP8266
+    // cooperative scheduling means a single task can't recurse into
+    // itself across two distinct frames in the way the ESP32 case
+    // guards against, so the ESP8266 branch can broadcast/syslog
+    // directly with no recursion guard.
     static constexpr size_t LOG_RECURSION_SLOTS = 8;
     static volatile TaskHandle_t inFnTaskTable[LOG_RECURSION_SLOTS] = {0};
 
@@ -463,6 +474,12 @@ void LOG::logToBuffer(const char *fmt, va_list args)
 
     __atomic_store_n(&inFnTaskTable[mySlot], (TaskHandle_t)NULL, __ATOMIC_RELEASE);
     return;
+#else
+    // ESP8266: cooperative scheduling — no recursion guard required.
+    SSEBroadcastState(outLine, LOG_MESSAGE);
+    logToSyslog(outLine);
+    return;
+#endif
 }
 
 void LOG::clearCrashLog()
