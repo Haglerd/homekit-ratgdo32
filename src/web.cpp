@@ -1123,6 +1123,14 @@ void handle_reset()
 #ifdef ESP8266
     homekit_storage_reset();
 #else
+    // v43 (audit W29): homekit_unpair calls homeSpan.processSerialCommand
+    // synchronously from the WebServer task, breaking the v31 deferred-flag
+    // discipline used by homekit_dump_state / homekit_refresh_mdns /
+    // homekit_force_reconnect. The synchronous call is intentional here:
+    // sync_and_restart() at the bottom of this handler reboots within
+    // ~500 ms (delay below + send completion), so the autoPoll-task race
+    // window is bounded by the imminent reboot. Wrapping in a request flag
+    // would race the reboot path.
     homekit_unpair();
 #endif
     server.client().setNoDelay(true);
@@ -1410,10 +1418,30 @@ void build_status_json(char *json)
     JSON_ADD_STR(cfg_gatewayIP, userConfig->getGatewayIP());
     JSON_ADD_STR(cfg_nameserverIP, userConfig->getNameserverIP());
     new_ipv4_address = false;
-    JSON_ADD_STR("macAddress", WiFi.macAddress().c_str());
-    JSON_ADD_STR("wifiSSID", WiFi.SSID().c_str());
-    JSON_ADD_STR("wifiRSSI", (std::to_string(WiFi.RSSI()) + " dBm, Channel " + std::to_string(WiFi.channel())).c_str());
-    JSON_ADD_STR("wifiBSSID", WiFi.BSSIDstr().c_str());
+    // v43 (audit W35): copy each Arduino String into a stack buffer before
+    // calling .c_str(). The pre-v43 pattern `WiFi.macAddress().c_str()`
+    // returned a borrowed pointer into a String temporary that was
+    // destroyed at the semicolon — undefined behavior, even though
+    // JSON_ADD_STR happens to copy the bytes immediately. The wifiRSSI
+    // line additionally allocated 3+ heap chunks per call via `std::to_string
+    // + std::to_string + +`. Total heap saved per status.json poll: ~120 B.
+    char macStr[18];
+    char ssidStr[33];
+    char rssiBuf[40];
+    char bssidStr[18];
+    {
+        String s_mac   = WiFi.macAddress();
+        String s_ssid  = WiFi.SSID();
+        String s_bssid = WiFi.BSSIDstr();
+        strncpy(macStr,   s_mac.c_str(),   sizeof(macStr)   - 1); macStr[sizeof(macStr)     - 1] = '\0';
+        strncpy(ssidStr,  s_ssid.c_str(),  sizeof(ssidStr)  - 1); ssidStr[sizeof(ssidStr)   - 1] = '\0';
+        strncpy(bssidStr, s_bssid.c_str(), sizeof(bssidStr) - 1); bssidStr[sizeof(bssidStr) - 1] = '\0';
+    }
+    snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm, Channel %u", (int)WiFi.RSSI(), WiFi.channel());
+    JSON_ADD_STR("macAddress", macStr);
+    JSON_ADD_STR("wifiSSID", ssidStr);
+    JSON_ADD_STR("wifiRSSI", rssiBuf);
+    JSON_ADD_STR("wifiBSSID", bssidStr);
 #ifdef ESP8266
     JSON_ADD_BOOL("lockedAP", wifiConf.bssid_set);
 #else
@@ -2208,7 +2236,14 @@ void SSEheartbeat(SSESubscription *s)
         if (lastRSSI != WiFi.RSSI())
         {
             lastRSSI = WiFi.RSSI();
-            JSON_ADD_STR("wifiRSSI", (std::to_string(lastRSSI) + " dBm, Channel " + std::to_string(WiFi.channel())).c_str());
+            // v43 (audit W35): replace `(std::to_string + std::to_string +
+            // " dBm, ...").c_str()` 3-allocation chain with one snprintf
+            // into a stack buffer. SSEheartbeat fires per-subscriber per
+            // ~10s; eliminating heap from this hot path cuts long-term
+            // fragmentation pressure.
+            char rssiBuf[40];
+            snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm, Channel %u", (int)lastRSSI, WiFi.channel());
+            JSON_ADD_STR("wifiRSSI", rssiBuf);
         }
 #ifdef ESP8266
         static int lastClientCount = 0;
@@ -2570,22 +2605,34 @@ void handle_subscribe()
 // exactly what enforce_same_origin checks. Adding the guard blocks
 // drive-by cross-origin closes (e.g. malicious LAN page knocking
 // the user offline) without breaking the legitimate beacon flow.
-// No AUTH because the UUID is the only authority required and it's
-// already 128-bit random; an attacker without the UUID can't target
-// a specific session.
+//
+// AUTH note: this endpoint is intentionally not gated by AUTHENTICATE.
+// sendBeacon does not implement Digest, so adding AUTH would either
+// break legitimate beacon delivery (the sole UA mechanism for "release
+// my SSE slot on page unload") or repeat the v37 EventSource trap of
+// spurious 401s on background-tab transitions. The session UUID is the
+// authority, but its premise is best-effort: syslog readers and same-
+// LAN sniffers can capture active UUIDs (we log channel-allocation at
+// handle_subscribe and the device exports syslog UDP unauthenticated).
+// An attacker who reads syslog can beacon-disconnect any user — bounded
+// to forcing a browser SSE reconnect (DoS, no state damage).
 void handle_unsubscribe()
 {
     if (!enforce_same_origin("/rest/events/unsubscribe")) return;
-    String uuid;
+    // v43 (audit W24): drop the Arduino `String uuid;` + `uuid =
+    // server.arg(i);` heap-double-alloc pattern (1 String for the local
+    // + 1 for server.arg's return) on a path that fires per-page-navigate
+    // via navigator.sendBeacon. char[40] holds 36-char UUIDs comfortably.
+    char uuid[40] = {0};
     for (int i = 0; i < server.args(); i++)
     {
         if (server.argName(i).equals("id"))
         {
-            uuid = server.arg(i);
+            strncpy(uuid, server.arg(i).c_str(), sizeof(uuid) - 1);
             break;
         }
     }
-    if (uuid.isEmpty())
+    if (uuid[0] == '\0')
     {
         server.send_P(400, type_txt, response400missing);
         return;
@@ -2593,11 +2640,11 @@ void handle_unsubscribe()
     int matched = 0;
     for (uint32_t i = 0; i < SSE_MAX_CHANNELS; i++)
     {
-        if (subscription[i].clientUUID == uuid &&
+        if (subscription[i].clientUUID.equals(uuid) &&
             subscription[i].clientIP != IPAddress(INADDR_NONE))
         {
             ESP_LOGD(TAG, "unsubscribe beacon for UUID %s on channel %u",
-                     uuid.c_str(), (unsigned)i);
+                     uuid, (unsigned)i);
             subscription[i].pendingRemove = true;
             matched++;
         }
