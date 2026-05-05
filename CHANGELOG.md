@@ -10,6 +10,36 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.36 (2026-05-04)
+
+Closeout pass on the v34/35 fresh-eye audit (`audit-notes/2026-05-04-fork-vs-upstream-attribution.md`, "v34 fresh-eye review" section). All seven open findings (V1, V2, V3, V4, V5, V6, V7) and the MH7 redux are addressed in this PR. After v36 ships and bakes for a few days, the open-items table goes to zero and the fork moves into observation mode.
+
+**Fixed (concurrency)**
+
+- **V1 + V2 — `WiFiUDP syslog` lifetime + `endPacket()` race.** Both findings collapse to the same fix: a single `syslogMutex` (FreeRTOS `SemaphoreHandle_t`) now guards the whole `logToSyslog` body — the lazy-allocate path (V1: `delete syslog; syslog = nullptr;` was racing against a concurrent caller mid-`beginPacket`/`print`/`endPacket`) and the actual UDP send sequence (V2: two callers serialized `beginPacket()` and `endPacket()` separately could interleave their print*() output into the same packet, ending with one mangled UDP datagram and one lost). Restructured to single-return goto-cleanup pattern (precedent: `comms.cpp:1658 readIn:`) so the take/give pair stays balanced across all early-exit paths.
+- **V3 — `autoCloseRescheduleRequested` release/acquire ordering.** `request_auto_close_reschedule` (esp_timer-context, called from SNTP `time_is_set` callback per F6) was a plain `volatile bool = true;` write paired with a plain `volatile bool` read in `auto_close_drain_pending_reschedule` (loopTask). On Xtensa the load is single-instruction-atomic but there's no memory ordering — drain could observe the flag set without observing the writes that established the new wallclock state. Now `__atomic_store_n(&flag, true, __ATOMIC_RELEASE)` writer / `__atomic_load_n(&flag, __ATOMIC_ACQUIRE)` reader, matching the Finding C pattern from v32.
+- **V6 — `WiFi.isConnected()` guard in F7 stage 2.** When `homekit_drain_pending_reconnect_stage2` fires, some chipsets / supplicant configs have already auto-reconnected during the 250ms gap. Calling `WiFi.reconnect()` on an already-associated interface is documented as idempotent but in practice triggers `esp_wifi_disconnect`+`esp_wifi_connect` under the hood — briefly disrupting the just-established connection. Stage 2 now skips `WiFi.reconnect()` when `WiFi.isConnected() == true` and logs the skip via `HK_DIAG_LOG`. State machine returns to idle either way.
+- **V7 — `homekit_force_reconnect` rapid re-entry guard.** Two near-simultaneous triggers (watchdog auto-recover firing while user clicks `/reconnectHomeKit`, or two watchdog recoveries back-to-back) could both call `homekit_force_reconnect` within the 250ms stage-1 window. Second call would overwrite `reconnectStageStartMs`, deferring the stage-2 `WiFi.reconnect()` indefinitely (kept getting reset to "now"). Early-return added at top: if `__atomic_load_n(&reconnectStage, __ATOMIC_ACQUIRE) == 1`, log a WARN and return without touching state. First reconnect cycle completes; subsequent triggers can re-enter only after stage 2 has cleared the stage flag.
+
+**Reverted**
+
+- **V4 + V5 — F4 `thread_local outLine`.** v33 made `LOG::logToBuffer`'s 256 B `outLine[]` `thread_local` to move it off-stack into TLS. ESP-IDF GCC's `thread_local` for non-trivial-construct storage uses `emutls`, which heap-allocates the TLS area on first access. Under the exact conditions where the watchdog-recovery log is most useful (heap exhaustion during a recovery window), TLS alloc could fail and trigger `__cxa_throw_bad_alloc()` → abort — the recovery log's own buffer would be the OOM trigger. F4 reverted to plain stack-local `char outLine[LINE_BUFFER_SIZE];`. Both loopTask (8 KB) and esp_timer (4 KB) stacks have headroom for the 256 B frame.
+
+**Workflow**
+
+- **MH7 redux — exclude `.elf` from `docs/firmware/`.** `release.yml`'s "Commit firmware bins to docs/firmware/" step (re-instated in v35 hotfix) was committing all five build artifacts including the multi-MB `.elf` on every release cut. The device-side OTA path (`functions.js`) only fetches `.firmware.bin` / `.bootloader.bin` / `.partitions.bin` / `.firmware.md5`. The `.elf` is needed only by the crash-backtrace decoder, which already gets it from the GitHub release attachments and the workflow artifact. Trimmed `git add` to the four flash bins. The `.elf` continues to ship as a release attachment (existing `Attach all firmware artifacts to release` step) and as a workflow artifact. Net `.git` growth per release drops by ~30 MB.
+
+**Out of scope (intentionally NOT in v36)**
+
+- MH1 ping-pong status_json — verified unsafe in v33 (esp_timer SSEheartbeat writer races loopTask reader on flip). Permanently parked.
+- MH2 PSTR-wrap — ESP8266-only optimization; no upstream PR pending.
+- MH5 `-flto` — incompatible with `-Wl,--wrap=esp_panic_handler`. Permanently parked while the panic-handler wrap exists (load-bearing for v22+ crash-log preservation).
+- MH6 `STATUS_JSON_BUFFER_SIZE` retune — instrumentation shipped in v33; needs days/weeks of `jsonPeak=…B` data from real installs before retuning. Holding pattern.
+
+**Verification**
+
+- ESP32 build clean against existing test bench. End-to-end OTA test from v35 → v36 via device web UI and via web installer is REQUIRED before merge — see PR checklist.
+
 ### v3.4.4-forceclose.35 (2026-05-05)
 
 **Hotfix release.** v34's CI build failed at the link step — the `-flto` flag added in MH5 is fundamentally incompatible with the fork's existing `-Wl,--wrap=esp_panic_handler` flag (used for ESP32 panic capture). LTO inlines / eliminates the wrapped function so the linker can't resolve `__wrap_esp_panic_handler` (and `app_main` got eliminated too). Net: v34 release exists with manifest only, no bins → users can't OTA to v34.

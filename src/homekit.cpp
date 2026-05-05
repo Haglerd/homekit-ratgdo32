@@ -936,6 +936,18 @@ static volatile uint32_t reconnectStageStartMs = 0;
 
 void homekit_force_reconnect(const char *reason)
 {
+    // v36 (V7): rapid re-entry guard. If a previous reconnect is still in
+    // its 250ms disconnect→reconnect window (stage 1), a second call would
+    // overwrite reconnectStageStartMs, deferring the WiFi.reconnect() that
+    // stage 2 was about to fire. Two near-simultaneous triggers (watchdog
+    // auto-recover + user-clicked /reconnectHomeKit, or two watchdog
+    // recoveries firing back-to-back) could keep the device stuck in the
+    // disconnected window indefinitely. Drop duplicates instead.
+    if (__atomic_load_n(&reconnectStage, __ATOMIC_ACQUIRE) == 1)
+    {
+        ESP_LOGW(TAG, "HomeKit reconnect already in progress — ignoring duplicate (%s)", reason ? reason : "unspecified");
+        return;
+    }
     ESP_LOGW(TAG, "HomeKit reconnect requested (%s) — cycling WiFi", reason ? reason : "unspecified");
     // Don't erase WiFi credentials — pass false. The reconnect call will
     // re-associate using the same SSID/password from NVRAM.
@@ -953,9 +965,22 @@ void homekit_drain_pending_reconnect_stage2()
 {
     if (__atomic_load_n(&reconnectStage, __ATOMIC_ACQUIRE) != 1) return;
     if ((uint32_t)_millis() - reconnectStageStartMs < 250) return;
-    WiFi.reconnect();
+    // v36 (V6): some chipsets / supplicant configurations auto-reconnect
+    // during the 250ms gap between WiFi.disconnect(false) and this drain
+    // tick. Calling WiFi.reconnect() on an already-connected interface is
+    // documented as idempotent but can briefly disrupt the just-established
+    // association (esp_wifi_disconnect+esp_wifi_connect under the hood).
+    // Only re-associate if we're still actually disconnected.
+    if (!WiFi.isConnected())
+    {
+        WiFi.reconnect();
+        HK_DIAG_LOG("HomeKit reconnect: re-associate issued");
+    }
+    else
+    {
+        HK_DIAG_LOG("HomeKit reconnect: WiFi auto-reconnected during gap, skipping reconnect()");
+    }
     __atomic_store_n(&reconnectStage, (uint8_t)0, __ATOMIC_RELEASE);
-    HK_DIAG_LOG("HomeKit reconnect: re-associate issued");
 }
 
 void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
