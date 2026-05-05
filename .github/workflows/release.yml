@@ -158,12 +158,43 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           release-tag: ${{ steps.tag.outputs.latestTag }}
 
-      # MH7 (v33+): the per-release docs/firmware/ commit step has been
-      # removed. Bins live on the GitHub release attachments only — the
-      # manifest.json (above) points at https://github.com/Haglerd/...
-      # release-download URLs. Net effect: bounded .git growth going
-      # forward (was adding ~5 MB per release × ~50 releases/year =
-      # ~250 MB/year before the change).
+      # MH7 was REVERTED in v35 hotfix. The device's web-UI "Update from
+      # GitHub" button (functions.js:1019 pre-v34) hardcodes a Pages-relative
+      # download URL pattern. When MH7 stopped committing bins to
+      # docs/firmware/ for v33+, that URL broke for all v32-or-older
+      # devices trying to OTA. The functions.js fix in v34/v35 only helps
+      # AFTER you're on v34+, but you can't OTA TO v34+ via the web UI
+      # if the bins aren't at the expected URL. Restoring the docs/firmware/
+      # commit so device-side OTA works regardless of installed version.
+      # Manifest paths stay as github.com release URLs (web installer prefers
+      # those; device-side functions.js in v34+ also uses release URLs).
+      - name: Commit firmware bins to docs/firmware/
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p /tmp/fwbins
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 /tmp/fwbins/
+          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf /tmp/fwbins/
+          git fetch origin main
+          git checkout -fB main origin/main
+          mkdir -p docs/firmware
+          cp /tmp/fwbins/* docs/firmware/
+          git add docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
+          if ! git diff --cached --quiet; then
+            git commit -m "Upload firmware bins for ${{ steps.tag.outputs.latestTag }}"
+            git push origin main
+          else
+            echo "firmware bins already present on main, skipping commit"
+          fi
+        shell: bash
 
       # Keep the .elf as a workflow artifact for crash backtrace decoding
       # (addr2line consumers). Not on the release because elf files are
