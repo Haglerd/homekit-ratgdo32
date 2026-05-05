@@ -75,7 +75,27 @@ extern void homekit_force_reconnect(const char *reason);
 // v24: deferred-reconnect entry. Safe to call from any thread / any
 // context (Ticker, web request, ISR-safe). The actual reconnect runs
 // in main loop via homekit_drain_pending_reconnect().
-extern void homekit_request_reconnect(const char *reason);
+// v31: reason is a small enum (single-byte volatile, atomic on ESP32)
+// instead of a strncpy'd char buffer — eliminates torn-write race
+// when web handler and watchdog request reconnect concurrently.
+// Same enum is reused by the v31 mdns-refresh + dump-state defer paths
+// (audit #7b — fork added new HomeSpan-from-web-task entry points; we
+// route them through the same drain pattern as reconnect).
+enum HomekitDeferredReason : uint8_t
+{
+    DEFERRED_REASON_UNSPECIFIED  = 0,
+    DEFERRED_REASON_WEB_UI       = 1,
+    DEFERRED_REASON_WATCHDOG     = 2,
+};
+extern void homekit_request_reconnect(HomekitDeferredReason reason);
+// v31: deferred mdns-refresh + dump-state. Web handlers and the
+// watchdog auto-recover path set the request flag; the actual
+// homeSpan.* call runs from service_timer_loop on loopTask, matching
+// the v24 reconnect deferral. Closes the audit #7b widening.
+extern void homekit_request_refresh_mdns(HomekitDeferredReason reason);
+extern void homekit_request_dump_state(HomekitDeferredReason reason);
+extern void homekit_drain_pending_mdns_refresh();
+extern void homekit_drain_pending_state_dump();
 extern void homekit_drain_pending_reconnect();
 // Re-advertise mDNS without cycling WiFi (lighter-touch recovery).
 extern void homekit_refresh_mdns(const char *reason);

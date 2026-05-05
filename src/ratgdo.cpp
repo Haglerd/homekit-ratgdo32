@@ -438,6 +438,17 @@ void service_timer_loop()
     // of the esp_timer Ticker task avoids stalling every other Ticker
     // callback (SSE heartbeats, health log, auto-close tick).
     homekit_drain_pending_reconnect();
+    // v31: drain pending force-close gap-timer arm in single-threaded
+    // context. Re-checks forceCloseInProgress before arming so a
+    // concurrent clear_force_close_state can drop the request safely
+    // — closes the door-reversal race in audit #3.
+    force_close_drain_pending_arm();
+    // v31: drain pending HomeSpan-API requests (mdns refresh + state
+    // dump) in loopTask context, matching the v24 reconnect deferral.
+    // updateDatabase() and processSerialCommand() were called directly
+    // from WebServer/esp_timer tasks pre-v31 — audit #7b widening.
+    homekit_drain_pending_mdns_refresh();
+    homekit_drain_pending_state_dump();
 
     // Check heap
     static _millis_t last_heap_check = 0;

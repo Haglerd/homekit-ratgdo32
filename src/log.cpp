@@ -290,19 +290,74 @@ void LOG::logToBuffer(const char *fmt, va_list args)
     outLine[sizeof(outLine) - 1] = '\0';
     GIVE_MUTEX();
 
-    static volatile TaskHandle_t inFnTask = NULL;
+    // v31.2 audit F3: per-task recursion guard via a small CAS-protected
+    // table. v24's single `static volatile TaskHandle_t inFnTask` was a
+    // global slot — when task B's set wrote its handle, task A's guard
+    // was lost. If A then re-entered (another ESP_LOGx) while B was
+    // mid-broadcast, A's presence prevented B's recursion check from
+    // finding its own handle on the next broadcast → infinite-recursion
+    // vector through clientWriteEx's slow-write ESP_LOGW under exactly
+    // the load v24 was deployed to instrument. v31.2 gives each
+    // concurrent caller its own slot. Acquire/release ordering prevents
+    // reordering of the broadcast/syslog work around the slot writes.
+    // LOG_RECURSION_SLOTS = 8 is sized for loopTask + esp_timer +
+    // HomeSpan autoPoll + WiFi RX/TX + syslog + spares — more than any
+    // realistic concurrent-logger count on this device.
+    //
+    // v31.3 follow-up (audit F3 review): two-pass scan. Pass 1 walks
+    // every slot looking for our own handle (recursion); pass 2 only
+    // runs if pass 1 cleared, and claims the first empty slot. The
+    // single-pass interleaved version had a slot-leak bug: a recursing
+    // task would CAS-claim an empty slot in the early iterations,
+    // *then* find its own handle on a later slot and `return` without
+    // releasing the just-claimed slot. After enough recursions the
+    // entire 8-slot table was permanently held by stale claims and
+    // the originating task could never log again. No TOCTOU between
+    // the two passes — only the current task can install its own
+    // handle, so nothing else can transition slots into the
+    // "matches curTask" state in the gap.
+    static constexpr size_t LOG_RECURSION_SLOTS = 8;
+    static volatile TaskHandle_t inFnTaskTable[LOG_RECURSION_SLOTS] = {0};
+
     TaskHandle_t curTask = xTaskGetCurrentTaskHandle();
-    if (inFnTask != curTask)
+
+    // Pass 1: full-table recursion check. Must complete before any
+    // claim — see v31.3 comment above.
+    for (size_t i = 0; i < LOG_RECURSION_SLOTS; i++)
     {
-        // Control recursion within this task — prevents an infinite
-        // loop if SSEBroadcastState or logToSyslog itself ever emits an
-        // ESP_LOGx (known to happen in NetworkUDP errors). Cross-task
-        // entries proceed normally because their handle differs.
-        inFnTask = curTask;
-        SSEBroadcastState(outLine, LOG_MESSAGE);
-        logToSyslog(outLine);
-        inFnTask = NULL;
+        if (__atomic_load_n(&inFnTaskTable[i], __ATOMIC_ACQUIRE) == curTask)
+        {
+            // Recursion: this task is already inside the broadcast/syslog
+            // block on a stack frame above us. Calling it again would
+            // walk into the same code that just emitted this ESP_LOGx.
+            return;
+        }
     }
+
+    // Pass 2: claim the first empty slot.
+    int mySlot = -1;
+    for (size_t i = 0; i < LOG_RECURSION_SLOTS; i++)
+    {
+        TaskHandle_t expected = NULL;
+        if (__atomic_compare_exchange_n(&inFnTaskTable[i], &expected, curTask,
+                                        false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        {
+            mySlot = (int)i;
+            break;
+        }
+    }
+    if (mySlot < 0)
+    {
+        // Table exhausted (>8 concurrent loggers) — drop silently
+        // rather than risk recursion. Extremely unlikely on this
+        // device's task set.
+        return;
+    }
+
+    SSEBroadcastState(outLine, LOG_MESSAGE);
+    logToSyslog(outLine);
+
+    __atomic_store_n(&inFnTaskTable[mySlot], (TaskHandle_t)NULL, __ATOMIC_RELEASE);
     return;
 }
 
