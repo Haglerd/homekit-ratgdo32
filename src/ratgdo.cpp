@@ -432,6 +432,9 @@ void service_timer_loop()
     force_close_drain_pending_clear();
     homekit_drain_pending_mdns_refresh();
     homekit_drain_pending_state_dump();
+    // v34 F7: drives the second half of the WiFi-reconnect cycle
+    // ~250ms after the disconnect, without blocking loopTask.
+    homekit_drain_pending_reconnect_stage2();
 
     // Check heap
     static _millis_t last_heap_check = 0;

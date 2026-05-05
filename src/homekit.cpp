@@ -529,6 +529,21 @@ static volatile uint32_t hkCfgRecoverSecs   = 1800;
 static volatile uint32_t hkCfgQuietSecs     = 300;
 static volatile uint32_t hkCfgStaleSecs     = 900;
 static volatile uint32_t hkCfgLikelyNRSecs  = 1800;
+// v34: gate periodic 180s diagnostic state-dump + post-action narration
+// behind this toggle. Default OFF. See HK_DIAG_LOG macro below.
+static volatile bool     hkCfgVerboseLogs   = false;
+
+// v34: dual-level log macro. When the user has enabled hkVerboseLogs,
+// these lines emit at INFO (visible in default config). When OFF (default),
+// they emit at DEBUG — invisible at the default INFO log level, but a
+// developer can still see them by setting global log level to DEBUG
+// without flipping the user toggle. Used for periodic 180s state-dump
+// lines and post-action narration. Event-occurred lines (auto-recover
+// fired, hint level transitions, pair state changes, WiFi disconnects)
+// stay unconditional ESP_LOGW.
+#define HK_DIAG_LOG(fmt, ...) \
+    do { if (hkCfgVerboseLogs) ESP_LOGI(TAG, fmt, ##__VA_ARGS__); \
+         else                  ESP_LOGD(TAG, fmt, ##__VA_ARGS__); } while (0)
 
 void homekit_refresh_watchdog_config()
 {
@@ -537,6 +552,7 @@ void homekit_refresh_watchdog_config()
     hkCfgQuietSecs    = userConfig->getHKHintQuietSecs();
     hkCfgStaleSecs    = userConfig->getHKHintStaleSecs();
     hkCfgLikelyNRSecs = userConfig->getHKHintLikelyNRSecs();
+    hkCfgVerboseLogs  = userConfig->getHKVerboseLogs();
     // v23: reset hint-level + recovery-attempts state when thresholds
     // change. Both are only meaningful relative to the active thresholds.
     // Without these resets, lowering the trigger threshold mid-episode
@@ -547,9 +563,9 @@ void homekit_refresh_watchdog_config()
     hkLastHintLevel             = 0;
     hkRecoverAttempts           = 0;
     hkConsecutiveHealthyTicks   = 0;
-    ESP_LOGD(TAG, "HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u",
-             (int)hkCfgEnabled, (unsigned)hkCfgRecoverSecs,
-             (unsigned)hkCfgQuietSecs, (unsigned)hkCfgStaleSecs, (unsigned)hkCfgLikelyNRSecs);
+    HK_DIAG_LOG("HomeKit watchdog config refreshed: enabled=%d trigger=%us hints=%u/%u/%u",
+                (int)hkCfgEnabled, (unsigned)hkCfgRecoverSecs,
+                (unsigned)hkCfgQuietSecs, (unsigned)hkCfgStaleSecs, (unsigned)hkCfgLikelyNRSecs);
 }
 
 static void homekit_health_log()
@@ -622,35 +638,33 @@ static void homekit_health_log()
     // being truncated mid-token at sseOrphansReaped). Line 1 keeps
     // the wifi/heap/uptime/HomeKit-state snapshot; line 2 carries
     // the SSE + watchdog + stack diagnostics. Both well under 256.
-    ESP_LOGI(TAG, "HomeKit health: wifi=%s rssi=%ddBm heap=%lu maxBlock=%lu uptime=%us paired=%s controllers=%u last_hap_read_ago=%ds",
-             wifiState,
-             rssi,
-             (unsigned long)esp_get_free_heap_size(),
-             (unsigned long)maxAllocBlock,
-             nowSec,
-             isPaired ? "yes" : "no",
-             (unsigned)paired_controllers,
-             lastReadAgo);
-    // v31 final fix: split into two diag lines because the
-    // combined line at ~272 chars exceeds LINE_BUFFER_SIZE=256
-    // and was being silently truncated mid-tickDrift token.
+    HK_DIAG_LOG("HomeKit health: wifi=%s rssi=%ddBm heap=%lu maxBlock=%lu uptime=%us paired=%s controllers=%u last_hap_read_ago=%ds",
+                wifiState,
+                rssi,
+                (unsigned long)esp_get_free_heap_size(),
+                (unsigned long)maxAllocBlock,
+                nowSec,
+                isPaired ? "yes" : "no",
+                (unsigned)paired_controllers,
+                lastReadAgo);
+    // Split into two diag lines (combined > LINE_BUFFER_SIZE=256).
     // diag-sse: SSE pipeline + log-mutex pressure indicators.
     // diag-hk:  watchdog state + stack HWMs + tick cadence drift.
-    ESP_LOGI(TAG, "HomeKit diag-sse: logMtxMaxWait=%ums sseSlowWrites=%u sseBufferFullSkips=%u sseSlotsAlloc=%u sseOrphansReaped=%u jsonPeak=%uB",
-             (unsigned)mtxWait,
-             (unsigned)sseSlowWrites,
-             (unsigned)sseBufferFullSkips,
-             (unsigned)sseAlloc,
-             (unsigned)sseReaped,
-             (unsigned)jsonPeak);
-    ESP_LOGI(TAG, "HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms",
-             (unsigned)hkRecoverAttempts,
-             (unsigned)hkLastHintLevel,
-             (unsigned)hkConsecutiveHealthyTicks,
-             (unsigned)loopHWM,
-             (unsigned)tmrSvcHWM,
-             (unsigned)apHWM,
-             (int)tickDriftMs);
+    HK_DIAG_LOG("HomeKit diag-sse: logMtxMaxWait=%ums sseSlowWrites=%u sseBufferFullSkips=%u sseSlotsAlloc=%u sseOrphansReaped=%u jsonPeak=%uB",
+                (unsigned)mtxWait,
+                (unsigned)sseSlowWrites,
+                (unsigned)sseBufferFullSkips,
+                (unsigned)sseAlloc,
+                (unsigned)sseReaped,
+                (unsigned)jsonPeak);
+    HK_DIAG_LOG("HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms",
+                (unsigned)hkRecoverAttempts,
+                (unsigned)hkLastHintLevel,
+                (unsigned)hkConsecutiveHealthyTicks,
+                (unsigned)loopHWM,
+                (unsigned)tmrSvcHWM,
+                (unsigned)apHWM,
+                (int)tickDriftMs);
 
     // Self-healing watchdog. Trigger only when:
     //   * we've seen a HAP read at least once (lastReadAgo > 0) — so
@@ -811,7 +825,7 @@ void homekit_refresh_mdns(const char *reason)
     // changed in the accessory tree — controllers will see the same
     // config number on a no-op and ignore the re-fetch.
     homeSpan.updateDatabase(true);
-    ESP_LOGD(TAG, "HomeKit mDNS refresh complete");
+    HK_DIAG_LOG("HomeKit mDNS refresh complete");
 }
 
 // Programmatic invocation of HomeSpan's diagnostic CLI commands. Lets us
@@ -828,7 +842,7 @@ void homekit_dump_state(const char *reason)
     homeSpan.processSerialCommand("i");
     // 'd' — operational state diagnostics
     homeSpan.processSerialCommand("d");
-    ESP_LOGD(TAG, "HomeSpan state dump complete");
+    HK_DIAG_LOG("HomeSpan state dump complete");
 }
 
 // Deferred HomeSpan-API request flags. Web handlers and the watchdog
@@ -909,20 +923,39 @@ void homekit_drain_pending_state_dump()
 // healthy but the HomeKit hub thinks it's unresponsive (stale HAP TCP,
 // mDNS gone stale, controller cache).
 //
-// MUST run from main-loop context (the disconnect+delay+reconnect
-// blocks for ~750ms). Web request handler used a deferred Ticker in
-// v23; v24 routes via the homekit_request_reconnect flag drained by
-// main loop instead.
+// v34 (F7): split-stage. Pre-v34 this called WiFi.disconnect() then
+// delay(250) then WiFi.reconnect() — blocking loopTask for the full
+// 250 ms window. Concurrent HTTP requests, comms_loop, SSE broadcasts
+// all stalled. v34 issues the disconnect, records a timestamp, and
+// returns. homekit_drain_pending_reconnect_stage2() (called every
+// service_timer_loop tick on loopTask) checks elapsed time and fires
+// WiFi.reconnect() when ≥250ms have passed. Net loopTask block time:
+// ~0ms (just the disconnect call itself).
+static volatile uint8_t  reconnectStage        = 0;  // 0=idle, 1=disconnect-issued
+static volatile uint32_t reconnectStageStartMs = 0;
+
 void homekit_force_reconnect(const char *reason)
 {
     ESP_LOGW(TAG, "HomeKit reconnect requested (%s) — cycling WiFi", reason ? reason : "unspecified");
     // Don't erase WiFi credentials — pass false. The reconnect call will
     // re-associate using the same SSID/password from NVRAM.
     WiFi.disconnect(false);
-    // Small gap so the AP sees the disassociate before we re-associate.
-    delay(250);
+    reconnectStageStartMs = (uint32_t)_millis();
+    __atomic_store_n(&reconnectStage, (uint8_t)1, __ATOMIC_RELEASE);
+    HK_DIAG_LOG("HomeKit reconnect: disconnect issued, re-associate in ~250ms");
+}
+
+// v34 (F7): stage-2 driver. Called every service_timer_loop tick on
+// loopTask. No-op until stage 1 was set + 250ms elapsed; then issues
+// WiFi.reconnect() and returns to idle. Eliminates the 250ms loopTask
+// stall that v24's deferral inherited from the pre-v24 implementation.
+void homekit_drain_pending_reconnect_stage2()
+{
+    if (__atomic_load_n(&reconnectStage, __ATOMIC_ACQUIRE) != 1) return;
+    if ((uint32_t)_millis() - reconnectStageStartMs < 250) return;
     WiFi.reconnect();
-    ESP_LOGD(TAG, "HomeKit reconnect: WiFi cycling");
+    __atomic_store_n(&reconnectStage, (uint8_t)0, __ATOMIC_RELEASE);
+    HK_DIAG_LOG("HomeKit reconnect: re-associate issued");
 }
 
 void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
