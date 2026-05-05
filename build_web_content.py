@@ -72,6 +72,42 @@ for file in filenames:
         file_crc[file] = crc32
         print("CRC: " + crc32 + " (" + file + ")")
 
+# An HTML/JS file's URL hash (`?v=<crc>`) is the browser's cache key.
+# Below we substitute every `<file>?v=CRC-32` placeholder with the real
+# per-file CRC; that means the *served* body of an HTML file changes
+# whenever any file it references changes — but its OWN crc, computed
+# above from the unsubstituted source, doesn't. Browsers (with web.cpp
+# CACHE_CONTROL = 30 days) hold onto the stale HTML and never re-fetch
+# the new JS, so a JS-only fix appears unshipped. Recompute HTML/JS
+# CRCs from their post-substitution bytes; iterate to a fixed point so
+# index.html → logs.html → asset chains converge.
+for _pass in range(8):
+    changed = False
+    for file in filenames:
+        if file[0] == "." or file == "status.json" or file.endswith(".js.map"):
+            continue
+        t = file.rpartition(".")[-1]
+        if t not in ("html", "htm", "js"):
+            continue
+        with open(sourcepath + "/" + file, "rb") as f:
+            data = f.read()
+        for f_name, c in file_crc.items():
+            data = data.replace(
+                bytes(f_name + "?v=CRC-32", "utf-8"),
+                bytes(f_name + "?v=" + c, "utf-8"),
+            )
+        new_crc = (
+            base64.urlsafe_b64encode(zlib.crc32(data).to_bytes(4, byteorder="big"))
+            .decode()
+            .replace("=", "")
+        )
+        if file_crc[file] != new_crc:
+            print("CRC update: " + file_crc[file] + " -> " + new_crc + " (" + file + ")")
+            file_crc[file] = new_crc
+            changed = True
+    if not changed:
+        break
+
 # Open webcontent file and write warning header...
 wf = open(includepath  + "/webcontent.h", "w")
 wf.write("/**************************************\n")
