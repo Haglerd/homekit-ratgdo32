@@ -165,11 +165,17 @@ static Ticker forceCloseGapTimer = Ticker();
 
 // Auto-close (fork addition) — fires force-close when door has been Open
 // longer than autoCloseMinutes AND current local hour is in the user's
-// auto-close window. Recorded in wallclock seconds (time(NULL)) so it
-// survives the ~50-day rollover that affects _millis().
-// volatile: written from door state-change callback, read from auto-close
-// ticker (different FreeRTOS tasks). 32-bit reads/writes are atomic on
-// ESP32 so no mutex needed, but the compiler must not cache.
+// auto-close window. v38 (audit W6): comment corrected. The variable
+// holds a snapshot of millis() at the door's CURR_OPEN transition (NOT
+// time(NULL) wallclock seconds despite an earlier comment claim). uint32_t
+// holds 49.7 days of millis(); the elapsed-time check at checkAutoClose
+// (`nowMillis - doorOpenedAtMillis`) uses unsigned subtraction which is
+// wrap-safe modulo 2^32 — so the *behavior* survives the ~50-day rollover
+// even though the *implementation* isn't wallclock-based as the prior
+// comment implied. volatile: written in update_door_state (loopTask via
+// the door state-change callback), read from checkAutoClose (esp_timer
+// Ticker). 32-bit reads/writes are atomic on Xtensa so no mutex needed,
+// but the compiler must not cache.
 static volatile uint32_t doorOpenedAtMillis = 0;
 static volatile bool autoCloseFiredThisCycle = false;
 static Ticker autoCloseTicker = Ticker();
@@ -194,17 +200,27 @@ static volatile bool     cachedAutoCloseEnabled      = false;
 
 void comms_refresh_auto_close_config()
 {
-    cachedAutoCloseMinutes      = userConfig->getAutoCloseMinutes();
-    cachedAutoCloseIgnoreWindow = userConfig->getAutoCloseIgnoreWindow();
-    cachedAutoCloseStartMinutes = userConfig->getAutoCloseStartMinutes();
-    cachedAutoCloseEndMinutes   = userConfig->getAutoCloseEndMinutes();
-    cachedAutoCloseEnabled      = userConfig->getAutoClose();
+    // v38 (audit W3): release/acquire ordering pair. Writers run on
+    // loopTask (settings-save / boot bootstrap); readers run on
+    // esp_timer task (autoCloseTicker → checkAutoClose / autoCloseInWindow).
+    // Pre-v38 plain volatile stores left a window where a Ticker tick
+    // could observe `cachedAutoCloseEnabled=true` (new value visible)
+    // but `cachedAutoCloseMinutes=0` (old value still cached) — one
+    // tick wide, self-correcting on the next tick, but discipline gap.
+    // RELAXED on the first four because the RELEASE on the LAST store
+    // (cachedAutoCloseEnabled) orders all earlier writes; readers do
+    // the matching ACQUIRE on cachedAutoCloseEnabled first.
+    __atomic_store_n(&cachedAutoCloseMinutes,      userConfig->getAutoCloseMinutes(),      __ATOMIC_RELAXED);
+    __atomic_store_n(&cachedAutoCloseIgnoreWindow, userConfig->getAutoCloseIgnoreWindow(), __ATOMIC_RELAXED);
+    __atomic_store_n(&cachedAutoCloseStartMinutes, userConfig->getAutoCloseStartMinutes(), __ATOMIC_RELAXED);
+    __atomic_store_n(&cachedAutoCloseEndMinutes,   userConfig->getAutoCloseEndMinutes(),   __ATOMIC_RELAXED);
+    __atomic_store_n(&cachedAutoCloseEnabled,      userConfig->getAutoClose(),             __ATOMIC_RELEASE);
     ESP_LOGD(TAG, "AUTO-CLOSE config refreshed: enabled=%d minutes=%u start=%u end=%u ignoreWindow=%d",
-             (int)cachedAutoCloseEnabled,
-             (unsigned)cachedAutoCloseMinutes,
-             (unsigned)cachedAutoCloseStartMinutes,
-             (unsigned)cachedAutoCloseEndMinutes,
-             (int)cachedAutoCloseIgnoreWindow);
+             (int)__atomic_load_n(&cachedAutoCloseEnabled,      __ATOMIC_RELAXED),
+             (unsigned)__atomic_load_n(&cachedAutoCloseMinutes, __ATOMIC_RELAXED),
+             (unsigned)__atomic_load_n(&cachedAutoCloseStartMinutes, __ATOMIC_RELAXED),
+             (unsigned)__atomic_load_n(&cachedAutoCloseEndMinutes,   __ATOMIC_RELAXED),
+             (int)__atomic_load_n(&cachedAutoCloseIgnoreWindow, __ATOMIC_RELAXED));
 }
 
 void cancel_builtin_TTC_countdown()
@@ -2639,7 +2655,10 @@ static void clear_force_close_state(const char *reason)
     ESP_LOGD(TAG, "FORCE CLOSE: clearing in-progress flag (%s)", reason);
     forceCloseAttempt = 0;
     forceCloseGapTimer.detach();
-    forceCloseGapPendingArmMs = 0;
+    // v38 (audit W2): release-store. Pairs with the acquire-load in
+    // force_close_drain_pending_arm. Fourth flag from the V3-pattern
+    // family that was missed in the v32/v36 atomic discipline pass.
+    __atomic_store_n(&forceCloseGapPendingArmMs, (uint32_t)0, __ATOMIC_RELEASE);
     __atomic_clear(&forceCloseInProgress, __ATOMIC_RELEASE);
 }
 
@@ -2662,8 +2681,14 @@ static void request_force_close_clear(const char *reason)
 void force_close_drain_pending_arm()
 {
     if (__atomic_load_n(&forceCloseGapPendingArmMs, __ATOMIC_ACQUIRE) == 0) return;
-    uint32_t armMs = forceCloseGapPendingArmMs;
-    forceCloseGapPendingArmMs = 0;
+    // v38 (audit W2): drain consume side. The acquire-load above already
+    // ordered all earlier writes by the producer; the relaxed read of
+    // armMs here is fine because the same task does both. The relaxed
+    // store-back-to-zero races nothing — only the producer (esp_timer)
+    // and this drain (loopTask) touch the flag, and the producer always
+    // writes a non-zero value.
+    uint32_t armMs = __atomic_load_n(&forceCloseGapPendingArmMs, __ATOMIC_RELAXED);
+    __atomic_store_n(&forceCloseGapPendingArmMs, (uint32_t)0, __ATOMIC_RELAXED);
     if (!__atomic_load_n(&forceCloseInProgress, __ATOMIC_ACQUIRE))
     {
         ESP_LOGD(TAG, "FORCE CLOSE: gap-arm request dropped (sequence already cleared)");
@@ -2724,7 +2749,10 @@ static void send_force_close_release_then_maybe_retry()
     if (forceCloseAttempt < 2)
     {
         ESP_LOGD(TAG, "FORCE CLOSE: scheduling attempt %d after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
-        forceCloseGapPendingArmMs = FORCE_CLOSE_GAP_MS;
+        // v38 (audit W2): release-store from esp_timer-task producer
+        // (this function runs via TTCtimer/delayFnCall). Pairs with
+        // acquire-load in force_close_drain_pending_arm on loopTask.
+        __atomic_store_n(&forceCloseGapPendingArmMs, (uint32_t)FORCE_CLOSE_GAP_MS, __ATOMIC_RELEASE);
     }
     else
     {
@@ -2819,8 +2847,13 @@ static bool autoCloseInWindow(uint32_t *outNowMOD)
     // update_auto_close_schedule (loopTask). The cache is refreshed
     // synchronously on loopTask, so loopTask callers see fresh
     // values either way; Ticker callers no longer race on userConfig.
-    uint32_t startMOD = cachedAutoCloseStartMinutes;
-    uint32_t endMOD   = cachedAutoCloseEndMinutes;
+    // v38 (audit W3): RELAXED — caller has already done ACQUIRE on
+    // cachedAutoCloseEnabled (update_auto_close_schedule) or
+    // cachedAutoCloseIgnoreWindow (checkAutoClose), so all the
+    // RELAXED-stored values from comms_refresh_auto_close_config are
+    // already visible to this thread.
+    uint32_t startMOD = __atomic_load_n(&cachedAutoCloseStartMinutes, __ATOMIC_RELAXED);
+    uint32_t endMOD   = __atomic_load_n(&cachedAutoCloseEndMinutes,   __ATOMIC_RELAXED);
     if (outNowMOD) *outNowMOD = nowMOD;
     // v23: treat start == end as "always in window" — matches user
     // intent for "00:00 to 00:00 means all day," and avoids the silent
@@ -2853,7 +2886,8 @@ static uint32_t autoCloseSecsUntilNextStart()
     // the cache vs userConfig distinction doesn't matter here for
     // race-safety — using the cache keeps all auto-close key reads
     // unified.
-    uint32_t startMOD = cachedAutoCloseStartMinutes;
+    // v38 (audit W3): RELAXED — caller has already done ACQUIRE.
+    uint32_t startMOD = __atomic_load_n(&cachedAutoCloseStartMinutes, __ATOMIC_RELAXED);
     uint32_t startSecOfDay = startMOD * 60;
     uint32_t delta;
     if (startSecOfDay > nowSecOfDay) {
@@ -2880,11 +2914,14 @@ void update_auto_close_schedule()
     autoCloseTicker.detach();
     // v31 final: read from cache for full consistency. All five
     // auto-close config reads in comms.cpp now go through the cache.
-    if (!cachedAutoCloseEnabled) {
+    // v38 (audit W3): ACQUIRE on the first read (Enabled) pairs with
+    // the RELEASE store in comms_refresh_auto_close_config. Subsequent
+    // reads of the cache family in this function are RELAXED.
+    if (!__atomic_load_n(&cachedAutoCloseEnabled, __ATOMIC_ACQUIRE)) {
         ESP_LOGD(TAG, "AUTO-CLOSE: disabled, no schedule");
         return;
     }
-    if (cachedAutoCloseIgnoreWindow) {
+    if (__atomic_load_n(&cachedAutoCloseIgnoreWindow, __ATOMIC_RELAXED)) {
         autoCloseTicker.attach_ms(60U * 1000U, checkAutoClose);
         ESP_LOGD(TAG, "AUTO-CLOSE: ignoreWindow=on — 60s recurring tick scheduled");
         return;
@@ -2972,7 +3009,20 @@ static void checkAutoClose()
     // v31: read from the Ticker-safe cache (refreshed at boot + on
     // settings save via comms_refresh_auto_close_config) instead of
     // hitting userConfig from this Ticker context — see audit #8.
-    bool ignoreWindow = cachedAutoCloseIgnoreWindow;
+    //
+    // v38 (audit W3 + post-review fixup): the C++ memory model requires
+    // acquire/release pairing on the SAME atomic object. The writer
+    // (comms_refresh_auto_close_config) RELEASE-stores cachedAutoCloseEnabled
+    // last; that store is what publishes the four RELAXED-stored sibling
+    // values. checkAutoClose doesn't otherwise need to read Enabled (the
+    // Ticker is detached before disable settles), but to make the
+    // synchronization explicit AND match the writer's anchor object,
+    // do a void ACQUIRE-load on cachedAutoCloseEnabled before the
+    // RELAXED reads of the cache family. That ACQUIRE pairs with the
+    // writer's RELEASE on the same object, so all four sibling values'
+    // RELAXED stores happen-before the RELAXED loads below.
+    (void)__atomic_load_n(&cachedAutoCloseEnabled, __ATOMIC_ACQUIRE);
+    bool ignoreWindow = __atomic_load_n(&cachedAutoCloseIgnoreWindow, __ATOMIC_RELAXED);
     if (!ignoreWindow && !autoCloseInWindow(NULL)) {
         // v23: only re-schedule if NTP is actually synced. Without a
         // real wallclock the scheduler falls back to a 60s tick anyway,
@@ -2990,7 +3040,8 @@ static void checkAutoClose()
     }
 
     uint32_t openMinutes = (nowMillis - doorOpenedAtMillis) / 60000U;
-    uint32_t minMinutes = cachedAutoCloseMinutes; // v31: Ticker-safe cache
+    // v38 (audit W3): RELAXED — ACQUIRE was done on cachedAutoCloseIgnoreWindow above.
+    uint32_t minMinutes = __atomic_load_n(&cachedAutoCloseMinutes, __ATOMIC_RELAXED);
     if (openMinutes < minMinutes) return; // not yet — silent
 
     ESP_LOGW(TAG, "AUTO-CLOSE: door open %u min (>= %u) %s — firing force-close",

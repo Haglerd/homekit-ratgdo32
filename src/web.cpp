@@ -241,8 +241,17 @@ struct SSESubscription
     volatile uint32_t lastActivity;
 };
 SSESubscription subscription[SSE_MAX_CHANNELS];
-// During firmware update note which subscribed client is updating
-SSESubscription *firmwareUpdateSub = NULL;
+// During firmware update note which subscribed client is updating.
+// v38 (audit W5): `volatile` qualifier added. Pointer is written by
+// handle_firmware_upload (loopTask) and read by the HK watchdog Ticker
+// callback (esp_timer task) via firmware_update_in_progress(). Without
+// `volatile` an aggressive optimizer / future re-enabled LTO could
+// hoist the load out of the function and miss the toggle. The pointer
+// itself is word-aligned-atomic on Xtensa so a stale-load is the only
+// real concern, and the watchdog re-enters every 180s so a missed tick
+// is self-correcting — but the discipline cost of `volatile` is one
+// keyword.
+SSESubscription * volatile firmwareUpdateSub = NULL;
 uint32_t subscriptionCount = 0;
 
 // Public OTA-in-progress check used by the HK watchdog to inhibit
@@ -692,8 +701,12 @@ void setup_web()
     server.on("/update", HTTP_POST, handle_update, handle_firmware_upload);
     server.onNotFound(handle_everything);
     // here the list of headers to be recorded
-    // Origin/Referer/Host are needed for CSRF guard on /setgdo
-    const char *headerkeys[] = {"If-None-Match", "Origin", "Referer", "Host"};
+    // Origin/Referer/Host are needed for CSRF guard on /setgdo.
+    // v38 (audit W4): X-Forwarded-Host is honored by enforce_same_origin
+    // when Host doesn't match — necessary for users behind nginx/Caddy/
+    // Tailscale Funnel deployments where the proxy presents the public
+    // hostname to the browser but forwards Host as the upstream IP.
+    const char *headerkeys[] = {"If-None-Match", "Origin", "Referer", "Host", "X-Forwarded-Host"};
     size_t headerkeyssize = sizeof(headerkeys) / sizeof(char *);
     // ask server to track these headers
     server.collectHeaders(headerkeys, headerkeyssize);
@@ -939,9 +952,77 @@ static bool enforce_same_origin(const char *uriForLog)
         sameOrigin = true;
     }
 
+    // v38 (audit W4): reverse-proxy fallback. When the device sits behind
+    // nginx / Caddy / Traefik / Tailscale Funnel, the browser sees one
+    // hostname (the public FQDN) and sends `Origin: https://gdo.example.com`,
+    // but the proxy may forward `Host:` as the upstream IP (`192.168.1.10`)
+    // depending on its `proxy_set_header` config. Result pre-v38: 403 on
+    // every state-changing POST with no diagnostic except the syslog line.
+    // Modern proxies set X-Forwarded-Host with the original host the
+    // browser requested. If Origin/Referer match THAT, treat it as
+    // same-origin. The same-LAN attacker model isn't strengthened —
+    // an attacker on the LAN can hit the device directly via Host=device-ip
+    // and bypass the proxy entirely; honoring X-Forwarded-Host doesn't
+    // change that. Only the first comma-separated value is used (RFC 7239
+    // / nginx convention for proxy chains); same lowercase + port-strip
+    // pipeline as Host. Diagnostic: the rejection log includes the
+    // X-Forwarded-Host value when present, so post-deploy issues are
+    // diagnosable.
+    char xFwdHost[128] = {0};
+    if (!sameOrigin && server.hasHeader("X-Forwarded-Host"))
+    {
+        strncpy(xFwdHost, server.header("X-Forwarded-Host").c_str(), sizeof(xFwdHost) - 1);
+        // Trim to first comma (proxy chains: "first,second,third"
+        // — first is the original host the browser used).
+        char *comma = strchr(xFwdHost, ',');
+        if (comma) *comma = '\0';
+        // Lowercase + bracket-aware port-strip, mirroring the Host pipeline above.
+        char xfwdOnly[64] = {0};
+        for (size_t i = 0; xFwdHost[i] != '\0' && i < sizeof(xfwdOnly) - 1; i++)
+        {
+            char c = xFwdHost[i];
+            xfwdOnly[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+        if (xfwdOnly[0] == '[')
+        {
+            char *closeBracket = strchr(xfwdOnly, ']');
+            if (closeBracket) *(closeBracket + 1) = '\0';
+            char *zone = strchr(xfwdOnly, '%');
+            if (zone && closeBracket && zone < closeBracket)
+            {
+                *zone = ']';
+                *(zone + 1) = '\0';
+            }
+        }
+        else
+        {
+            char *colon = strchr(xfwdOnly, ':');
+            if (colon) *colon = '\0';
+        }
+        // Now check Origin/Referer against the proxy-asserted host.
+        if (xfwdOnly[0] != '\0')
+        {
+            if (origin[0] != '\0' &&
+                extractHostFromUrl(origin, extractedHost, sizeof(extractedHost)) &&
+                strcmp(extractedHost, xfwdOnly) == 0) {
+                sameOrigin = true;
+            }
+            if (!sameOrigin && referer[0] != '\0' &&
+                extractHostFromUrl(referer, extractedHost, sizeof(extractedHost)) &&
+                strcmp(extractedHost, xfwdOnly) == 0) {
+                sameOrigin = true;
+            }
+            if (sameOrigin) {
+                ESP_LOGD(TAG, "CSRF: %s passed via X-Forwarded-Host=%s (Host=%s differed)",
+                         uriForLog, xfwdOnly, hostOnly);
+            }
+        }
+    }
+
     if (!sameOrigin) {
-        ESP_LOGW(TAG, "CSRF: rejecting %s — Origin=%s Referer=%s Host=%s",
-                 uriForLog, origin, referer, myHost);
+        ESP_LOGW(TAG, "CSRF: rejecting %s — Origin=%s Referer=%s Host=%s X-Forwarded-Host=%s",
+                 uriForLog, origin, referer, myHost,
+                 xFwdHost[0] ? xFwdHost : "(absent)");
         server.send_P(403, type_txt, PSTR("Forbidden: cross-origin"));
         return false;
     }
@@ -2458,6 +2539,33 @@ void SSEBroadcastState(const char *data, BroadcastType type)
     if (subscriptionCount == 0)
         return;
 
+    // v38 (audit W7): use a stack-local write buffer instead of the
+    // file-scope `writeBuffer` global. Pre-v38 SSEBroadcastState filled
+    // `writeBuffer` then called clientWriteEx, while
+    // simultaneously web_loop's RATGDO_STATUS path AND any
+    // ESP_LOGx-triggered LOG_MESSAGE path could be calling here
+    // concurrently from different tasks (loopTask, esp_timer, WiFi
+    // event task, comms callbacks). Two concurrent broadcasts
+    // overwrote each other's payload mid-write — subscribers saw
+    // truncated/garbled SSE events as occasional weird log lines.
+    // Stack-local fixes the race at the source.
+    //
+    // Stack delta on ESP32: +512 B per SSEBroadcastState invocation.
+    // loopTask (8 KB) and esp_timer task (4 KB) both have ample
+    // headroom; the existing tmrSvcHWM reported in the periodic HK
+    // diag log will surface any regression.
+    //
+    // ESP8266 keeps the static buffer — single-task cooperative
+    // scheduling means the race doesn't exist there, AND ESP8266's
+    // 4 KB main stack is too tight to absorb +512 B.
+#ifdef ESP8266
+    char *wb = writeBuffer;
+    const size_t wbSize = sizeof(writeBuffer);
+#else
+    char wb[512];
+    const size_t wbSize = sizeof(wb);
+#endif
+
     for (uint32_t i = 0; i < SSE_MAX_CHANNELS; i++)
     {
         YIELD(); // yield between each SSE client
@@ -2469,7 +2577,7 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                 {
                     if (subscription[i].logViewer)
                     {
-                        if (snprintf_P(writeBuffer, sizeof(writeBuffer), PSTR("event: logger\ndata: %s\n\n"), data) >= (int)sizeof(writeBuffer))
+                        if (snprintf_P(wb, wbSize, PSTR("event: logger\ndata: %s\n\n"), data) >= (int)wbSize)
                         {
                             // Will not fit in our write buffer, let system printf handle
 #ifdef ESP8266
@@ -2491,7 +2599,7 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                             // v29: tri-state — stamp on OK or BUFFER_FULL, only skip
                             // on FAILED (real wedge). Tailscale / congested-link
                             // subscribers no longer get reaped every 120s.
-                            SseWriteResult r = clientWriteEx(subscription[i].client, writeBuffer);
+                            SseWriteResult r = clientWriteEx(subscription[i].client, wb);
                             if (r != SseWriteResult::FAILED)
                             {
                                 subscription[i].lastActivity = (uint32_t)_millis();
@@ -2504,7 +2612,7 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                     ESP_LOGV(TAG, "Client %s (%s) send status SSE on channel %d, data: %s",
                              IPAddress(subscription[i].clientIP).toString().c_str(),
                              subscription[i].clientUUID.c_str(), i, data);
-                    if (snprintf_P(writeBuffer, sizeof(writeBuffer), PSTR("event: message\ndata: %s\n\n"), data) >= (int)sizeof(writeBuffer))
+                    if (snprintf_P(wb, wbSize, PSTR("event: message\ndata: %s\n\n"), data) >= (int)wbSize)
                     {
                         // Will not fit in our write buffer, let system printf handle
 #ifdef ESP8266
@@ -2519,7 +2627,7 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                     {
                         // v29: tri-state — stamp on OK or BUFFER_FULL, only skip
                         // on FAILED (real wedge). Same rationale as LOG_MESSAGE.
-                        SseWriteResult r = clientWriteEx(subscription[i].client, writeBuffer);
+                        SseWriteResult r = clientWriteEx(subscription[i].client, wb);
                         if (r != SseWriteResult::FAILED)
                         {
                             subscription[i].lastActivity = (uint32_t)_millis(); // v27
@@ -2529,9 +2637,21 @@ void SSEBroadcastState(const char *data, BroadcastType type)
             }
             else
             {
-                // Client connection has gone.  Remove from our subscribed client list
-                ESP_LOGD(TAG, "Client %s (%s) not listening (broadcast), remove SSE subscription", subscription[i].clientIP.toString().c_str(), subscription[i].clientUUID.c_str());
-                removeSSEsubscription(&subscription[i]);
+                // Client connection has gone.  Remove from our subscribed client list.
+                // v38 (audit W1): defer the actual removal — SSEBroadcastState
+                // can be invoked from non-loopTask contexts (any ESP_LOGx
+                // caller via LOG::logToBuffer's LOG_MESSAGE fanout: Ticker
+                // callbacks, WiFi event task, comms-callback paths). The v22
+                // SSEheartbeat fix established the discipline that all SSE
+                // slot teardown must happen on loopTask, because
+                // removeSSEsubscription descends into client.stop() →
+                // lwIP socket close. Calling that from a non-loopTask
+                // context risked the race that motivated the v22 deferred
+                // sweep, just relocated to this site. pendingRemove is
+                // reaped by the next service tick via process_sse_pending_removes.
+                ESP_LOGD(TAG, "Client %s (%s) not listening (broadcast), marking for deferred remove",
+                         subscription[i].clientIP.toString().c_str(), subscription[i].clientUUID.c_str());
+                subscription[i].pendingRemove = true;
             }
         }
     }
