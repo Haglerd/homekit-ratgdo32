@@ -12,17 +12,42 @@
 >   - `POST /refreshHomeKitMDNS` — re-broadcast mDNS without dropping WiFi
 >   - `POST /dumpHomeKitState` — dump HomeSpan CLI status / accessory DB / diag to the log
 >
-> **4. HomeKit watchdog** *(forceclose.18+, configurable in UI from forceclose.21)* — periodic health snapshot tracking `last_hap_read_ago`. Tiered diagnostic hints log when iOS goes silent past 5 / 15 / 30 minutes. Optional auto-recovery (mDNS refresh → WiFi cycle, max 2 attempts) is **off by default** because real-world iOS read cadence is highly variable. Toggle and thresholds live under Settings → HomeKit Watchdog.
+> **4. HomeKit watchdog** *(forceclose.18+)* — periodic 180s health snapshot tracking `last_hap_read_ago` (the seconds since iOS last read any characteristic). Settings live under **Settings → HomeKit Watchdog** with these knobs (configurable from `forceclose.21`):
+>   - **Auto-recover** *(off by default)* — when iOS has been silent past `Trigger After` (default 30 min) AND WiFi is connected AND a controller is paired, the firmware escalates: first `homeSpan.updateDatabase(true)` (mDNS re-advertise, ~1s, no outage), then a WiFi disconnect/reconnect cycle (~3-5s outage). Stops after `HK_AUTO_RECOVER_MAX = 2` attempts and waits for a HAP read to clear the counter. **Never auto-reboots** — that's too disruptive for a daemon to do unattended.
+>   - **`Verbose Logs` toggle** *(off by default — added in `forceclose.34`)* — gates the periodic 180s `HomeKit health` / `diag-sse` / `diag-hk` lines + post-action narration (mDNS refresh complete, state-dump complete, reconnect WiFi cycling) behind this setting. **Event-occurred lines (auto-recover firing, hint-level transitions, pair-state changes, WiFi disconnects, *-requested intent logs) are always logged regardless.** Default OFF keeps the syslog feed cleaner and preserves more pre-crash context in the 16 KB log ring (which wraps every ~80 min of normal verbose operation). With the toggle off, the diagnostic lines emit at DEBUG level instead — developers can still see them by setting global log level to DEBUG without flipping the user toggle.
+>   - **Hint thresholds** *(default 5 / 15 / 30 min)* — three tiers of diagnostic hints (`iOS extended idle` → `iOS gone quiet` → `iOS silent`) emit at WARN level when iOS read cadence crosses each tier. Always logged. Helps you observe real-world iOS behavior and pick an informed `Trigger After` value before enabling auto-recover.
+>   - **Trigger After** *(default 30 min)* — when auto-recover is on, the seconds-without-HAP-read threshold that fires the first recovery attempt.
+>   - The recovery counter requires **3 consecutive healthy ticks** (≥9 min sustained iOS reads at the 180s tick cadence) before clearing — a single sporadic read no longer re-arms the watchdog (`forceclose.31` audit fix). This is what stops a flapping iOS hub from triggering repeated WiFi cycles all night.
 >
 > **5. Filtered HomeKit log tab** *(forceclose.16+)* — `logs.html` gains a HomeKit tab that shows only HomeKit / WiFi / HomeSpan events, separate from the System Log. As of `forceclose.22`, HomeKit lines are *exclusive* to this tab.
 >
-> **6. Security hardening** *(forceclose.14+)* — server-side input validation on auto-close keys, same-origin check on `/setgdo`, busy-flag guard against re-entrant force-close calls.
+> **6. Security hardening** *(forceclose.14+, rewritten `forceclose.31`)* — server-side input validation on auto-close keys, busy-flag guard against re-entrant force-close calls, and a **rewritten same-origin / CSRF guard** (`enforce_same_origin`) on every state-changing endpoint (`/setgdo`, `/reset`, `/reboot`, `/reconnectHomeKit`, `/refreshHomeKitMDNS`, `/dumpHomeKitState`, `/rest/events/unsubscribe`). Pre-`forceclose.31` had two real bypasses: substring matching on the host header (an attacker page at `http://evil.example/?ratgdo` cleared the check when `Host: ratgdo`) and missing-headers passthrough (a `<form>` POST with `Referrer-Policy: no-referrer` carried no Origin and no Referer → guard returned true → drive-by from any same-LAN page landed). v31 parses Origin/Referer URLs with a real host extractor (bracket-aware IPv6, RFC 6874 zone-ID strip, degenerate `[]` reject), exact-host comparison, and treats absence of BOTH Origin AND Referer as a hard fail. Stack-local char buffers — no Arduino String allocations on the CSRF path.
+>
+> **7. Production hardening (`forceclose.31`–`forceclose.34`)** — concurrency / memory / observability cleanup driven by an external audit. Highlights:
+>   - SSE orphan-sweep skew-detection (closes a TOCTOU race where a writer's stamp newer than the sweep's `now` snapshot caused spurious `idle=4294967294ms` reaps of healthy slots — `forceclose.31`)
+>   - Force-close gap-timer + busy-flag fully serialized to loopTask (closes a door-reversal race where the second press could fire on a closing door — `forceclose.31` / `forceclose.32`)
+>   - HomeSpan API calls (`updateDatabase`, `processSerialCommand`) deferred from web/Ticker contexts to loopTask, matching HomeSpan's documented autoPoll-task ownership (`forceclose.31`)
+>   - 8-slot per-task log recursion guard replaces v24's single-slot pattern (closes a stack-recursion vector under SSE broadcast load — `forceclose.31`)
+>   - Atomic operations on diagnostic counters (`logMtxMaxWaitMs`, `sseOrphansReaped`) and HomeKit deferred-flag setters (`forceclose.32`)
+>   - Per-task stack high-water-mark observability (`loopHWM` / `tmrHWM` / `apHWM` in the periodic health log)
+>   - Watchdog inhibited during OTA upload (`forceclose.32` — F5)
+>   - NTP/DST sync re-arms the auto-close window-start Ticker (`forceclose.33` — F6)
+>   - Lazy `WiFiUDP syslog` allocation; freed when toggled off (`forceclose.32`/`.33` — MH3)
+>   - Build-time `-flto` + size optimizations (`forceclose.34` — MH5)
+>   - Split-stage WiFi reconnect — eliminates the 250ms `delay()` block on loopTask during HomeKit auto-recover (`forceclose.34` — F7)
+>
+>   Detailed per-version notes in [CHANGELOG.md](CHANGELOG.md).
 >
 > ### Companion homebridge plugin
 > [`homebridge-ratgdo-forceclose`](https://www.npmjs.com/package/homebridge-ratgdo-forceclose) ([source](https://github.com/Haglerd/homebridge-ratgdo-forceclose)) exposes `forceClose` as a HomeKit GarageDoorOpener tile (or legacy momentary switch). v1.3.0+ also adds a one-tap **Reconnect HomeKit** switch that hits `/reconnectHomeKit` for in-Home-app recovery.
 >
 > ### OTA installation
-> ratgdo dashboard → Settings → set OTA repo to `Haglerd/homekit-ratgdo32` → Update tab. Or from a fresh device, use the [ESP Web Tools flasher](https://haglerd.github.io/homekit-ratgdo32/).
+>
+> **Recommended for upgrading from `forceclose.32` or earlier**: use the **[web installer](https://haglerd.github.io/homekit-ratgdo32/)** in Chrome/Edge with the device on USB. It reads `manifest.json` directly with the correct binary URLs and streams via WebSerial. Works regardless of what version the device is on.
+>
+> **From `forceclose.34` and later**: the device's own dashboard → **Settings → Update** also works. Pre-`forceclose.34` it constructed firmware URLs from a stale Pages-relative pattern that broke after `forceclose.33` moved bins to GitHub Releases attachments (you'd see an MD5 mismatch). `forceclose.34` patches this — once any v34+ build is on the device, future device-side OTA works for all subsequent versions.
+>
+> **Where the binaries live**: as of `forceclose.33` (audit MH7), released bins are attached to the GitHub release at `https://github.com/Haglerd/homekit-ratgdo32/releases/download/<tag>/<filename>` and **no longer committed to `docs/firmware/`**. This bounded the `.git` pack growth (~5 MB/release × ~50 releases/year). Older firmware bins from before `forceclose.33` remain in [`docs/firmware/`](docs/firmware/) for historical record and ELF-based crash decoding.
 >
 > ### Persistent logs (optional)
 > The firmware can forward all logs to a remote `rsyslog` server (Settings → Syslog). Useful for long-term analysis of "No Response" / crash events that happen when nobody's at the device's web UI. The `/crashlog` endpoint also surfaces ESP32 panic dumps — decode them with `addr2line` against the matching `firmware.elf` from [`docs/firmware/`](docs/firmware/).
