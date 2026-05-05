@@ -32,14 +32,18 @@ extern ESP8266WebServer server;
 
 extern void setup_web();
 extern void web_loop();
-// v22: drain SSE subscriptions flagged for deferred remove (set from
+// Drain SSE subscriptions flagged for deferred remove (set from
 // inside Ticker callbacks to avoid the in-callback Ticker.detach() →
 // vTaskDelete → uxListRemove crash). Call from main-loop context.
 extern void process_sse_pending_removes();
-// v27: orphan-slot sweep — see web.cpp. Flags slots that have leaked
-// past the heartbeat-Ticker safety net (heartbeat=0, pre-handshake
-// abandons, idle wedged sockets). Called from service_timer_loop.
+// Orphan-slot sweep. Flags slots leaked past the heartbeat Ticker
+// (heartbeat=0, pre-handshake abandons, idle wedged sockets).
+// Called from service_timer_loop.
 extern void sweep_sse_orphans();
+// True while an OTA upload is streaming SSE progress to a client.
+// Used by the HK watchdog to inhibit auto-recover during an upload —
+// a WiFi cycle mid-upload aborts the transfer and triggers rollback.
+extern bool firmware_update_in_progress();
 
 extern void handle_notfound();
 extern void handle_reboot();
