@@ -418,35 +418,18 @@ void service_timer_loop()
         }
     }
 
-    // v22: drain any SSE subscriptions flagged for deferred remove from
-    // inside a Ticker callback. Cheap when nothing is pending — just an
-    // 8-slot array scan. Fixes the v21-and-earlier crash where SSEheartbeat
-    // would call Ticker.detach() on its own running Ticker → vTaskDelete →
-    // uxListRemove panic.
-    // v27: ALSO sweep orphan slots first — flags slots whose Ticker
-    // can't drive cleanup (subscribed-but-never-connected, heartbeat=0
-    // without the v27 coerce, or idle for >120s with no broadcast traffic).
-    // Sweep runs first so flagged slots are reaped same tick.
+    // SSE: sweep orphan slots first (flags subscribed-but-never-connected
+    // and idle slots), then drain pendingRemove flags set by Ticker
+    // callbacks — never call Ticker.detach() from inside its own callback.
     sweep_sse_orphans();
     process_sse_pending_removes();
-    // v23: drain pending auto-close reschedule requests in single-
-    // threaded context, so concurrent /setgdo handler + Ticker callback
-    // can't both manipulate autoCloseTicker's internal state at once.
+    // Drain deferred requests on loopTask so all Ticker manipulation +
+    // ~750ms WiFi cycle + ~1-2s HomeSpan CLI commands are serialized
+    // off esp_timer / WebServer task contexts.
     auto_close_drain_pending_reschedule();
-    // v24: drain pending HomeKit reconnect requests in main-loop context.
-    // homekit_force_reconnect blocks ~750ms — running it here instead
-    // of the esp_timer Ticker task avoids stalling every other Ticker
-    // callback (SSE heartbeats, health log, auto-close tick).
     homekit_drain_pending_reconnect();
-    // v31: drain pending force-close gap-timer arm in single-threaded
-    // context. Re-checks forceCloseInProgress before arming so a
-    // concurrent clear_force_close_state can drop the request safely
-    // — closes the door-reversal race in audit #3.
     force_close_drain_pending_arm();
-    // v31: drain pending HomeSpan-API requests (mdns refresh + state
-    // dump) in loopTask context, matching the v24 reconnect deferral.
-    // updateDatabase() and processSerialCommand() were called directly
-    // from WebServer/esp_timer tasks pre-v31 — audit #7b widening.
+    force_close_drain_pending_clear();
     homekit_drain_pending_mdns_refresh();
     homekit_drain_pending_state_dump();
 
