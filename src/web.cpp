@@ -605,8 +605,13 @@ void web_loop()
         // broadcast walks every SSE subscriber writing TCP, which can
         // block on a wedged client. The mutex isn't needed for the
         // write itself, only the buffer construction.
+        // v31.2: stack→BSS. 2.5 KB stack alloc on every loop iteration
+        // was 31% of ESP32 loopTask but 50% of ESP8266 cont-task
+        // (~4 KB). web_loop is only called from one task (loopTask),
+        // so a static buffer here is single-writer/single-reader and
+        // safe — no race even though it's now shared across iterations.
         bool doFanout = !firmwareUpdateSub;
-        char localJson[STATUS_JSON_BUFFER_SIZE];
+        static char localJson[STATUS_JSON_BUFFER_SIZE];
         if (doFanout)
         {
             strncpy(localJson, json, sizeof(localJson) - 1);
@@ -774,40 +779,221 @@ String *ratgdoAuthenticate(HTTPAuthMethod mode, String enteredUsernameOrReq, Str
         return server.requestAuthentication(DIGEST_AUTH, www_realm);
 #endif
 
-// v23: same-origin / CSRF guard for state-changing endpoints. If
-// Origin or Referer is present and the host part doesn't match our
-// own Host header, reject with 403. Missing headers are accepted (some
-// legacy tools and direct curl POSTs don't send them, and the user
-// already authenticated through AUTHENTICATE() above) so this doesn't
-// lock anyone out — it only hard-fails the obvious cross-site case.
+// v23: same-origin / CSRF guard for state-changing endpoints.
+// v31 audit-driven rewrite. Two real bypasses in the v23 implementation:
 //
-// Pulled out of handle_setgdo (where it lived inline) so the new
-// /reconnectHomeKit, /refreshHomeKitMDNS, /dumpHomeKitState endpoints
-// can reuse the same logic. Returns true if the request should
-// proceed; returns false (and sends 403) if it should be rejected.
-static bool enforce_same_origin(const char *uriForLog)
+//   (1) substring match — `origin.indexOf(hostOnly) >= 0` passed any URL
+//       whose path/query/fragment merely *contained* the device's host
+//       as a substring. e.g. with Host="ratgdo", an attacker page at
+//       `http://evil.example/?ratgdo` cleared the check.
+//   (2) missing-headers passthrough — when both Origin and Referer were
+//       absent, the guard returned true to avoid breaking "legacy curl."
+//       Default-no-password installs reach state-changing endpoints with
+//       this guard as the only CSRF defense, so a classic <form> POST
+//       with `Referrer-Policy: no-referrer` (or HTTPS→HTTP downgrade
+//       stripping Referer) carried no Origin and no Referer → guard
+//       returned true → drive-by from any same-LAN page landed
+//       (forceClose included).
+//
+// v31 fixes both:
+//   - Parses the host out of Origin/Referer (scheme://HOST[:port][/path…])
+//     and compares it byte-for-byte against the lowercased, port-stripped
+//     Host header. No substrings, no concatenation tricks.
+//   - Treats absence of BOTH Origin AND Referer as a hard fail. Modern
+//     browsers always send Origin on cross-origin state-changing methods
+//     and same-origin POSTs from a page; the device's own web UI is
+//     fine. Legacy curl users who really need to call state-changing
+//     endpoints can opt in by passing `--header "Origin: http://<host>"`.
+//
+// Returns true if the request should proceed; returns false (and sends
+// 403) if it should be rejected.
+//
+// v31.1 follow-up: bracketed IPv6 host tokens go through canonicalization
+// to (1) strip RFC 6874 zone IDs (anything from '%' onward inside the
+// brackets — `[fe80::1%eth0]` → `[fe80::1]` — so `%25eth0`/`%eth0`
+// don't defeat host equality), and (2) reject empty `[]` as malformed.
+//
+// v31.2: zero-heap rewrite. Pre-v31.2 each call allocated 6 Arduino
+// String objects (origin, referer, myHost, hostOnly, originHost,
+// refererHost) — invisible on ESP32 with ~140 KB free heap, but real
+// fragmentation pressure on ESP8266 with ~30-40 KB and known
+// allocator sensitivity. Behavior identical to v31.1; only the
+// implementation differs (stack-local char[] buffers throughout).
+
+// v31.2: zero-heap version. Writes lowercased host (with brackets
+// retained for IPv6) to `out`, null-terminated. Returns true on
+// success, false on malformed / degenerate input (in which case
+// `out[0]` is set to '\0').
+//
+// Preserves v31.1 behavior:
+//   - Bracket-aware IPv6 parsing — host = '[' + addr + ']'
+//   - RFC 6874 zone-ID strip — drop '%eth0' / '%25eth0' tail
+//     before the closing ']'
+//   - Degenerate fail-close — '[]', '[%foo]', and anything
+//     under 3 chars (smallest valid IPv6 bracket form is
+//     '[::]' = 4 chars) reject
+//   - IPv4 / hostname parsing stops at first '/', '?', '#', ':'
+//   - Output is lowercased
+//
+// 64-byte buffer bound is well above realistic Origin/Referer
+// host lengths on a LAN device.
+static bool extractHostFromUrl(const char *url, char *out, size_t outSize)
 {
-    auto headerHas = [](const String &h, const char *needle) -> bool {
-        return h.length() > 0 && h.indexOf(needle) >= 0;
-    };
-    String origin  = server.hasHeader("Origin")  ? server.header("Origin")  : String();
-    String referer = server.hasHeader("Referer") ? server.header("Referer") : String();
-    String myHost  = server.hasHeader("Host")    ? server.header("Host")    : String();
-    if ((origin.length() > 0 || referer.length() > 0) && myHost.length() > 0)
-    {
-        String hostOnly = myHost;
-        int colon = hostOnly.indexOf(':');
-        if (colon >= 0) hostOnly = hostOnly.substring(0, colon);
-        bool sameOrigin =
-            (origin.length() > 0  && headerHas(origin,  hostOnly.c_str())) ||
-            (referer.length() > 0 && headerHas(referer, hostOnly.c_str()));
-        if (!sameOrigin)
-        {
-            ESP_LOGW(TAG, "CSRF: rejecting %s — Origin=%s Referer=%s Host=%s",
-                     uriForLog, origin.c_str(), referer.c_str(), myHost.c_str());
-            server.send_P(403, type_txt, PSTR("Forbidden: cross-origin"));
+    if (!url || !out || outSize < 4) {
+        if (out && outSize > 0) out[0] = '\0';
+        return false;
+    }
+    out[0] = '\0';
+
+    const char *p = strstr(url, "://");
+    if (!p) return false;
+    p += 3;
+    if (*p == '\0') return false;
+
+    const char *hostStart = p;
+    const char *hostEnd;
+
+    if (*p == '[') {
+        // IPv6 literal — find closing bracket, include it.
+        const char *closeBracket = strchr(p, ']');
+        if (!closeBracket) return false;
+        hostEnd = closeBracket + 1;
+    } else {
+        // IPv4 / hostname — stop at first '/', '?', '#', ':'.
+        hostEnd = p;
+        while (*hostEnd && *hostEnd != '/' && *hostEnd != '?' &&
+               *hostEnd != '#' && *hostEnd != ':') {
+            hostEnd++;
+        }
+    }
+
+    size_t hostLen = (size_t)(hostEnd - hostStart);
+    if (hostLen == 0 || hostLen >= outSize) return false;
+
+    // Copy + lowercase in one pass.
+    for (size_t i = 0; i < hostLen; i++) {
+        char c = hostStart[i];
+        out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    out[hostLen] = '\0';
+
+    // IPv6 canonicalization: strip RFC 6874 zone-ID (%eth0,
+    // %25eth0) and fail-close on degenerate '[]', '[%foo]'.
+    if (out[0] == '[') {
+        char *zone = strchr(out, '%');
+        char *closeBracket = strchr(out, ']');
+        if (zone && closeBracket && zone < closeBracket) {
+            // Replace '%' with ']' and terminate — drops zone-ID
+            // and any trailing port portion past the original ']'.
+            *zone = ']';
+            *(zone + 1) = '\0';
+        }
+        // Smallest valid IPv6 bracket form is '[::]' (4 chars).
+        // Anything < 3 has no usable host inside.
+        if (strlen(out) < 3) {
+            out[0] = '\0';
             return false;
         }
+    }
+    return true;
+}
+
+static bool enforce_same_origin(const char *uriForLog)
+{
+    // v31.2 zero-heap path: copy header values into stack
+    // buffers and operate on char* throughout. Same behavior
+    // as v31.1 (exact-host match, fail-closed on missing
+    // headers, IPv6 canonicalization). Eliminates the 6
+    // Arduino String allocations per state-changing POST that
+    // were the dominant per-request heap churn surface.
+    char origin[128]  = {0};
+    char referer[128] = {0};
+    char myHost[64]   = {0};
+
+    if (server.hasHeader("Origin"))  {
+        strncpy(origin, server.header("Origin").c_str(), sizeof(origin) - 1);
+    }
+    if (server.hasHeader("Referer")) {
+        strncpy(referer, server.header("Referer").c_str(), sizeof(referer) - 1);
+    }
+    if (server.hasHeader("Host"))    {
+        strncpy(myHost, server.header("Host").c_str(), sizeof(myHost) - 1);
+    }
+
+    // No Host header — nothing to compare against. Hard fail.
+    if (myHost[0] == '\0') {
+        ESP_LOGW(TAG, "CSRF: rejecting %s — no Host header", uriForLog);
+        server.send_P(403, type_txt, PSTR("Forbidden: missing Host"));
+        return false;
+    }
+    // Both Origin and Referer absent: pre-v31 this passed; v31
+    // fails it. Browsers always send at least one for state-
+    // changing methods.
+    if (origin[0] == '\0' && referer[0] == '\0') {
+        ESP_LOGW(TAG, "CSRF: rejecting %s — both Origin and Referer absent (Host=%s)",
+                 uriForLog, myHost);
+        server.send_P(403, type_txt, PSTR("Forbidden: missing Origin/Referer"));
+        return false;
+    }
+
+    // Lowercase + bracket-aware port-strip the Host header.
+    char hostOnly[64] = {0};
+    for (size_t i = 0; myHost[i] != '\0' && i < sizeof(hostOnly) - 1; i++) {
+        char c = myHost[i];
+        hostOnly[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    if (hostOnly[0] == '[') {
+        // IPv6 Host: keep [...], drop port after the ']'.
+        char *closeBracket = strchr(hostOnly, ']');
+        if (closeBracket) *(closeBracket + 1) = '\0';
+    } else {
+        // IPv4 / hostname: drop port after the ':'.
+        char *colon = strchr(hostOnly, ':');
+        if (colon) *colon = '\0';
+    }
+
+    // Apply the same IPv6 canonicalization to hostOnly so it
+    // matches the form extractHostFromUrl produces on the
+    // Origin/Referer side (zone-ID strip + degenerate reject).
+    if (hostOnly[0] == '[') {
+        char *zone = strchr(hostOnly, '%');
+        char *closeBracket = strchr(hostOnly, ']');
+        if (zone && closeBracket && zone < closeBracket) {
+            *zone = ']';
+            *(zone + 1) = '\0';
+        }
+        if (strlen(hostOnly) < 3) {
+            ESP_LOGW(TAG, "CSRF: rejecting %s — degenerate Host=%s",
+                     uriForLog, myHost);
+            server.send_P(403, type_txt, PSTR("Forbidden: degenerate Host"));
+            return false;
+        }
+    }
+
+    // Extract Origin/Referer hosts and compare exact-match.
+    char originHost[64]  = {0};
+    char refererHost[64] = {0};
+    bool sameOrigin = false;
+
+    if (origin[0] != '\0' &&
+        extractHostFromUrl(origin, originHost, sizeof(originHost)) &&
+        strcmp(originHost, hostOnly) == 0) {
+        sameOrigin = true;
+    }
+    if (!sameOrigin && referer[0] != '\0' &&
+        extractHostFromUrl(referer, refererHost, sizeof(refererHost)) &&
+        strcmp(refererHost, hostOnly) == 0) {
+        sameOrigin = true;
+    }
+
+    if (!sameOrigin) {
+        ESP_LOGW(TAG, "CSRF: rejecting %s — Origin=%s (host=%s) Referer=%s (host=%s) Host=%s",
+                 uriForLog,
+                 origin,  originHost,
+                 referer, refererHost,
+                 myHost);
+        server.send_P(403, type_txt, PSTR("Forbidden: cross-origin"));
+        return false;
     }
     return true;
 }
@@ -882,7 +1068,7 @@ void handle_reconnect_homekit()
     // of a one-shot Ticker. v23's deferred Ticker still ran in
     // esp_timer task context where the ~750ms WiFi cycle would stall
     // every other Ticker callback (SSE heartbeats, health log).
-    homekit_request_reconnect("via web UI /reconnectHomeKit");
+    homekit_request_reconnect(DEFERRED_REASON_WEB_UI);
     return;
 }
 
@@ -897,7 +1083,12 @@ void handle_refresh_mdns()
     const char *resp = "HomeKit mDNS refresh triggered.\n";
     server.client().setNoDelay(true);
     server.send(200, type_txt, resp);
-    homekit_refresh_mdns("via web UI /refreshHomeKitMDNS");
+    // v31: defer through main-loop drain. Pre-v31 the WebServer task
+    // called homeSpan.updateDatabase(true) directly, which is the
+    // audit #7b widening — HomeSpan's autoPoll task is the documented
+    // owner of those internals, and re-entrancy from the WebServer
+    // task isn't guaranteed.
+    homekit_request_refresh_mdns(DEFERRED_REASON_WEB_UI);
     return;
 }
 
@@ -924,7 +1115,11 @@ void handle_dump_homekit_state()
     const char *resp = "HomeSpan state dump triggered. Check the System Log / HomeKit tab for output.\n";
     server.client().setNoDelay(true);
     server.send(200, type_txt, resp);
-    homekit_dump_state("via web UI /dumpHomeKitState");
+    // v31: defer through main-loop drain. processSerialCommand from the
+    // WebServer task is the audit #7b widening — same anti-pattern as
+    // updateDatabase. Three CLI commands ('s','i','d') run from the
+    // drain in single-threaded loopTask context.
+    homekit_request_dump_state(DEFERRED_REASON_WEB_UI);
     return;
 }
 
@@ -1292,27 +1487,50 @@ void handle_status()
     uint32_t response_time;
     uint32_t build_time;
     static char *json = status_json;
+    // v31.2: ESP32 keeps the dedicated static send buffer (avoids
+    // the torn-buffer race that v24's mutex-release introduced;
+    // BSS cost is invisible vs ~140 KB free heap). ESP8266 holds
+    // the mutex across server.send_P instead — its ~30-40 KB free
+    // heap can't afford another 2 KB BSS, and the v24 broadcast-
+    // stall mitigation isn't load-bearing on ESP8266 (SSE path
+    // can't sustain enough concurrent subscribers to expose the
+    // deadlock surface anyway).
+#ifndef ESP8266
+    static char status_json_send[STATUS_JSON_BUFFER_SIZE];
+#endif
+    size_t jsonLen;
 
     TAKE_MUTEX();
     request_count++;
     build_status_json(json);
     build_time = (uint32_t)(_millis() - startTime);
     last_reported_garage_door = garage_door;
-    // v24: release the JSON mutex BEFORE the synchronous server.send_P
-    // TCP write. Same audit-flagged pattern as log.cpp — holding the
-    // mutex across a blocking write means a slow Homebridge poll could
-    // stall every other JSON consumer (web_loop SSE broadcasts,
-    // SSEheartbeat). The status JSON is a static buffer; once the
-    // build completes the mutex's job is done.
-    GIVE_MUTEX();
-
+#ifdef ESP8266
+    // Defense-in-depth: belt-and-suspenders if build_status_json ever
+    // regresses (buffer overflow truncating before the close brace, or
+    // a refactor that loses the terminator). Symmetry with the ESP32
+    // branch's explicit `status_json_send[sizeof - 1] = '\0'`. Safe
+    // here because we hold the mutex (only writer at a time) and we're
+    // writing the last byte of a buffer meant to be a C-string.
+    json[STATUS_JSON_BUFFER_SIZE - 1] = '\0';
+    jsonLen = strlen(json);
     server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
     server.send_P(200, type_json, json);
+    GIVE_MUTEX();
+#else
+    strncpy(status_json_send, json, sizeof(status_json_send) - 1);
+    status_json_send[sizeof(status_json_send) - 1] = '\0';
+    GIVE_MUTEX();
+    jsonLen = strlen(status_json_send);
+
+    server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
+    server.send_P(200, type_json, status_json_send);
+#endif
     response_time = _millis() - startTime;
     max_response_time = std::max(max_response_time, response_time);
-    if (strlen(json) > STATUS_JSON_BUFFER_SIZE * 95 / 100)
+    if (jsonLen > STATUS_JSON_BUFFER_SIZE * 95 / 100)
     {
-        ESP_LOGW(TAG, "WARNING JSON status: %d is over 95%% of available buffer (%d), build time %lums, response time: %lums", strlen(json), STATUS_JSON_BUFFER_SIZE, build_time, response_time);
+        ESP_LOGW(TAG, "WARNING JSON status: %d is over 95%% of available buffer (%d), build time %lums, response time: %lums", (int)jsonLen, STATUS_JSON_BUFFER_SIZE, build_time, response_time);
     }
     else
     {
@@ -1322,7 +1540,7 @@ void handle_status()
         // times/min and burying every other log message. The 95%-buffer
         // WARNING above still fires at WARN level — that's the actionable
         // signal. To see these again, set log level to DEBUG in settings.
-        ESP_LOGD(TAG, "JSON status: %d (%d%%), build time %lums, response time: %lums", strlen(json), strlen(json) * 100 / STATUS_JSON_BUFFER_SIZE, build_time, response_time);
+        ESP_LOGD(TAG, "JSON status: %d (%d%%), build time %lums, response time: %lums", (int)jsonLen, (int)(jsonLen * 100 / STATUS_JSON_BUFFER_SIZE), build_time, response_time);
     }
     return;
 }
@@ -1620,6 +1838,7 @@ void handle_setgdo()
         // the deferred-flag drain so it happens on the main loop instead
         // of racing the Ticker callback's own self-reschedule.
         homekit_refresh_watchdog_config();
+        comms_refresh_auto_close_config(); // v31: cache for Ticker-safe checkAutoClose reads
         request_auto_close_reschedule();
     }
     if (reboot)
@@ -1696,10 +1915,25 @@ void sweep_sse_orphans()
 {
     // v28: truncate now to uint32_t to match the timestamp field width
     // (changed from _millis_t int64_t in v28 to avoid tearing risk).
-    // v30: age comparisons cast (now - timestamp) to int32_t below so
-    // a writer stamping AFTER our snapshot produces a negative age,
-    // not a 4.2B-ms underflow. The 49.7-day uint32 wraparound itself is
-    // still handled correctly by mod-2^32 arithmetic.
+    // v31: skew-detection guard. v30 tried to fix the TOCTOU race
+    // (writer stamps subscribedAt/lastActivity AFTER our `now` snapshot
+    // → `now - timestamp` underflows to ~4.29 billion in uint32 →
+    // spurious reap, observed live as `idle=4294967294ms`) by casting
+    // both subtractions to int32_t. That worked for the race but
+    // introduced the OPPOSITE failure: any slot that legitimately
+    // ages past 2^31 ms (~24.85 days) flips negative under the cast,
+    // `negative > timeout` is false, and the slot is never reaped
+    // (sweep silently disables itself for that slot). Class-5b
+    // (`!client.connected()`) is still the safety net for wedged TCP,
+    // but the diagnostic guarantee was broken.
+    //
+    // v31 detects the racing-writer case explicitly via signed skew:
+    // `int32_t skew = (int32_t)(stamp - now)` is positive iff the
+    // writer's stamp is strictly newer than our snapshot. Skip the
+    // slot for that tick — next sweep sees a settled state and
+    // applies the real check. Otherwise compute `age = now - stamp`
+    // in unsigned arithmetic (mod-2^32 wrap-safe AND no signed-overflow
+    // concern at any age).
     uint32_t now = (uint32_t)_millis();
     uint32_t currentlyAlloc = 0;
     uint32_t reapedThisTick = 0;
@@ -1716,31 +1950,26 @@ void sweep_sse_orphans()
             continue;
         }
         currentlyAlloc++;
-        // v30: signed-subtraction guard. The sweep captures `now` once
-        // at the top, but writers (Ticker callbacks for SSEheartbeat,
-        // BUFFER_FULL stamps from SSEBroadcastState) can update
-        // subscribedAt/lastActivity during the loop. If a writer
-        // stamps a value AFTER our `now` snapshot, `now - timestamp`
-        // wraps to ~4.2 billion ms in uint32 space and trips a
-        // spurious reap (observed on v29 boot: idle=4294967294ms).
-        // Cast to int32_t so timestamps newer than `now` produce a
-        // negative age; comparison against the unsigned timeout fails
-        // and the slot stays alive (the next sweep tick will see the
-        // updated state and apply the real check).
-        int32_t preAge = (int32_t)(now - s.subscribedAt);
-        int32_t idleAge = (int32_t)(now - s.lastActivity);
         // 5a) pre-handshake abandoned
-        if (!s.SSEconnected && s.subscribedAt != 0 &&
-            preAge > (int32_t)SSE_PREHANDSHAKE_TIMEOUT_MS)
+        if (!s.SSEconnected && s.subscribedAt != 0)
         {
-            ESP_LOGW(TAG, "SSE orphan (pre-handshake) channel=%u uuid=%s ip=%s age=%dms — reaping",
-                     (unsigned)i, s.clientUUID.c_str(),
-                     s.clientIP.toString().c_str(),
-                     (int)preAge);
-            s.pendingRemove = true;
-            sseOrphansReaped++;
-            reapedThisTick++;
-            continue;
+            uint32_t stamp = s.subscribedAt;          // local snapshot (volatile)
+            int32_t skew = (int32_t)(stamp - now);    // > 0 iff writer raced our `now`
+            if (skew <= 0)
+            {
+                uint32_t age = now - stamp;           // unsigned, wrap-safe
+                if (age > SSE_PREHANDSHAKE_TIMEOUT_MS)
+                {
+                    ESP_LOGW(TAG, "SSE orphan (pre-handshake) channel=%u uuid=%s ip=%s age=%ums — reaping",
+                             (unsigned)i, s.clientUUID.c_str(),
+                             s.clientIP.toString().c_str(),
+                             (unsigned)age);
+                    s.pendingRemove = true;
+                    sseOrphansReaped++;
+                    reapedThisTick++;
+                    continue;
+                }
+            }
         }
         // 5b) connected but TCP gone
         if (s.SSEconnected && !s.client.connected())
@@ -1754,17 +1983,25 @@ void sweep_sse_orphans()
             continue;
         }
         // 5c) idle past the watchdog
-        if (s.SSEconnected && s.lastActivity != 0 &&
-            idleAge > (int32_t)SSE_IDLE_TIMEOUT_MS)
+        if (s.SSEconnected && s.lastActivity != 0)
         {
-            ESP_LOGI(TAG, "SSE orphan (idle) channel=%u uuid=%s ip=%s idle=%dms — reaping",
-                     (unsigned)i, s.clientUUID.c_str(),
-                     s.clientIP.toString().c_str(),
-                     (int)idleAge);
-            s.pendingRemove = true;
-            sseOrphansReaped++;
-            reapedThisTick++;
-            continue;
+            uint32_t stamp = s.lastActivity;          // local snapshot (volatile)
+            int32_t skew = (int32_t)(stamp - now);    // > 0 iff writer raced our `now`
+            if (skew <= 0)
+            {
+                uint32_t age = now - stamp;           // unsigned, wrap-safe
+                if (age > SSE_IDLE_TIMEOUT_MS)
+                {
+                    ESP_LOGI(TAG, "SSE orphan (idle) channel=%u uuid=%s ip=%s idle=%ums — reaping",
+                             (unsigned)i, s.clientUUID.c_str(),
+                             s.clientIP.toString().c_str(),
+                             (unsigned)age);
+                    s.pendingRemove = true;
+                    sseOrphansReaped++;
+                    reapedThisTick++;
+                    continue;
+                }
+            }
         }
     }
     sseSlotsAlloc = currentlyAlloc;

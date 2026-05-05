@@ -45,6 +45,16 @@ extern void update_auto_close_schedule();
 // Ticker's internal state can't be raced.
 extern void request_auto_close_reschedule();
 extern void auto_close_drain_pending_reschedule();
+// v31: refresh the Ticker-safe cache of autoClose config values.
+// Called at boot (after userConfig is loaded) and from the
+// /setgdo settings-save path. Single-threaded — loopTask only.
+extern void comms_refresh_auto_close_config();
+// v31: drain pending force-close gap-timer arm request. Called from
+// service_timer_loop (loopTask). Re-checks forceCloseInProgress
+// before arming so a concurrent clear_force_close_state can't be
+// raced by the Ticker callback's pre-clear scheduling decision.
+// Closes the door-reversal race in audit #3.
+extern void force_close_drain_pending_arm();
 #if defined(ESP8266) || !defined(USE_GDOLIB)
 extern GarageDoorCurrentState toggle_door(bool bypass_ttc = false);
 #endif
