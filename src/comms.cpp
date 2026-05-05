@@ -194,8 +194,11 @@ static volatile bool autoCloseRescheduleRequested = false;
 // first refresh are safe.
 static volatile uint32_t cachedAutoCloseMinutes      = 0;
 static volatile bool     cachedAutoCloseIgnoreWindow = false;
-static volatile uint32_t cachedAutoCloseStartMinutes = 1320;  // 22:00
-static volatile uint32_t cachedAutoCloseEndMinutes   = 360;   // 06:00
+// v43 (audit W27): defaults pulled from config.h so the four sites that
+// hard-code 1320/360 (config.cpp defaults table, this cache, and the
+// frontend mirrors documented in config.h) stay in lockstep when bumped.
+static volatile uint32_t cachedAutoCloseStartMinutes = AUTO_CLOSE_DEFAULT_START_MIN;  // 22:00
+static volatile uint32_t cachedAutoCloseEndMinutes   = AUTO_CLOSE_DEFAULT_END_MIN;    // 06:00
 static volatile bool     cachedAutoCloseEnabled      = false;
 
 void comms_refresh_auto_close_config()
@@ -3060,9 +3063,36 @@ static void checkAutoClose()
              openMinutes, minMinutes,
              ignoreWindow ? "(ignoreWindow=on)" : "and in time window");
     autoCloseFiredThisCycle = true;
+    // v43 (audit W32): cheap re-check immediately before firing. The Ticker
+    // runs on esp_timer task; loopTask can transition the door out of
+    // CURR_OPEN between this Ticker tick's earlier read of current_state
+    // and the press fire. On Sec+1.0, a press on a now-CLOSED door
+    // TOGGLES → door re-opens unintentionally. Bail silently if the door
+    // has already moved. (Race window is tight; full atomic-discipline pass
+    // on doorOpenedAtMillis / autoCloseFiredThisCycle deliberately deferred
+    // — the audit doc explicitly prefers this cheap re-check.)
+    if (garage_door.current_state != CURR_OPEN) return;
     door_command_force_close(3500);
 }
 
+
+#else // USE_GDOLIB defined — provide no-op stubs so the six fork-added
+      // entry points still link. Auto-close + force-close infrastructure
+      // is Sec+1.0 packet-internal; there is no equivalent under gdolib.
+      // v43 (audit W31): without these stubs, enabling -D USE_GDOLIB
+      // produces six linker errors for the symbols declared in comms.h
+      // (`update_auto_close_schedule`, `request_auto_close_reschedule`,
+      // `auto_close_drain_pending_reschedule`, `door_command_force_close`,
+      // `force_close_drain_pending_arm`, `force_close_drain_pending_clear`)
+      // because every one of them is unconditionally referenced from
+      // setup_comms / web.cpp / utilities.cpp / ratgdo.cpp.
+
+void update_auto_close_schedule()        {}
+void request_auto_close_reschedule()     {}
+void auto_close_drain_pending_reschedule() {}
+void door_command_force_close(uint32_t /*hold_ms*/) {}
+void force_close_drain_pending_arm()     {}
+void force_close_drain_pending_clear()   {}
 
 #endif // not USE_GDOLIB
 

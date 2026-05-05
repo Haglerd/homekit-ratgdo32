@@ -470,8 +470,8 @@ userSettings::userSettings()
         // ticks the override checkbox.
         {cfg_autoClose, {false, false, false, NULL}},
         {cfg_autoCloseMinutes, {false, false, 15, NULL}},
-        {cfg_autoCloseStartMinutes, {false, false, 1320, NULL}}, // 22:00
-        {cfg_autoCloseEndMinutes, {false, false, 360, NULL}},    // 06:00
+        {cfg_autoCloseStartMinutes, {false, false, (int)AUTO_CLOSE_DEFAULT_START_MIN, NULL}}, // 22:00 (v43 W27: see config.h AUTO_CLOSE_DEFAULT_START_MIN)
+        {cfg_autoCloseEndMinutes,   {false, false, (int)AUTO_CLOSE_DEFAULT_END_MIN,   NULL}}, // 06:00 (v43 W27: see config.h AUTO_CLOSE_DEFAULT_END_MIN)
         {cfg_autoCloseIgnoreWindow, {false, false, false, NULL}},
         // HomeKit watchdog defaults — recovery actions OFF by default
         // (real-world iOS read cadence varies wildly; let the user observe

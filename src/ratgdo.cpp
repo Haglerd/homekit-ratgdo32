@@ -385,6 +385,16 @@ void service_timer_loop()
         led.flash(250);
     }
 
+    // v43 (audit W20): hoist SSE orphan-sweep + pendingRemove drain ABOVE
+    // the OTA suspend gate so wedged-subscriber slots keep getting reaped
+    // during a 30-second firmware upload. firmwareUpdateSub is stamped on
+    // every successful chunk write (web.cpp around the OTA progress block)
+    // so the orphan sweep never targets the active upload slot — only
+    // OTHER stale slots. Force-close / auto-close drains stay BELOW the
+    // gate (cheaper to delay 30s than the SSE socket holds).
+    sweep_sse_orphans();
+    process_sse_pending_removes();
+
     if (suspend_service_loop)
         return;
 
@@ -428,11 +438,8 @@ void service_timer_loop()
         }
     }
 
-    // SSE: sweep orphan slots first (flags subscribed-but-never-connected
-    // and idle slots), then drain pendingRemove flags set by Ticker
-    // callbacks — never call Ticker.detach() from inside its own callback.
-    sweep_sse_orphans();
-    process_sse_pending_removes();
+    // SSE drains hoisted ABOVE the suspend gate at v43 (audit W20) so they
+    // keep running during OTA — see comment block before the gate above.
     // Drain deferred requests on loopTask so all Ticker manipulation +
     // ~750ms WiFi cycle + ~1-2s HomeSpan CLI commands are serialized
     // off esp_timer / WebServer task contexts.
@@ -444,6 +451,10 @@ void service_timer_loop()
     homekit_drain_pending_state_dump();
     // v34 F7: drives the second half of the WiFi-reconnect cycle
     // ~250ms after the disconnect, without blocking loopTask.
+    // v43 (audit W38): on the same tick that homekit_force_reconnect set
+    // reconnectStage=1, this drain always bails — the elapsed-time gate
+    // at homekit.cpp:1026 (`(uint32_t)_millis() - reconnectStageStartMs
+    // < 250`) returns until ≥250ms have passed.
     homekit_drain_pending_reconnect_stage2();
 
     // Check heap

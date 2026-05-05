@@ -631,11 +631,16 @@ void web_loop()
     {
         GIVE_MUTEX();
     }
-    static time_t mdnsDoorUpdateAt = 0;
-    if (lastDoorUpdateAt && !mdnsDoorUpdateAt)
+    // v43 (audit W34): renamed from `static time_t mdnsDoorUpdateAt` to
+    // a bool one-shot flag. The variable was never read as a time; only
+    // the truthiness was tested (`!mdnsDoorUpdateAt`) and assigned once
+    // when `lastDoorUpdateAt` first became non-zero. The time_t type was
+    // misleading.
+    static bool mdnsDoorUpdateInit = false;
+    if (lastDoorUpdateAt && !mdnsDoorUpdateInit)
     {
         // First time setting it... subsequent changes handled above.
-        mdnsDoorUpdateAt = lastDoorUpdateAt;
+        mdnsDoorUpdateInit = true;
         mdnsUpdatePending = true;
     }
     // Rate limiting - minimum interval between requests
@@ -1118,6 +1123,14 @@ void handle_reset()
 #ifdef ESP8266
     homekit_storage_reset();
 #else
+    // v43 (audit W29): homekit_unpair calls homeSpan.processSerialCommand
+    // synchronously from the WebServer task, breaking the v31 deferred-flag
+    // discipline used by homekit_dump_state / homekit_refresh_mdns /
+    // homekit_force_reconnect. The synchronous call is intentional here:
+    // sync_and_restart() at the bottom of this handler reboots within
+    // ~500 ms (delay below + send completion), so the autoPoll-task race
+    // window is bounded by the imminent reboot. Wrapping in a request flag
+    // would race the reboot path.
     homekit_unpair();
 #endif
     server.client().setNoDelay(true);
@@ -1264,7 +1277,13 @@ void load_page(const char *page)
 
     bool cache = false;
     char cacheHdr[24] = "no-cache, no-store";
-    char matchHdr[8] = "";
+    // v43 (audit W37): defensive bump from [8] to [16]. Today's CRC32 ETag
+    // is 6 chars (urlsafe-b64 of 4 bytes, `=` padding stripped) so [8]
+    // fits, but is one byte from silent truncation if the encoding ever
+    // changes (full-base64 with `=` = 9 chars, MD5 hex = 32 chars). [16]
+    // comfortably accommodates any reasonable hash format. Zero runtime
+    // cost; one-line defensive sizing.
+    char matchHdr[16] = "";
     if ((CACHE_CONTROL > 0) &&
         (!strcmp_P(type, type_css) || !strcmp_P(type, type_html) || !strcmp_P(type, type_js) || strstr_P(type, PSTR("image"))))
     {
@@ -1399,10 +1418,30 @@ void build_status_json(char *json)
     JSON_ADD_STR(cfg_gatewayIP, userConfig->getGatewayIP());
     JSON_ADD_STR(cfg_nameserverIP, userConfig->getNameserverIP());
     new_ipv4_address = false;
-    JSON_ADD_STR("macAddress", WiFi.macAddress().c_str());
-    JSON_ADD_STR("wifiSSID", WiFi.SSID().c_str());
-    JSON_ADD_STR("wifiRSSI", (std::to_string(WiFi.RSSI()) + " dBm, Channel " + std::to_string(WiFi.channel())).c_str());
-    JSON_ADD_STR("wifiBSSID", WiFi.BSSIDstr().c_str());
+    // v43 (audit W35): copy each Arduino String into a stack buffer before
+    // calling .c_str(). The pre-v43 pattern `WiFi.macAddress().c_str()`
+    // returned a borrowed pointer into a String temporary that was
+    // destroyed at the semicolon — undefined behavior, even though
+    // JSON_ADD_STR happens to copy the bytes immediately. The wifiRSSI
+    // line additionally allocated 3+ heap chunks per call via `std::to_string
+    // + std::to_string + +`. Total heap saved per status.json poll: ~120 B.
+    char macStr[18];
+    char ssidStr[33];
+    char rssiBuf[40];
+    char bssidStr[18];
+    {
+        String s_mac   = WiFi.macAddress();
+        String s_ssid  = WiFi.SSID();
+        String s_bssid = WiFi.BSSIDstr();
+        strncpy(macStr,   s_mac.c_str(),   sizeof(macStr)   - 1); macStr[sizeof(macStr)     - 1] = '\0';
+        strncpy(ssidStr,  s_ssid.c_str(),  sizeof(ssidStr)  - 1); ssidStr[sizeof(ssidStr)   - 1] = '\0';
+        strncpy(bssidStr, s_bssid.c_str(), sizeof(bssidStr) - 1); bssidStr[sizeof(bssidStr) - 1] = '\0';
+    }
+    snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm, Channel %d", (int)WiFi.RSSI(), (int)WiFi.channel());
+    JSON_ADD_STR("macAddress", macStr);
+    JSON_ADD_STR("wifiSSID", ssidStr);
+    JSON_ADD_STR("wifiRSSI", rssiBuf);
+    JSON_ADD_STR("wifiBSSID", bssidStr);
 #ifdef ESP8266
     JSON_ADD_BOOL("lockedAP", wifiConf.bssid_set);
 #else
@@ -1695,9 +1734,12 @@ bool helperGarageDoorState(const std::string &key, const char *value, configSett
 // close (no protocol-level hold pattern exists).
 bool helperForceClose(const std::string &key, const char *value, configSetting *action)
 {
-    int hold_ms = atoi(value);
-    if (hold_ms <= 0) hold_ms = 3500; // default
-    door_command_force_close((uint32_t)hold_ms);
+    // v43 (audit W23): drop the helper-side clamp. door_command_force_close
+    // (comms.cpp:2832-2833) is the single source of truth for hold_ms bounds
+    // (`<1000 → 3500`, `>10000 → 10000`). Pre-v43 the helper also clamped
+    // `<= 0 → 3500` but ignored the upper bound, so dual-validation invited
+    // future drift between the two clamps.
+    door_command_force_close((uint32_t)atoi(value));
     return true;
 }
 
@@ -1857,31 +1899,35 @@ void handle_setgdo()
         // already enforces these bounds, but a hand-crafted POST can bypass
         // them; defending here keeps NVRAM from accepting nonsense like
         // autoCloseMinutes=99999999 or autoCloseStartMinutes=-1.
+        // v43 (audit W27): bounds pulled from config.h constants —
+        // AUTO_CLOSE_MAX_MINUTES, AUTO_CLOSE_MAX_TOD_MIN.
         if (key == "autoCloseMinutes" ||
             key == "autoCloseStartMinutes" ||
             key == "autoCloseEndMinutes")
         {
             long n = strtol(value.c_str(), nullptr, 10);
             long lo = (key == "autoCloseMinutes") ? 1 : 0;
-            long hi = (key == "autoCloseMinutes") ? 720 : 1439;
+            long hi = (key == "autoCloseMinutes") ? (long)AUTO_CLOSE_MAX_MINUTES : (long)AUTO_CLOSE_MAX_TOD_MIN;
             if (n < lo) n = lo;
             if (n > hi) n = hi;
             value = std::to_string(n);
         }
         // v23: same defensive clamp for HomeKit watchdog timer keys.
         // Without this, a hand-crafted POST hkAutoRecoverSecs=0 (or any
-        // value < 60) would make the watchdog auto-fire on every health
-        // tick → WiFi cycles every 3 minutes forever → device unreachable
-        // by HomeKit until manual settings rescue. Range [60, 7200] matches
-        // the form bounds in src/www/index.html.
+        // value < HK_WATCHDOG_MIN_SECS) would make the watchdog auto-fire
+        // on every health tick → WiFi cycles every 3 minutes forever →
+        // device unreachable by HomeKit until manual settings rescue.
+        // v43 (audit W27): bounds pulled from config.h constants —
+        // HK_WATCHDOG_MIN_SECS, HK_WATCHDOG_MAX_SECS. Range matches the
+        // form bounds in src/www/index.html (mirrored — see config.h note).
         if (key == "hkAutoRecoverSecs" ||
             key == "hkHintQuietSecs" ||
             key == "hkHintStaleSecs" ||
             key == "hkHintLikelyNRSecs")
         {
             long n = strtol(value.c_str(), nullptr, 10);
-            if (n < 60) n = 60;
-            if (n > 7200) n = 7200;
+            if (n < (long)HK_WATCHDOG_MIN_SECS) n = (long)HK_WATCHDOG_MIN_SECS;
+            if (n > (long)HK_WATCHDOG_MAX_SECS) n = (long)HK_WATCHDOG_MAX_SECS;
             value = std::to_string(n);
         }
 
@@ -2194,7 +2240,14 @@ void SSEheartbeat(SSESubscription *s)
         if (lastRSSI != WiFi.RSSI())
         {
             lastRSSI = WiFi.RSSI();
-            JSON_ADD_STR("wifiRSSI", (std::to_string(lastRSSI) + " dBm, Channel " + std::to_string(WiFi.channel())).c_str());
+            // v43 (audit W35): replace `(std::to_string + std::to_string +
+            // " dBm, ...").c_str()` 3-allocation chain with one snprintf
+            // into a stack buffer. SSEheartbeat fires per-subscriber per
+            // ~10s; eliminating heap from this hot path cuts long-term
+            // fragmentation pressure.
+            char rssiBuf[40];
+            snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm, Channel %u", (int)lastRSSI, WiFi.channel());
+            JSON_ADD_STR("wifiRSSI", rssiBuf);
         }
 #ifdef ESP8266
         static int lastClientCount = 0;
@@ -2556,22 +2609,34 @@ void handle_subscribe()
 // exactly what enforce_same_origin checks. Adding the guard blocks
 // drive-by cross-origin closes (e.g. malicious LAN page knocking
 // the user offline) without breaking the legitimate beacon flow.
-// No AUTH because the UUID is the only authority required and it's
-// already 128-bit random; an attacker without the UUID can't target
-// a specific session.
+//
+// AUTH note: this endpoint is intentionally not gated by AUTHENTICATE.
+// sendBeacon does not implement Digest, so adding AUTH would either
+// break legitimate beacon delivery (the sole UA mechanism for "release
+// my SSE slot on page unload") or repeat the v37 EventSource trap of
+// spurious 401s on background-tab transitions. The session UUID is the
+// authority, but its premise is best-effort: syslog readers and same-
+// LAN sniffers can capture active UUIDs (we log channel-allocation at
+// handle_subscribe and the device exports syslog UDP unauthenticated).
+// An attacker who reads syslog can beacon-disconnect any user — bounded
+// to forcing a browser SSE reconnect (DoS, no state damage).
 void handle_unsubscribe()
 {
     if (!enforce_same_origin("/rest/events/unsubscribe")) return;
-    String uuid;
+    // v43 (audit W24): drop the Arduino `String uuid;` + `uuid =
+    // server.arg(i);` heap-double-alloc pattern (1 String for the local
+    // + 1 for server.arg's return) on a path that fires per-page-navigate
+    // via navigator.sendBeacon. char[40] holds 36-char UUIDs comfortably.
+    char uuid[40] = {0};
     for (int i = 0; i < server.args(); i++)
     {
         if (server.argName(i).equals("id"))
         {
-            uuid = server.arg(i);
+            strncpy(uuid, server.arg(i).c_str(), sizeof(uuid) - 1);
             break;
         }
     }
-    if (uuid.isEmpty())
+    if (uuid[0] == '\0')
     {
         server.send_P(400, type_txt, response400missing);
         return;
@@ -2579,11 +2644,11 @@ void handle_unsubscribe()
     int matched = 0;
     for (uint32_t i = 0; i < SSE_MAX_CHANNELS; i++)
     {
-        if (subscription[i].clientUUID == uuid &&
+        if (subscription[i].clientUUID.equals(uuid) &&
             subscription[i].clientIP != IPAddress(INADDR_NONE))
         {
             ESP_LOGD(TAG, "unsubscribe beacon for UUID %s on channel %u",
-                     uuid.c_str(), (unsigned)i);
+                     uuid, (unsigned)i);
             subscription[i].pendingRemove = true;
             matched++;
         }
@@ -2923,15 +2988,14 @@ void handle_firmware_upload()
     }
     else if (_authenticatedUpdate && upload.status == UPLOAD_FILE_WRITE && !_updaterError.length())
     {
-        // Progress dot dot dot
-        Serial.print(".");
+        // v43 (audit W30): dropped Serial.print(".") progress noise.
+        // ESP_LOGI percentage line below is the authoritative indicator.
         if (firmwareSize > 0)
         {
             uploadProgress += upload.currentSize;
             uint32_t uploadPercent = (uploadProgress * 100) / firmwareSize;
             if (uploadPercent >= nextPrintPercent)
             {
-                Serial.print("\n"); // newline after the dot dot dots
                 ESP_LOGI(TAG, "%s progress: %d", verify ? "Verify" : "Update", uploadPercent);
                 nextPrintPercent += 5;
                 // Report percentage to browser client if it is listening
@@ -2966,7 +3030,8 @@ void handle_firmware_upload()
     }
     else if (_authenticatedUpdate && upload.status == UPLOAD_FILE_END && !_updaterError.length())
     {
-        Serial.print("\n"); // newline after last of the dot dot dots
+        // v43 (audit W30): dropped Serial.print("\n") that closed the
+        // dropped progress-dots line.
         if (!verify)
         {
             if (Update.end(true))
