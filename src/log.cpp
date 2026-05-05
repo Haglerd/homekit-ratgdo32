@@ -147,7 +147,18 @@ RTC_NOINIT_ATTR time_t crashTime;
 RTC_NOINIT_ATTR _millis_t crashUpTime;
 RTC_NOINIT_ATTR int32_t crashCount;
 RTC_NOINIT_ATTR char reasonString[64];
-RTC_NOINIT_ATTR char crashVersion[16];
+// v37: bumped from [16] to [32]. AUTO_VERSION at v36 is
+// "v3.4.4-forceclose.36" = 20 chars + NUL → strlcpy(...sizeof=16)
+// truncated it to "3.4.4-forceclos" in the rendered crash log header.
+// 32 B fits "v3.4.4-forceclose.999" with headroom for any future
+// suffix. Cost: +16 B in RTC_NOINIT (~0.2% of 8 KB region).
+// Side effect: bumping a RTC_NOINIT field shifts subsequent field
+// offsets. resetMagic lands at a new offset post-OTA, so the
+// LOG::LOG() constructor sees `resetMagic != RESET_MAGIC` on first
+// boot under v37 and runs the cold-init branch. Net: any v36-captured
+// crash log is discarded on the v37 OTA boot. Acceptable for a
+// hotfix — same effect as a power cycle.
+RTC_NOINIT_ATTR char crashVersion[32];
 RTC_NOINIT_ATTR volatile uint32_t resetMagic;
 #define RESET_MAGIC 0xDEADBEEF // Thankyou google AI for the suggestion.
 const int rtcSize = sizeof(rtcRebootLog) + sizeof(rtcCrashLog) + sizeof(rebootTime) + sizeof(rebootUpTime) + sizeof(crashTime) + sizeof(crashUpTime) +
@@ -163,6 +174,29 @@ const int rtcSize = sizeof(rtcRebootLog) + sizeof(rtcCrashLog) + sizeof(rebootTi
 // is a private member of class LOG so the timing has to be inlined
 // at the take site rather than wrapped in a helper.)
 volatile uint32_t logMtxMaxWaitMs = 0;
+
+// v37: post-panic snapshot guard. The Arduino panic handler is invoked
+// from the panic chain BEFORE the actual abort/restart, but other
+// FreeRTOS tasks (lwIP `tiT`, mDNS, HomeSpan autoPoll) keep running on
+// other cores and continue calling ESP_LOGx until the chip resets.
+// Their late writes can land in `msgBuffer` AFTER `panic_handler`
+// samples `crashUpTime` and starts memcpy'ing into `rtcCrashLog`,
+// producing the user-visible "Server uptime: 16228 ms" header followed
+// by buffer entries with timestamps later than 16.228s. Setting this
+// flag at the END of panic_handler — and gating `logToBuffer`'s
+// ring-buffer write on it — bounds the mismatch to AT MOST one
+// in-flight line that already passed the check before the flag was
+// set. Steady-state coherent display.
+//
+// Static — only consumed inside log.cpp (panic_handler, logToBuffer,
+// clearMessageBuffer). Atomics match the codebase convention for
+// shared cross-task flags (Finding C pattern in v32: forceCloseInProgress,
+// reconnectHKRequested, autoCloseRescheduleRequested all use
+// __atomic_store_n(__ATOMIC_RELEASE) / __atomic_load_n(__ATOMIC_ACQUIRE)).
+// This flag is functionally similar — file-scope cross-core latch — so
+// matching the convention costs nothing and avoids future-reviewer
+// "wait, why is this one different?" friction.
+static volatile bool panicSnapshotDone = false;
 
 void panic_handler(arduino_panic_info_t *info, void *arg)
 {
@@ -193,6 +227,16 @@ void panic_handler(arduino_panic_info_t *info, void *arg)
     }
     strlcpy(reasonString, info->reason, sizeof(reasonString));
     strlcpy(crashVersion, AUTO_VERSION, sizeof(crashVersion));
+    // v37: snapshot complete — block further writes to msgBuffer from
+    // tasks that survived past the panic. UART (`SERIAL_PRINT`) still
+    // works, so a serial-console observer keeps seeing post-panic
+    // output. The captured rtcCrashLog now reflects state at the
+    // moment crashUpTime was sampled, not "the moment + everything
+    // that raced in during the snapshot copy." Release-store pairs
+    // with the acquire-load in logToBuffer / clearMessageBuffer —
+    // when a reader observes panicSnapshotDone=true it also observes
+    // the completed memcpy + strlcpy state above.
+    __atomic_store_n(&panicSnapshotDone, true, __ATOMIC_RELEASE);
 }
 #endif
 
@@ -240,6 +284,18 @@ LOG::LOG()
 
 void LOG::logToBuffer(const char *fmt, va_list args)
 {
+    // v37: post-panic gate. Once panic_handler has snapshotted
+    // msgBuffer into rtcCrashLog, additional writes from other tasks
+    // would corrupt or post-date the snapshot. Drop them silently —
+    // panic_handler already used esp_rom_printf for its own status
+    // line, so serial-console debuggers still see panic output.
+    // SSE/syslog broadcast is irrelevant at this stage (chip is
+    // about to reset). Cost: one atomic-load on every ESP_LOGx in
+    // the normal path. Acquire-load pairs with the release-store in
+    // panic_handler.
+#ifndef ESP8266
+    if (__atomic_load_n(&panicSnapshotDone, __ATOMIC_ACQUIRE)) return;
+#endif
     // v24 instrumented mutex take — record max wait time so a wedged
     // SSE-subscriber-induced broadcast block becomes visible in the
     // periodic health log instead of disappearing into the deadlock.
@@ -409,6 +465,40 @@ void LOG::clearCrashLog()
     esp_core_dump_image_erase();
 #endif
     crashCount = 0;
+}
+
+// v37: invoked from setup() after initialization is fully complete.
+// Pre-v37, a steady-state crash captured msgBuffer's contents going
+// all the way back to the device's boot logs (HomeKit service
+// configuration, WiFi connect chatter, mDNS service registration,
+// initial GDO panel-detection retries). For a crash 5 minutes after
+// boot, the operator wanted the LAST 5 minutes — not "the last
+// 256 KB of ring buffer including 12 seconds of HomeKit init."
+// Resetting the buffer at "boot complete" gives the crash log a
+// clean post-init view.
+//
+// Early-boot crashes still preserve the full boot trace (this
+// function hasn't been called yet at panic time), so debugging
+// an init-time fault still has the relevant prefix.
+//
+// We DO take the log mutex briefly to ensure no logger is mid-write
+// when we zero the buffer — the memset+head+wrapped reset must be
+// atomic w.r.t. logToBuffer.
+void LOG::clearMessageBuffer()
+{
+#ifndef ESP8266
+    // Never re-arm the buffer after a panic snapshot has been taken —
+    // panic_handler's rtcCrashLog dump is the authoritative record.
+    // Acquire-load pairs with panic_handler's release-store.
+    if (__atomic_load_n(&panicSnapshotDone, __ATOMIC_ACQUIRE)) return;
+    TAKE_MUTEX();
+#endif
+    memset(msgBuffer->buffer, 0, sizeof(msgBuffer->buffer));
+    msgBuffer->wrapped = 0;
+    msgBuffer->head = 0;
+#ifndef ESP8266
+    GIVE_MUTEX();
+#endif
 }
 
 #ifdef ESP8266

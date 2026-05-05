@@ -2200,6 +2200,14 @@ void handle_subscribe()
             heartbeatIntervalArgIdx = i;
     }
 
+    // Log-stream subscriptions require auth — same policy as /showlog,
+    // /showrebootlog, /crashlog. Door-status SSE (logViewer == false)
+    // remains open, matching /status.json.
+    if (logViewer)
+    {
+        AUTHENTICATE();
+    }
+
     // 4. heartbeat interval (F5 coerce)
     uint32_t heartbeatInterval = SSE_HEARTBEAT_DEFAULT_SEC;
     if (heartbeatIntervalArgIdx >= 0)
@@ -2383,18 +2391,21 @@ void handle_unsubscribe()
 
 void handle_crashlog()
 {
+    AUTHENTICATE();
     server.client().print(response200);
     ratgdoLogger->printCrashLog(server.client());
 }
 
 void handle_showlog()
 {
+    AUTHENTICATE();
     server.client().print(response200);
     ratgdoLogger->printMessageLog(server.client());
 }
 
 void handle_showrebootlog()
 {
+    AUTHENTICATE();
     server.client().print(response200);
 #ifdef ESP8266
     File file = LittleFS.open(REBOOT_LOG_MSG_FILE, "r");
