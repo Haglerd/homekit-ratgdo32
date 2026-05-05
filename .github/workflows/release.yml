@@ -168,7 +168,15 @@ jobs:
       # commit so device-side OTA works regardless of installed version.
       # Manifest paths stay as github.com release URLs (web installer prefers
       # those; device-side functions.js in v34+ also uses release URLs).
-      - name: Commit firmware bins to docs/firmware/
+      #
+      # v36 (MH7 redux): trim — commit only the four files the device-side
+      # OTA actually fetches (firmware.bin / bootloader.bin / partitions.bin
+      # / firmware.md5). The .elf is multi-MB per release and was getting
+      # committed to main on every tag, growing the repo .git pack ~30 MB
+      # per cut for a file the OTA path never reads. The .elf still gets
+      # uploaded to the GitHub release attachments above (used by the
+      # crash-backtrace decoder), and as an actions/upload-artifact below.
+      - name: Commit firmware bins to docs/firmware/ (flash bins only — no .elf)
         run: |
           set -e
           git config user.name "github-actions[bot]"
@@ -178,16 +186,17 @@ jobs:
           cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin /tmp/fwbins/
           cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin /tmp/fwbins/
           cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 /tmp/fwbins/
-          cp .pio/build/ratgdo_esp32dev/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf /tmp/fwbins/
           git fetch origin main
           git checkout -fB main origin/main
           mkdir -p docs/firmware
           cp /tmp/fwbins/* docs/firmware/
+          # Stage only the device-OTA-relevant files. The .elf is
+          # deliberately NOT staged here — it stays as a release attachment
+          # + workflow artifact only. See MH7-redux comment block above.
           git add docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin \
                   docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin \
                   docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin \
-                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5 \
-                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.elf
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5
           if ! git diff --cached --quiet; then
             git commit -m "Upload firmware bins for ${{ steps.tag.outputs.latestTag }}"
             git push origin main
