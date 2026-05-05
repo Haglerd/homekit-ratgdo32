@@ -10,6 +10,15 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.30 (2026-05-04)
+
+**Fixed (critical)**
+- **SSE orphan sweep was reaping healthy slots due to a uint32 underflow.** Symptom in the wild on v29: `SSE orphan (idle) channel=0 ... idle=4294967294ms — reaping`, repeated continuously seconds after boot. Cause: TOCTOU race between `sweep_sse_orphans` capturing `now` once at the top of the loop and writers (Ticker callbacks for `SSEheartbeat`, `BUFFER_FULL` stamps from `SSEBroadcastState`) updating `subscribedAt` / `lastActivity` *after* the snapshot. When a writer's timestamp was slightly newer than our `now`, `(uint32_t)(now - timestamp)` wrapped to ~4.29 billion ms (`UINT32_MAX - delta`) — a value vastly larger than `SSE_IDLE_TIMEOUT_MS` (300000) or `SSE_PREHANDSHAKE_TIMEOUT_MS` (5000), so a healthy slot was reaped one tick after handshake on a busy device. Fix: cast both age computations to `int32_t` so a future timestamp produces a *negative* age, which fails the `> timeout` comparison and leaves the slot alive — the next sweep tick sees the up-to-date state and applies the real check. Also updates the comment on the `now = (uint32_t)_millis()` line to document the new semantic. The 49.7-day uint32 wraparound itself is still handled correctly by mod-2^32 arithmetic — only the sub-second TOCTOU window changes behaviour.
+
+**ESP8266 portability notes (for cherry-picking to `Haglerd/homekit-ratgdo`)**
+- The v30 fix is in `web.cpp::sweep_sse_orphans` and is fully portable — no ESP32-specific APIs. Cherry-pick the `int32_t preAge` / `idleAge` cast lines and the matching `> (int32_t)<TIMEOUT>` comparison change. The bug exists wherever a uint32 timestamp is subtracted from `now` without a signed cast.
+- Reviewed the v22-v29 fork delta against the ESP8266 codebase: SSE infrastructure (sweep, drain, unsubscribe, `enforce_same_origin`, `clientWriteEx` tri-state return, BUFFER_FULL flow-control diagnostics) is portable. The HomeKit watchdog + 180-s health log block (`homekit.cpp::homekit_health_log` and the `pairedControllersCount` cache + `hap_controller_change_cb` HomeSpan hook) is ESP32-only — it depends on HomeSpan's `setControllerCallback` and `esp_heap_caps`. ESP8266 builds should skip that block; the watchdog config setters and ~30 B BSS for the cache aren't worth the heap on an ESP8266 anyway.
+
 ### v3.4.4-forceclose.29 (2026-05-04)
 
 **Fixed**
