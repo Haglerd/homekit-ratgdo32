@@ -483,6 +483,7 @@ userSettings::userSettings()
         {cfg_hkHintQuietSecs, {false, false, 300, NULL}},     //  5 min
         {cfg_hkHintStaleSecs, {false, false, 900, NULL}},     // 15 min
         {cfg_hkHintLikelyNRSecs, {false, false, 1800, NULL}}, // 30 min
+        {cfg_hkVerboseLogs, {false, false, false, NULL}},     // v34: default OFF — quieter syslog, better crash-log preservation
 #ifndef ESP8266
         // These features not available on ESP8266
         {cfg_occupancyDuration, {false, false, 0, helperOccupancyDuration}}, // call fn to enable/disable HomeKit accessories

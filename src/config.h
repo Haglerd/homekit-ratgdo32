@@ -117,6 +117,13 @@ constexpr char cfg_hkAutoRecoverSecs[] PROGMEM = "hkAutoRecoverSecs";
 constexpr char cfg_hkHintQuietSecs[] PROGMEM = "hkHintQuietSecs";
 constexpr char cfg_hkHintStaleSecs[] PROGMEM = "hkHintStaleSecs";
 constexpr char cfg_hkHintLikelyNRSecs[] PROGMEM = "hkHintLikelyNRSecs";
+// v34: gate the periodic 180s diagnostic state-dump lines + post-action
+// narration behind a user toggle. Default OFF — quieter syslog, better
+// crash-log preservation (16 KB ring wraps every ~80 min of normal
+// operation; quiet watchdog preserves much more pre-crash context).
+// Event-occurred lines (auto-recover, hint-level transitions, pair
+// state changes, WiFi disconnects) stay unconditional regardless.
+constexpr char cfg_hkVerboseLogs[] PROGMEM = "hkVerboseLogs";
 #ifdef ESP8266
 // On ESP8266 we save user config to a file in LittleFS
 constexpr char cfg_configFile[] PROGMEM = "user_config";
@@ -240,6 +247,7 @@ public:
     bool getHKAutoRecover() { return std::get<bool>(get(cfg_hkAutoRecover)); };
     uint32_t getHKAutoRecoverSecs() { return std::get<int>(get(cfg_hkAutoRecoverSecs)); };
     uint32_t getHKHintQuietSecs() { return std::get<int>(get(cfg_hkHintQuietSecs)); };
+    bool getHKVerboseLogs() { return std::get<bool>(get(cfg_hkVerboseLogs)); };
     uint32_t getHKHintStaleSecs() { return std::get<int>(get(cfg_hkHintStaleSecs)); };
     uint32_t getHKHintLikelyNRSecs() { return std::get<int>(get(cfg_hkHintLikelyNRSecs)); };
 #ifdef RATGDO32_DISCO

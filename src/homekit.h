@@ -97,6 +97,9 @@ extern void homekit_request_dump_state(HomekitDeferredReason reason);
 extern void homekit_drain_pending_mdns_refresh();
 extern void homekit_drain_pending_state_dump();
 extern void homekit_drain_pending_reconnect();
+// v34 F7: split-stage WiFi reconnect — drives the post-disconnect
+// delay → reconnect transition without blocking loopTask.
+extern void homekit_drain_pending_reconnect_stage2();
 // Re-advertise mDNS without cycling WiFi (lighter-touch recovery).
 extern void homekit_refresh_mdns(const char *reason);
 // Dump HomeSpan's CLI diagnostic output (status + accessory DB + diag) to log.

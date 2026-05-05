@@ -592,6 +592,9 @@ function setElementsFromStatus(status) {
             case "hkAutoRecover":
                 document.getElementById(key).checked = value;
                 break;
+            case "hkVerboseLogs":
+                document.getElementById(key).checked = value;
+                break;
             case "hkAutoRecoverSecs":
             case "hkHintQuietSecs":
             case "hkHintStaleSecs":
@@ -819,6 +822,7 @@ function setElementsFromStatus(status) {
             case "hkHintQuietSecs":
             case "hkHintStaleSecs":
             case "hkHintLikelyNRSecs":
+            case "hkVerboseLogs":
                 // HomeKit watchdog config flows through /status.json. No
                 // home-page widget for it — the values just get reflected
                 // back into the settings form on next page load.
@@ -1013,10 +1017,15 @@ async function checkVersion(progress = "dotdot1") {
             document.getElementById("firmwareDescription").innerHTML = marked.parse(latest.body);
         }
         if (asset?.name) {
-            // Fork-friendly: use gitUser-scoped GitHub Pages instead of
-            // hardcoding ratgdo.github.io. Owner is whoever the firmware
-            // was built against (-D GITUSER at compile time).
-            serverStatus.downloadURL = "https://" + gitUser.toLowerCase() + ".github.io/" + gitRepo + "/firmware/" + asset.name;
+            // v34 (MH7 completion): bins now live on the GitHub release
+            // attachments, not docs/firmware/ on Pages. Construct the
+            // direct release-download URL — matches the format release.yml
+            // writes into manifest.json. Older v32 devices hit the OLD
+            // Pages-relative URL via this code path; OTA from v32 to v34+
+            // requires the web installer (haglerd.github.io/...) which
+            // fetches manifest.json directly. Future device-side
+            // "Update from GitHub" works once any v34+ build is running.
+            serverStatus.downloadURL = "https://github.com/" + gitUser + "/" + gitRepo + "/releases/download/" + latest.tag_name + "/" + asset.name;
             msg = "You have newest release";
             if (serverStatus.firmwareVersion < latest.tag_name) {
                 // Newest version at GitHub is greater from that installed
@@ -1526,9 +1535,10 @@ async function saveSettings() {
     const autoCloseEndMinutes   = hhmmToMOD(document.getElementById("autoCloseEnd").value, 360);     // 06:00
     const autoCloseIgnoreWindow = (document.getElementById("autoCloseIgnoreWindow").checked) ? '1' : '0';
 
-    // HomeKit watchdog (fork) — toggle + 4 thresholds. Clamp to
-    // [60, 7200] sec to match the form min/max and avoid bogus values.
-    const hkAutoRecover = (document.getElementById("hkAutoRecover").checked) ? '1' : '0';
+    // HomeKit watchdog (fork) — toggle + verbose-logs + 4 thresholds.
+    // Clamp the seconds inputs to [60, 7200] to match form min/max.
+    const hkAutoRecover  = (document.getElementById("hkAutoRecover").checked)  ? '1' : '0';
+    const hkVerboseLogs  = (document.getElementById("hkVerboseLogs").checked)  ? '1' : '0';
     function clampSecs(id, fallback) {
         const v = parseInt(document.getElementById(id).value);
         if (isNaN(v)) return fallback;
@@ -1631,6 +1641,7 @@ async function saveSettings() {
         "autoCloseEndMinutes", autoCloseEndMinutes,
         "autoCloseIgnoreWindow", autoCloseIgnoreWindow,
         "hkAutoRecover", hkAutoRecover,
+        "hkVerboseLogs", hkVerboseLogs,
         "hkAutoRecoverSecs", hkAutoRecoverSecs,
         "hkHintQuietSecs", hkHintQuietSecs,
         "hkHintStaleSecs", hkHintStaleSecs,

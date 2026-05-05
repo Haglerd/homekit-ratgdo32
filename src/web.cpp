@@ -1236,6 +1236,7 @@ void build_status_json(char *json)
     JSON_ADD_INT("hkHintQuietSecs", userConfig->getHKHintQuietSecs());
     JSON_ADD_INT("hkHintStaleSecs", userConfig->getHKHintStaleSecs());
     JSON_ADD_INT("hkHintLikelyNRSecs", userConfig->getHKHintLikelyNRSecs());
+    JSON_ADD_BOOL("hkVerboseLogs", userConfig->getHKVerboseLogs());
     JSON_ADD_INT("upTime", upTime);
     JSON_ADD_STR(cfg_deviceName, userConfig->getDeviceName());
     JSON_ADD_STR("userName", userConfig->getwwwUsername());
