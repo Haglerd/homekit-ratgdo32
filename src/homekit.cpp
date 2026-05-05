@@ -982,8 +982,8 @@ void homekit_drain_pending_state_dump()
 // WiFi.reconnect() when ≥250ms have passed.
 //
 // v43 (audit W36): pass `timeoutLength=0` to make disconnect
-// fire-and-forget. arduino-esp32's `WiFi.disconnect(eraseap=false,
-// wifioff=false)` (2-arg form) defaults `timeoutLength=100` and blocks
+// fire-and-forget. arduino-esp32's `WiFi.disconnect(wifioff=false,
+// eraseap=false)` (2-arg form) defaults `timeoutLength=100` and blocks
 // for up to 100 ms waiting for the SYSTEM_EVENT_STA_DISCONNECTED event.
 // 100 ms is well under any watchdog but the v34 comment claimed
 // "~0 ms"; with timeoutLength=0 the call returns immediately and
