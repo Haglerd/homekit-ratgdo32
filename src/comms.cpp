@@ -194,8 +194,11 @@ static volatile bool autoCloseRescheduleRequested = false;
 // first refresh are safe.
 static volatile uint32_t cachedAutoCloseMinutes      = 0;
 static volatile bool     cachedAutoCloseIgnoreWindow = false;
-static volatile uint32_t cachedAutoCloseStartMinutes = 1320;  // 22:00
-static volatile uint32_t cachedAutoCloseEndMinutes   = 360;   // 06:00
+// v43 (audit W27): defaults pulled from config.h so the four sites that
+// hard-code 1320/360 (config.cpp defaults table, this cache, and the
+// frontend mirrors documented in config.h) stay in lockstep when bumped.
+static volatile uint32_t cachedAutoCloseStartMinutes = AUTO_CLOSE_DEFAULT_START_MIN;  // 22:00
+static volatile uint32_t cachedAutoCloseEndMinutes   = AUTO_CLOSE_DEFAULT_END_MIN;    // 06:00
 static volatile bool     cachedAutoCloseEnabled      = false;
 
 void comms_refresh_auto_close_config()

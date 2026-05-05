@@ -124,6 +124,32 @@ constexpr char cfg_hkHintLikelyNRSecs[] PROGMEM = "hkHintLikelyNRSecs";
 // Event-occurred lines (auto-recover, hint-level transitions, pair
 // state changes, WiFi disconnects) stay unconditional regardless.
 constexpr char cfg_hkVerboseLogs[] PROGMEM = "hkVerboseLogs";
+
+// v43 (audit W27): single source of truth for auto-close + watchdog
+// scalar bounds + defaults. Pre-v43 these were sprinkled across
+// config.cpp (defaults), comms.cpp (cache initializers), and web.cpp
+// (the /setgdo clamp block). Bumping any one bound required touching
+// 3-4 files in lockstep.
+//
+// Frontend mirrors: the matching values appear (literally) in
+//   src/www/index.html      — `min`/`max`/`value` attributes for the
+//                             auto-close + watchdog form inputs (see
+//                             #autoCloseMinutes, #autoCloseStartMinutes,
+//                             #autoCloseEndMinutes, #hkAutoRecoverSecs,
+//                             #hkHintQuietSecs, #hkHintStaleSecs,
+//                             #hkHintLikelyNRSecs).
+//   src/www/functions.js    — clamp + default fallbacks in
+//                             saveSettings / setElementsFromStatus.
+// JavaScript/HTML have no codegen pipeline that imports C++ constexpr,
+// so they intentionally stay literal. Treat C++ constants here as the
+// canonical source-of-truth: bump the C++ constant first, then mirror
+// into index.html + functions.js. CI doesn't enforce the link.
+constexpr uint32_t AUTO_CLOSE_DEFAULT_START_MIN = 1320;  // 22:00 (default window start, minute-of-day)
+constexpr uint32_t AUTO_CLOSE_DEFAULT_END_MIN   = 360;   // 06:00 (default window end, minute-of-day)
+constexpr uint32_t AUTO_CLOSE_MAX_MINUTES       = 720;   // /setgdo upper bound for autoCloseMinutes
+constexpr uint32_t AUTO_CLOSE_MAX_TOD_MIN       = 1439;  // /setgdo upper bound for start/end (1440 - 1)
+constexpr uint32_t HK_WATCHDOG_MIN_SECS         = 60;    // /setgdo lower bound for all four hk*Secs keys
+constexpr uint32_t HK_WATCHDOG_MAX_SECS         = 7200;  // /setgdo upper bound for all four hk*Secs keys
 #ifdef ESP8266
 // On ESP8266 we save user config to a file in LittleFS
 constexpr char cfg_configFile[] PROGMEM = "user_config";
