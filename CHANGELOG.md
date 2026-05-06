@@ -10,6 +10,20 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.52 (2026-05-06)
+
+Two cleanups based on production observation of v51:
+
+**Logs UI: drop SSE entirely, pure polling.** v51's polling fallback was layered ON TOP of SSE — but the interaction was buggy. Every SSE error triggered `loadLogs()` which set the spinner visible and re-ran `loadLogPages()`, which `insertAdjacentText('afterbegin', ...)` PREPENDED the entire /showlog buffer to the existing content (duplicates). Polling's next tick then saw text that didn't start with `lastShowlogContent`, treated it as a buffer-wrap, CLEARED both panes and repopulated — the "logs flicker / disappear briefly" symptom the user reported. User's syslog showed the cascade plainly: 4-6 SSE-orphan reaps for the same UUID within seconds.
+
+v52 deletes the SSE setup from `logs.js` entirely. Pure polling at the v51 3-second cadence. Removes: the `/auth` warmup hop (no longer needed; /showlog uses standard browser-cached Digest, not the per-IP allowlist), the `/rest/events/subscribe` fetch, the EventSource setup, the `logger` event listener, the close-and-resubscribe error handler. Result: zero SSE-reconnect cascades, zero PREPEND duplication, zero pane-clear flicker. Page is "live enough" at 3-second polling — close to instant for door state changes, plenty for log viewing.
+
+Home page (`functions.js`) STAYS on SSE — its local 1-Hz uptime ticker (v51) is the primary live indicator and the SSE event volume on the home page is small (no log-line broadcasts), so the wedge pattern doesn't fire there.
+
+**Allowlist TTL: 5 min → 15 min.** Bumps `AUTH_ALLOWLIST_TTL_MS` in `web.cpp` from 5 minutes to 15 minutes. Reduces re-auth pressure on the home page's SSE subscribe — users idle on the home page for 10 minutes won't have to re-Digest. Security trade-off is minor: an attacker on a different LAN IP still can't read SSE without first authing from THEIR IP, which our enforce_same_origin / Digest gate already blocks. The allowlist TTL is purely a UX cushion for the legitimate user.
+
+Compatibility unchanged. v22-v51 SSE infrastructure still in place server-side (just no longer used by logs.js). functions.js untouched.
+
 ### v3.4.4-forceclose.51 (2026-05-06)
 
 Stops depending on SSE for "the page is live." Three independent layers — each one alone keeps the UI advancing — so even if SSE wedges (which it does on slow-draining browser tabs / homebridge poll storms / various network conditions), the page never goes stale.
