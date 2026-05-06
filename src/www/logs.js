@@ -120,40 +120,27 @@ async function loadLogs() {
     // user sees a stuck spinner. No-password installs return 200 from /auth
     // immediately (AUTHENTICATE no-ops when getPasswordRequired() is false).
     //
-    // v46: skip the /auth call if we already authed within the last 4
-    // minutes — the device's per-IP allowlist (web.cpp AUTH_ALLOWLIST_TTL_MS
-    // = 5 min) is still valid, so the SSE subscribe will pass the
-    // isAuthAllowedForIP() check without re-stamping. Eliminates the
-    // re-prompt on every page refresh that browsers without persistent
-    // Digest cache (Chrome's modern privacy default, etc.) would otherwise
-    // show. The 4-min skip window stays inside the 5-min server TTL; the
-    // next refresh after the window naturally re-stamps. localStorage is
-    // per-origin, doesn't leak to other devices on the LAN.
-    const AUTH_SKIP_WINDOW_MS = 4 * 60 * 1000;
-    const AUTH_TS_KEY = 'ratgdo-logs-last-auth-at';
-    let skipAuth = false;
+    // v49: removed the v46 localStorage skip-auth window. It had a hole:
+    // when the device rebooted, its per-IP allowlist cleared, but the
+    // browser's localStorage timestamp didn't know. The page would skip
+    // /auth, then the SSE subscribe got a 401 from the now-empty allowlist,
+    // and the recovery path was missing — the user got trapped with no
+    // working logs and no clear way to recover. Reverting to "always call
+    // /auth on page load" restores predictable behaviour. Also clean up
+    // any stale localStorage entry from prior v46 builds so users don't
+    // need to manually clear it.
+    try { localStorage.removeItem('ratgdo-logs-last-auth-at'); } catch (e) { /* ignore */ }
     try {
-        const lastAuthAt = parseInt(localStorage.getItem(AUTH_TS_KEY) || '0', 10);
-        if (lastAuthAt > 0 && (Date.now() - lastAuthAt) < AUTH_SKIP_WINDOW_MS) {
-            skipAuth = true;
-            console.log(`Skipping /auth: stamped ${Math.round((Date.now() - lastAuthAt) / 1000)}s ago, IP allowlist still warm`);
-        }
-    } catch (e) { /* localStorage blocked — fall through to normal /auth */ }
-    if (!skipAuth) {
-        try {
-            const authResp = await fetch("auth", { method: "GET" });
-            if (authResp.status !== 200) {
-                console.warn(`Logs auth failed (HTTP ${authResp.status}). Reload the page to retry.`);
-                loaderElem.style.visibility = "hidden";
-                try { localStorage.removeItem(AUTH_TS_KEY); } catch (e) { /* ignore */ }
-                return;
-            }
-            try { localStorage.setItem(AUTH_TS_KEY, String(Date.now())); } catch (e) { /* ignore */ }
-        } catch (e) {
-            console.warn(`Logs auth fetch error: ${e}`);
+        const authResp = await fetch("auth", { method: "GET" });
+        if (authResp.status !== 200) {
+            console.warn(`Logs auth failed (HTTP ${authResp.status}). Reload the page to retry.`);
             loaderElem.style.visibility = "hidden";
             return;
         }
+    } catch (e) {
+        console.warn(`Logs auth fetch error: ${e}`);
+        loaderElem.style.visibility = "hidden";
+        return;
     }
     console.log("Subscribe to Server Sent Events");
     // v27: heartbeat=10 (was 0). The orphan sweep on the firmware needs
