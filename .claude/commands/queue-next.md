@@ -44,10 +44,12 @@ If a hook block, branch shift, or item failure stops the drain at item 4 of 9, t
 When an item can't be processed due to a tool/access constraint (NOT a code bug), **mark it `blocked: <reason>` and continue to the next eligible item.** Don't surface a "which option do you want" question — pick the next item autonomously. This is the autonomy goal: environmental issues never halt the batch.
 
 Examples:
-- `pio` not found on bash PATH → try `/c/Users/Dakot/.platformio/penv/Scripts/pio.exe` directly. If still inaccessible, mark item `blocked: pio inaccessible from this shell` and pivot.
+- `pio` not on bash PATH AND not at `~/.platformio/penv/Scripts/pio.exe` → **pio is not installed locally on this machine**; mark item `blocked: pio not installed locally; verify via CI after merge` and pivot. Items needing pio (W45/W42/W44 + any firmware-behavior change) will always be blocked until pio is installed or a CI-build-then-fix workflow exists.
 - SSH to Pi times out → mark `blocked: pi unreachable`, pivot.
 - Device HTTP endpoint times out → mark `blocked: device unreachable`, pivot.
 - A required env var or file not present → mark blocked, pivot.
+
+**Items pivot-able without pio**: W41 (header move), W43 (rename), W47 (comment sweep — defer the comms.cpp:3318 fix), W48 (doc audit), W46 (eslint via npx).
 
 Code-bug failures (build fails on real syntax error, tests fail on logic) are NOT environmental — those go through the hook-recovery retry budget and STOP if exhausted.
 
