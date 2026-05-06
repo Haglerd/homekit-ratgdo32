@@ -363,7 +363,20 @@ SseWriteResult clientWriteEx(WiFiClient client, const char *data)
     if (avail >= 0 && (size_t)avail < len)
     {
         sseBufferFullSkips++;
-        ESP_LOGD(TAG, "SSE clientWrite skipped — buffer full (need %u, have %d)", (unsigned)len, avail);
+        // v46: rate-limit the per-skip ESP_LOGD to once per 60 seconds.
+        // Pre-v46 this fired every 2-3s on a slow subscriber and dominated
+        // the 16KB log buffer, wrapping out short-lived user-action lines
+        // (like the force-close ESP_LOGI sequence) before /showlog could
+        // be fetched. The cumulative `sseBufferFullSkips` counter stays
+        // accurate; the log line just samples instead of streaming.
+        static uint32_t lastSkipLogMs = 0;
+        uint32_t nowMs = (uint32_t)_millis();
+        if ((uint32_t)(nowMs - lastSkipLogMs) > 60000UL || lastSkipLogMs == 0)
+        {
+            ESP_LOGD(TAG, "SSE clientWrite skipped — buffer full (need %u, have %d) [%lu total skips]",
+                     (unsigned)len, avail, (unsigned long)sseBufferFullSkips);
+            lastSkipLogMs = nowMs;
+        }
         return SseWriteResult::BUFFER_FULL;
     }
 #ifndef ESP8266
