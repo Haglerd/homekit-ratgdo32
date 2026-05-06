@@ -89,32 +89,31 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           release-tag: ${{ steps.tag.outputs.latestTag }}
 
-      # v23: removed `continue-on-error: true`. Previously a silent failure
-      # here would let the firmware-bins step proceed with a stale manifest
-      # on origin/main → end users OTA the new bins via a pinned-old
-      # manifest.json that points at older filenames. The current logic
-      # (set -e + git push) now hard-fails the workflow if anything goes
-      # wrong, so we either ship a consistent release or no release at all.
-      - name: Commit updated manifest.json to docs/
+      # v48: stash the action-json'd manifest.json to /tmp so the
+      # combined-commit step at the end of this workflow can restore +
+      # commit it together with the firmware bins. Pre-v48 there were
+      # TWO separate commits to main per release (manifest first, then
+      # bins ~4 min later after the build). Each commit triggered the
+      # auto-managed `pages-build-deployment` workflow with built-in
+      # cancel-in-progress concurrency, so the first Pages build always
+      # got cancelled by the second push, doubling the user-visible
+      # publish wait from ~4 min to ~8 min. Combining the two pushes
+      # halves the cancel churn — Pages fires once, runs to completion.
+      #
+      # Side benefit: if `pio run` fails, the manifest never lands on
+      # main pointing at non-existent bins. Pre-v48 the early manifest
+      # commit could leave a broken manifest on main if the build later
+      # failed; v48 makes manifest+bins atomic w.r.t. main.
+      #
+      # The action-json steps above already edited docs/manifest.json
+      # in the release-tag checkout's working tree. We just stash that
+      # version to /tmp here. The actual checkout-to-main + git add +
+      # commit + push happens in the combined step after the build.
+      - name: Stash updated manifest.json for combined commit
         run: |
           set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Save the action-json edits before we move HEAD off the release tag
           cp docs/manifest.json /tmp/manifest.json
-          git fetch origin main
-          # Force-reset working copy to origin/main, discarding the release-tag
-          # checkout. Any local mods to docs/manifest.json are intentionally lost
-          # (we'll restore the desired content from /tmp on the next line).
-          git checkout -B main origin/main
-          cp /tmp/manifest.json docs/manifest.json
-          if ! git diff --quiet docs/manifest.json; then
-            git add docs/manifest.json
-            git commit -m "Update manifest.json for ${{ steps.tag.outputs.latestTag }}"
-            git push origin main
-          else
-            echo "manifest.json unchanged on main, skipping commit"
-          fi
+          echo "Stashed manifest.json (v48: combined-commit pattern)"
         shell: bash
 
       - uses: actions/cache@v3
@@ -176,7 +175,16 @@ jobs:
       # per cut for a file the OTA path never reads. The .elf still gets
       # uploaded to the GitHub release attachments above (used by the
       # crash-backtrace decoder), and as an actions/upload-artifact below.
-      - name: Commit firmware bins to docs/firmware/ (flash bins only — no .elf)
+      #
+      # v48: combined manifest.json + firmware bins into a SINGLE commit/push
+      # to main. Pre-v48 there were two separate pushes (manifest before the
+      # build, bins after) → the auto-managed pages-build-deployment workflow
+      # got cancelled twice per release because of its cancel-in-progress
+      # concurrency, doubling the user-visible publish wait from ~4 min
+      # to ~8 min. v48 stashes manifest.json to /tmp in the earlier "Stash
+      # updated manifest.json" step, then restores+commits it together
+      # with the bins here. One push → one Pages build → no cancellation.
+      - name: Commit manifest.json + firmware bins to docs/ (flash bins only — no .elf)
         run: |
           set -e
           git config user.name "github-actions[bot]"
@@ -190,18 +198,27 @@ jobs:
           git checkout -fB main origin/main
           mkdir -p docs/firmware
           cp /tmp/fwbins/* docs/firmware/
-          # Stage only the device-OTA-relevant files. The .elf is
-          # deliberately NOT staged here — it stays as a release attachment
-          # + workflow artifact only. See MH7-redux comment block above.
-          git add docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin \
+          # v48: restore the action-json'd manifest.json from /tmp (saved
+          # in the earlier "Stash updated manifest.json" step before the build).
+          # If /tmp/manifest.json doesn't exist, the workflow was triggered
+          # in some non-standard way; fail loudly so the issue is visible.
+          if [ ! -f /tmp/manifest.json ]; then
+            echo "ERROR: /tmp/manifest.json missing — earlier 'Stash updated manifest.json' step did not run"
+            exit 1
+          fi
+          cp /tmp/manifest.json docs/manifest.json
+          # Stage manifest.json + the four device-OTA-relevant flash bins.
+          # The .elf is deliberately NOT staged — see MH7-redux comment above.
+          git add docs/manifest.json \
+                  docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.bin \
                   docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.bootloader.bin \
                   docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.partitions.bin \
                   docs/firmware/homekit-ratgdo32-${{ steps.tag.outputs.latestTag }}.firmware.md5
           if ! git diff --cached --quiet; then
-            git commit -m "Upload firmware bins for ${{ steps.tag.outputs.latestTag }}"
+            git commit -m "Release ${{ steps.tag.outputs.latestTag }}: manifest + firmware bins"
             git push origin main
           else
-            echo "firmware bins already present on main, skipping commit"
+            echo "manifest + firmware bins already up-to-date on main, skipping commit"
           fi
         shell: bash
 
