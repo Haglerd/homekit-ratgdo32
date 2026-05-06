@@ -14,10 +14,10 @@
       "Bash(ls C:/Users/Dakot/.platformio/*)",
       "Bash(curl -s http://10.112.60.151/*)",
       "Bash(curl -s --max-time * http://10.112.60.151/*)",
-      "Bash(/c/Users/Dakot/.platformio/penv/Scripts/pio.exe *)",
-      "Bash(/c/Users/Dakot/.platformio/penv/Scripts/platformio.exe *)",
-      "Bash(C:/Users/Dakot/.platformio/penv/Scripts/pio.exe *)",
-      "Bash(C:/Users/Dakot/.platformio/penv/Scripts/platformio.exe *)"
+      "Bash(/c/Users/Dakot/AppData/Roaming/Python/Python310/Scripts/pio.exe *)",
+      "Bash(/c/Users/Dakot/AppData/Roaming/Python/Python310/Scripts/platformio.exe *)",
+      "Bash(C:/Users/Dakot/AppData/Roaming/Python/Python310/Scripts/pio.exe *)",
+      "Bash(C:/Users/Dakot/AppData/Roaming/Python/Python310/Scripts/platformio.exe *)"
     ],
     "deny": [
       "Bash(rm -rf *)",

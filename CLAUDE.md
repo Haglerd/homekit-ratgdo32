@@ -18,26 +18,23 @@ ESP32 firmware fork that exposes a ratgdo garage-door controller as a HomeKit ac
 - **Force-close / auto-close state machine** is the #1 bug source. Touching it requires a state diagram and reasoned transition coverage.
 - **Fork-only PRs**: `gh pr create --repo Haglerd/homekit-ratgdo32`. The CLI has misfired against upstream multiple times — explicit `--repo` every time.
 
-## Build tools — pio is CI-only on this machine
+## Build tools — pio.exe location
 
-**PlatformIO is NOT installed locally.** No `~/.platformio/`, no `pio.exe` in PATH, no VSCode extension. Builds happen on GitHub Actions, not locally.
+PlatformIO Core is installed via `pip install --user platformio`. The binary lives at:
 
-**For autonomous fix loops:** any QUEUE.md item whose `Acceptance` requires running `pio run` locally must be marked `blocked: pio not installed locally; verify via CI after merge`. The agent does NOT halt the drain — it pivots to the next pio-independent item.
+```
+C:\Users\Dakot\AppData\Roaming\Python\Python310\Scripts\pio.exe
+```
 
-Pio-INDEPENDENT items (can run autonomously):
-- Hygiene refactors that don't change behavior (W41 header move, W43 buffer rename — verified by `git grep`)
-- Documentation audits (W48)
-- Ticker.detach() comment sweep (W47 — comments only; the comms.cpp:3318 fix needs build verify, gate that piece)
-- npm-based tooling (W46 eslint — `npx works` per local check)
-- ssh-based Pi log work
+That directory is NOT on bash PATH, so call by full path:
 
-Pio-DEPENDENT items (mark blocked, defer to CI):
-- W45 `-Wshadow=local` build flag + warning triage
-- W42 mutex on userSettings::get (build verify needed)
-- W44 DST cap (build verify needed)
-- Any change that produces firmware behavior changes
+```bash
+/c/Users/Dakot/AppData/Roaming/Python/Python310/Scripts/pio.exe run -e ratgdo_esp32dev
+```
 
-If you want these auto-fixable locally, install PlatformIO Core (`pip install platformio` or use the VSCode extension); the path will then live at `~/.platformio/penv/Scripts/pio.exe`. **Never invoke `pwsh.exe` / `powershell.exe`** to wrap pio — they're in the deny list and will pause the session.
+Both forward-slash and Windows-style paths are pre-allowed in `.claude/settings.json`. **Never invoke `pwsh.exe` / `powershell.exe`** to wrap pio — they're in the deny list and will pause the session.
+
+All autonomous build verification (W45 -Wshadow flag triage, W42 mutex build-check, W44 DST build-check, etc.) now works locally — no CI-only blockers.
 
 ## Pi log access
 
