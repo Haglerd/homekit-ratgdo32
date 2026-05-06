@@ -9,13 +9,21 @@
       "Bash(gh api *)",
       "Bash(gh issue list *)",
       "Bash(gh issue view *)",
-      "Bash(ssh dakot@100.121.96.114 *)"
+      "Bash(ssh dakot@100.121.96.114 *)",
+      "Bash(ls /c/Users/Dakot/.platformio/*)",
+      "Bash(ls C:/Users/Dakot/.platformio/*)",
+      "Bash(curl -s http://10.112.60.151/*)",
+      "Bash(curl -s --max-time * http://10.112.60.151/*)"
     ],
     "deny": [
       "Bash(rm -rf *)",
       "Bash(git push --force *)",
       "Bash(git push -f *)",
-      "Bash(git reset --hard *)"
+      "Bash(git reset --hard *)",
+      "Bash(pwsh *)",
+      "Bash(pwsh.exe *)",
+      "Bash(powershell *)",
+      "Bash(powershell.exe *)"
     ]
   },
   "hooks": {
