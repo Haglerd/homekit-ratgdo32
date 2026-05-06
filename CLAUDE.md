@@ -18,6 +18,16 @@ ESP32 firmware fork that exposes a ratgdo garage-door controller as a HomeKit ac
 - **Force-close / auto-close state machine** is the #1 bug source. Touching it requires a state diagram and reasoned transition coverage.
 - **Fork-only PRs**: `gh pr create --repo Haglerd/homekit-ratgdo32`. The CLI has misfired against upstream multiple times — explicit `--repo` every time.
 
+## Build tools — pio.exe path
+
+Bash PATH on Windows git-bash often doesn't include `~/.platformio/penv/Scripts/`. If `pio` resolves to "command not found", invoke by full path:
+
+```bash
+/c/Users/Dakot/.platformio/penv/Scripts/pio.exe run -e ratgdo_esp32dev
+```
+
+Both forward-slash and Windows-style paths are pre-allowed in `.claude/settings.json`. **Never invoke `pwsh.exe` or `powershell.exe`** to wrap pio — they're in the deny list and will pause the session.
+
 ## Pi log access
 
 ratgdo syslog forwards to `dakot@100.121.96.114` (UDP 5140), files at `/var/log/ratgdo.log` + `.1` + `.2.gz`. World-readable. `ssh -i ~/.ssh/pi_key dakot@100.121.96.114 'cat /var/log/ratgdo.log'` for live tail.
