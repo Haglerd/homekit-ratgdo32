@@ -119,17 +119,42 @@ async function loadLogs() {
     // returns 401 to EventSource, EventSource has no API to retry, the
     // user sees a stuck spinner. No-password installs return 200 from /auth
     // immediately (AUTHENTICATE no-ops when getPasswordRequired() is false).
+    //
+    // v45: skip the /auth call if we already authed within the last 4
+    // minutes — the device's per-IP allowlist (web.cpp:793 AUTH_ALLOWLIST_TTL_MS
+    // = 5 min) is still valid, so the SSE subscribe will pass the
+    // isAuthAllowedForIP() check without re-stamping. This eliminates the
+    // re-prompt on every page refresh that some browsers (those that don't
+    // persist Digest creds across navigations) would otherwise show. The
+    // 4-min skip window stays inside the 5-min server TTL; the next refresh
+    // after the window naturally re-stamps. localStorage persists across
+    // refreshes within the same browser profile but is per-tab/origin and
+    // doesn't leak to other devices on the LAN.
+    const AUTH_SKIP_WINDOW_MS = 4 * 60 * 1000;
+    const AUTH_TS_KEY = 'ratgdo-logs-last-auth-at';
+    let skipAuth = false;
     try {
-        const authResp = await fetch("auth", { method: "GET" });
-        if (authResp.status !== 200) {
-            console.warn(`Logs auth failed (HTTP ${authResp.status}). Reload the page to retry.`);
+        const lastAuthAt = parseInt(localStorage.getItem(AUTH_TS_KEY) || '0', 10);
+        if (lastAuthAt > 0 && (Date.now() - lastAuthAt) < AUTH_SKIP_WINDOW_MS) {
+            skipAuth = true;
+            console.log(`Skipping /auth: stamped ${Math.round((Date.now() - lastAuthAt) / 1000)}s ago, IP allowlist still warm`);
+        }
+    } catch (e) { /* localStorage blocked — fall through to normal /auth */ }
+    if (!skipAuth) {
+        try {
+            const authResp = await fetch("auth", { method: "GET" });
+            if (authResp.status !== 200) {
+                console.warn(`Logs auth failed (HTTP ${authResp.status}). Reload the page to retry.`);
+                loaderElem.style.visibility = "hidden";
+                try { localStorage.removeItem(AUTH_TS_KEY); } catch (e) { /* ignore */ }
+                return;
+            }
+            try { localStorage.setItem(AUTH_TS_KEY, String(Date.now())); } catch (e) { /* ignore */ }
+        } catch (e) {
+            console.warn(`Logs auth fetch error: ${e}`);
             loaderElem.style.visibility = "hidden";
             return;
         }
-    } catch (e) {
-        console.warn(`Logs auth fetch error: ${e}`);
-        loaderElem.style.visibility = "hidden";
-        return;
     }
     console.log("Subscribe to Server Sent Events");
     // v27: heartbeat=10 (was 0). The orphan sweep on the firmware needs
