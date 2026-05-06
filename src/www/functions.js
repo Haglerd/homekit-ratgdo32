@@ -931,10 +931,15 @@ async function checkStatus() {
                             spanPercent.innerHTML = msgJson.uploadPercent.toString() + '%&nbsp';
                         });
                         evtSource.addEventListener("error", (event) => {
-                            // If an error occurs close the connection, then wait 5 seconds and try again.
-                            console.warn(`SSE error while attempting to connect to ${evtSource.url}`);
-                            evtSource.close();
-                            delayStatusFn.push(setTimeout(checkStatus, 5000));
+                            // v50: do NOT call evtSource.close() + setTimeout — both were
+                            // re-implementing what EventSource does natively. Closing forced
+                            // readyState=CLOSED and defeated WHATWG-spec'd auto-reconnect;
+                            // the 5s setTimeout was a slower replacement than the browser's
+                            // own 3s default (overridden to exactly 3000 by SSEHandler's
+                            // `retry:` field in v50). The 30s checkHeartbeat watchdog above
+                            // (line 907-913) is the right place for "no message in N seconds"
+                            // recovery and is preserved unchanged.
+                            console.warn(`SSE error (readyState=${evtSource.readyState}, url=${evtSource.url}) — browser will auto-reconnect`);
                         });
 
                     })

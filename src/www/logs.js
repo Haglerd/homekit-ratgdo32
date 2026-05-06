@@ -183,9 +183,15 @@ async function loadLogs() {
                 }
             });
             evtSource.addEventListener("error", (event) => {
-                // If an error occurs close the connection.
-                console.log(`SSE error occurred while attempting to connect to ${evtSource.url}`);
-                evtSource.close();
+                // v50: do NOT call evtSource.close() — that permanently transitions
+                // EventSource.readyState to CLOSED and DEFEATS the browser's
+                // spec'd auto-reconnect (WHATWG SSE §9.2.6 reconnection step).
+                // Pre-v50 a single transient TCP error left the page in a stale
+                // state forever until manual F5. Now the browser reconnects within
+                // the `retry: 3000` interval set by SSEHandler. The persistent
+                // clientUUID in localStorage (v27) makes handle_subscribe's
+                // foundExisting branch reuse the same slot on reconnect.
+                console.log(`SSE error (readyState=${evtSource.readyState}, url=${evtSource.url}) — browser will auto-reconnect`);
             });
         })
         .catch((error) => {

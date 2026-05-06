@@ -2445,7 +2445,22 @@ void SSEHandler(uint32_t channel)
     }
 #endif
     server.setContentLength(CONTENT_LENGTH_UNKNOWN); // the payload can go on forever
-    server.sendContent_P(PSTR("HTTP/1.1 200 OK\nContent-Type: text/event-stream;\nConnection: keep-alive\nCache-Control: no-cache\nAccess-Control-Allow-Origin: *\n\n"));
+    // v50: send `retry: 3000` SSE field in the initial handshake. Tells
+    // the browser EventSource to use 3s as the reconnect interval after
+    // any disconnect — overrides Chrome's exponential backoff (3s → 6s →
+    // 12s → 24s+ after repeated failures) which on a slightly-flaky link
+    // can become minutes-long stale-UI windows. 3000 ms matches industry
+    // defaults (Mercure, sse-pubsub, nginx push-stream). Format: SSE field
+    // must be its own line in the stream after the HTTP-header block ends.
+    server.sendContent_P(PSTR(
+        "HTTP/1.1 200 OK\n"
+        "Content-Type: text/event-stream;\n"
+        "Connection: keep-alive\n"
+        "Cache-Control: no-cache\n"
+        "Access-Control-Allow-Origin: *\n"
+        "\n"
+        "retry: 3000\n"
+        "\n"));
     s.SSEconnected = true;
     s.SSEfailCount = 0;
     // v27: stamp lastActivity on successful EventSource handshake. Without
