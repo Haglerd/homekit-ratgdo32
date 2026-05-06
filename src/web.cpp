@@ -824,8 +824,11 @@ void handle_notfound()
 // got a 401 with no recovery path.
 //
 // Fix: when AUTHENTICATE() succeeds for ANY handler, record the client
-// IP with a 5-minute TTL. The SSE log subscribe path then checks the
-// allowlist instead of running Digest itself. Browser flow:
+// IP with a 15-minute TTL (v52: bumped from 5 minutes to reduce re-auth
+// pressure on the home page's SSE subscribe — users idle on the home
+// page for 10+ minutes won't have to re-Digest). The SSE log subscribe
+// path then checks the allowlist instead of running Digest itself.
+// Browser flow:
 //   1. User navigates to a log/admin page  → Digest challenge → enters
 //      password → AUTHENTICATE() succeeds → IP recorded.
 //   2. Web UI's JS opens EventSource to /rest/events/subscribe?log
@@ -838,7 +841,7 @@ void handle_notfound()
 // + ESP32 share the same code; AUTHENTICATE() macro is the only
 // arch-specific part.
 #define AUTH_ALLOWLIST_SLOTS    4
-#define AUTH_ALLOWLIST_TTL_MS   (5UL * 60UL * 1000UL)
+#define AUTH_ALLOWLIST_TTL_MS   (15UL * 60UL * 1000UL)
 struct AuthAllowEntry {
     IPAddress ip;
     uint32_t  expiresMs;
@@ -2579,7 +2582,7 @@ void handle_subscribe()
     // The flow now: user navigates to any auth'd page (`/showlog`,
     // `/setgdo`, `/reboot`, etc.) → AUTHENTICATE() macro succeeds →
     // recordAuthSuccess() stamps their IP in `authAllowlist` with
-    // 5-min TTL. The web UI's JS then opens EventSource to ?log=1
+    // 15-min TTL (v52). The web UI's JS then opens EventSource to ?log=1
     // from the same origin → this check passes → SSE stream opens.
     // An attacker on a different LAN IP can't read the SSE log feed
     // without first AUTHENTICATE()-ing from their IP. No-password
