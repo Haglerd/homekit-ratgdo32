@@ -1,6 +1,6 @@
 {
   "name": "homekit-ratgdo",
-  "version": "v3.4.4-forceclose.44",
+  "version": "v3.4.4-forceclose.47",
   "new_install_prompt_erase": true,
   "new_install_improv_wait_time": 60,
   "builds": [
@@ -8,11 +8,11 @@
       "chipFamily": "ESP32",
       "parts": [
         {
-          "path": "https://github.com/Haglerd/homekit-ratgdo32/releases/download/v3.4.4-forceclose.44/homekit-ratgdo32-v3.4.4-forceclose.44.bootloader.bin",
+          "path": "https://github.com/Haglerd/homekit-ratgdo32/releases/download/v3.4.4-forceclose.47/homekit-ratgdo32-v3.4.4-forceclose.47.bootloader.bin",
           "offset": 4096
         },
         {
-          "path": "https://github.com/Haglerd/homekit-ratgdo32/releases/download/v3.4.4-forceclose.44/homekit-ratgdo32-v3.4.4-forceclose.44.partitions.bin",
+          "path": "https://github.com/Haglerd/homekit-ratgdo32/releases/download/v3.4.4-forceclose.47/homekit-ratgdo32-v3.4.4-forceclose.47.partitions.bin",
           "offset": 32768
         },
         {
@@ -20,7 +20,7 @@
           "offset": 57344
         },
         {
-          "path": "https://github.com/Haglerd/homekit-ratgdo32/releases/download/v3.4.4-forceclose.44/homekit-ratgdo32-v3.4.4-forceclose.44.firmware.bin",
+          "path": "https://github.com/Haglerd/homekit-ratgdo32/releases/download/v3.4.4-forceclose.47/homekit-ratgdo32-v3.4.4-forceclose.47.firmware.bin",
           "offset": 65536
         }
       ]
