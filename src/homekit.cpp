@@ -36,6 +36,7 @@
 #include "softAP.h"
 #include "led.h"
 #include "provision.h"
+#include "instrumentation.h"
 
 #ifdef RATGDO32_DISCO
 #include "vehicle.h"
@@ -635,11 +636,8 @@ static void homekit_health_log()
     // "No Response" diagnosis. If this number keeps growing while WiFi
     // is connected and paired_controllers > 0, the hub stopped talking.
     int32_t lastReadAgo = hapLastReadSec ? (int32_t)(nowSec - hapLastReadSec) : -1;
-    // Instrumentation snapshot for the periodic diag log:
-    //   logMtxMaxWaitMs : max log mutex wait this 180s window (climbing
-    //                     pre-freeze = wedged SSE subscriber blocking
-    //                     the broadcast)
-    //   sseSlowWrites   : SSE writes > CLIENT_SLOW_WRITE_MS since boot
+    // Instrumentation snapshot for the periodic diag log. Counters declared
+    // in instrumentation.h; see that header for the per-counter description.
     //   tickDriftMs     : cadence drift vs expected 180s (positive growth
     //                     = esp_timer task starved)
     //   maxAllocBlock   : largest contiguous heap (gap from freeHeap =
@@ -648,18 +646,6 @@ static void homekit_health_log()
     int32_t tickDriftMs = 0;
     if (lastTickMs) tickDriftMs = (int32_t)(((uint32_t)_millis() - (uint32_t)lastTickMs) - HOMEKIT_HEALTH_INTERVAL_MS);
     lastTickMs = _millis();
-    extern volatile uint32_t logMtxMaxWaitMs;
-    extern volatile uint32_t sseSlowWrites;
-    // sseBufferFullSkips: cumulative lwIP-send-buffer-full skips since
-    // boot (flow-control diagnostic; trend matters more than absolute).
-    extern volatile uint32_t sseBufferFullSkips;
-    // sseSlotsAlloc: live count refreshed by sweep_sse_orphans.
-    // sseOrphansReaped: per-window counter, atomic-exchange-zeroed below.
-    extern volatile uint32_t sseSlotsAlloc;
-    extern volatile uint32_t sseOrphansReaped;
-    // MH6 instrumentation: peak JSON length this window. Inform future
-    // STATUS_JSON_BUFFER_SIZE retune decision in v34.
-    extern volatile uint32_t statusJsonPeakLen;
     uint32_t mtxWait     = __atomic_exchange_n(&logMtxMaxWaitMs,    0u, __ATOMIC_RELAXED);
     uint32_t sseReaped   = __atomic_exchange_n(&sseOrphansReaped,   0u, __ATOMIC_RELAXED);
     uint32_t jsonPeak    = __atomic_exchange_n(&statusJsonPeakLen,  0u, __ATOMIC_RELAXED);

@@ -30,6 +30,7 @@
 #include "config.h"
 #include "utilities.h"
 #include "web.h"
+#include "instrumentation.h"
 
 // Logger tag
 static const char *TAG = "ratgdo-logger";
