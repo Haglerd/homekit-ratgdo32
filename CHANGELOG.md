@@ -10,6 +10,16 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.49 (2026-05-06)
+
+Two logs UX hotfixes for issues observed post-v47/v48 deploy.
+
+**Logs UX — remove the v46 localStorage auth-skip (the auth trap).** v46's `logs.js` cached a 4-min localStorage timestamp and skipped `/auth` if it was warm, intending to avoid re-prompts on refresh. The hole: when the device reboots, the per-IP allowlist clears, but the browser's localStorage timestamp doesn't know. Refresh after reboot → page skips `/auth` → SSE-subscribe gets 401 from the now-empty allowlist → no recovery code path → user sees prompt-then-rejected loop with no working logs (and clearing localStorage is the only manual recovery). v49 reverts to "always call `/auth` on page load" (the pre-v46 behavior) and explicitly clears any stale `ratgdo-logs-last-auth-at` localStorage entry on every page load so existing users don't have to manually purge it. Cost: an occasional Digest prompt on refresh when the browser's auth cache lapses. Benefit: no more dead-page-after-reboot trap.
+
+**Force-close logs visible at DEBUG — `/status.json` poll demoted to ESP_LOGV.** v46/v47 promoted force-close to ESP_LOGI but they were still being wrapped out of the 16KB on-device ring buffer because of the `/status.json` poll noise. Homebridge polls `/status.json` at 1Hz steady-state and 1.5Hz during force-close, each poll producing two debug lines (`Client X requesting: /status.json` + `JSON status: ... build time ...`). At ~120 lines/min that's half the buffer per minute — a 16-second post-force-close fetch could miss the lines (verified against `/var/log/ratgdo.log` on the syslog Pi: force-close fired at uptime 00:04:24, on-device buffer captured starting at 00:04:34, the lines fell into the wrap window). v49 demotes both lines from `ESP_LOGD` to `ESP_LOGV` (verbose, level 5). At DEBUG (level 4) the poll noise is now invisible while every other request log stays at LOGD (`/setgdo`, `/reboot`, `/reconnectHomeKit`, `/showlog`, etc. — fired on user actions and exactly what you want to see). The `/rest/events/subscribe` and `/rest/events/unsubscribe` endpoints get the same treatment (also high-frequency from the SSE re-subscribe cycle when `mechanism 2` reaps a wedged subscriber). VERBOSE level still shows everything for deep debugging.
+
+**Out of scope for v49**: live-log SSE wedging (browser tab keeps wedging the SSE TCP buffer to `have 0` even after v47's class-5d reap; mechanism 2 keeps re-reaping but the underlying browser-side drain issue isn't fixed). Will scope as a separate v50 investigation.
+
 ### v3.4.4-forceclose.48 (2026-05-05)
 
 Workflow optimization. Halves the user-visible Pages-publish wait per release by combining the two `release.yml` commits to `main` into a single commit.
