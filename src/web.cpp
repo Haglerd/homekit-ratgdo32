@@ -34,9 +34,12 @@
 #include <ESPmDNS.h>
 #ifndef ESP8266
 // v24: setsockopt(SO_SNDTIMEO) on SSE TCP sockets to bound write times.
+// v47: setsockopt(TCP_KEEPIDLE/INTVL/CNT) on SSE TCP sockets so kernel
+// detects silently-dropped peers within ~60s.
 // esp_timer_get_time for clientWrite slow-write instrumentation.
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <netinet/tcp.h>
 #include <esp_timer.h>
 #endif
 #endif
@@ -204,6 +207,22 @@ constexpr char gitTaggedURL[] = "https://raw.githubusercontent.com/" _GITUSER "/
 //                 whose lwIP cache hasn't caught up.
 #define SSE_PREHANDSHAKE_TIMEOUT_MS  5000UL
 #define SSE_IDLE_TIMEOUT_MS         300000UL
+// v47: consecutive BUFFER_FULL count threshold for declaring a subscriber
+// wedged. After this many flow-control skips with no successful drain in
+// between, the sweep marks the slot pendingRemove. Justification:
+//   - 30 increments at the typical 1-event/s broadcast cadence = 30s
+//     real-time reap, 10x faster than the 300s SSE_IDLE_TIMEOUT_MS belt-
+//     and-suspenders 5c sweep.
+//   - At 100ms minimum broadcast cadence (RATGDO_STATUS burst) = 3s,
+//     comfortably above typical Tailscale DERP relay handover (2-3s)
+//     and below 4s LTE backpressure clearing windows.
+//   - A successful clientWriteEx (OK only — NOT BUFFER_FULL) resets the
+//     counter, so a chronically-slow-but-occasionally-draining peer
+//     stays connected.
+//   - Heartbeat-only slots never accumulate: heartbeat payload is small
+//     (a few hundred bytes, easily fits in lwIP's send buffer), so
+//     availableForWrite never returns < len absent a true wedge.
+constexpr uint32_t SSE_MAX_CONSECUTIVE_BUFFER_FULL = 30;
 struct SSESubscription
 {
     IPAddress clientIP;
@@ -239,6 +258,16 @@ struct SSESubscription
     // bad delta on the wrap tick — recoverable next tick.
     volatile uint32_t subscribedAt;
     volatile uint32_t lastActivity;
+    // v47: consecutive BUFFER_FULL count for sweep class 5d (wedged on
+    // flow control). Reset to 0 on every SseWriteResult::OK; incremented
+    // (atomic) on every SseWriteResult::BUFFER_FULL. Sweep reaps the
+    // slot when this exceeds SSE_MAX_CONSECUTIVE_BUFFER_FULL.
+    // Multi-writer (loopTask + esp_timer + LOG broadcast tasks),
+    // single-reader (sweep on loopTask). 32-bit aligned writes are
+    // atomic on Xtensa; uses __atomic_* for fetch-add safety under the
+    // multi-writer fanout. Same pattern as sseSlowWrites/sseBufferFullSkips
+    // global counters.
+    volatile uint32_t consecutiveBufferFull;
 };
 SSESubscription subscription[SSE_MAX_CHANNELS];
 // During firmware update note which subscribed client is updating.
@@ -363,7 +392,20 @@ SseWriteResult clientWriteEx(WiFiClient client, const char *data)
     if (avail >= 0 && (size_t)avail < len)
     {
         sseBufferFullSkips++;
-        ESP_LOGD(TAG, "SSE clientWrite skipped — buffer full (need %u, have %d)", (unsigned)len, avail);
+        // v46: rate-limit the per-skip ESP_LOGD to once per 60 seconds.
+        // Pre-v46 this fired every 2-3s on a slow subscriber and dominated
+        // the 16KB log buffer, wrapping out short-lived user-action lines
+        // (like the force-close ESP_LOGI sequence) before /showlog could
+        // be fetched. The cumulative `sseBufferFullSkips` counter stays
+        // accurate; the log line just samples instead of streaming.
+        static uint32_t lastSkipLogMs = 0;
+        uint32_t nowMs = (uint32_t)_millis();
+        if ((uint32_t)(nowMs - lastSkipLogMs) > 60000UL || lastSkipLogMs == 0)
+        {
+            ESP_LOGD(TAG, "SSE clientWrite skipped — buffer full (need %u, have %d) [%lu total skips]",
+                     (unsigned)len, avail, (unsigned long)sseBufferFullSkips);
+            lastSkipLogMs = nowMs;
+        }
         return SseWriteResult::BUFFER_FULL;
     }
 #ifndef ESP8266
@@ -730,6 +772,7 @@ void setup_web()
         subscription[i].pendingRemove = false;
         subscription[i].subscribedAt = 0;
         subscription[i].lastActivity = 0;
+        subscription[i].consecutiveBufferFull = 0;  // v47
     }
 
     // Initialize connection tracking
@@ -2063,6 +2106,7 @@ void removeSSEsubscription(SSESubscription *s)
     // faster than _millis ticks. Both are cheap writes.
     s->subscribedAt = 0;
     s->lastActivity = 0;
+    s->consecutiveBufferFull = 0;  // v47
 }
 
 // v22: drain SSESubscription entries flagged pendingRemove during a
@@ -2156,6 +2200,33 @@ void sweep_sse_orphans()
             __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
             reapedThisTick++;
             continue;
+        }
+        // 5d) wedged on flow control — v47. After SSE_MAX_CONSECUTIVE_BUFFER_FULL
+        // successive availableForWrite-rejects with no successful OK in between,
+        // the peer is alive at the kernel level (otherwise 5b or keepalive would
+        // have caught it) but not draining at the application level. Industry
+        // pattern for Mercure / nginx SSE proxies / sse-pubsub.
+        //
+        // EXCEPTION: skip the OTA slot. helperUpdateUnderway points
+        // firmwareUpdateSub at one of these slots; OTA progress chunks are large
+        // enough to legitimately hit BUFFER_FULL during a slow upload tail. The
+        // existing v22 deferred-cleanup discipline + the OTA's own UPLOAD_FILE_END
+        // / UPLOAD_FILE_ABORTED handlers clear firmwareUpdateSub — by the time
+        // this exception lapses, the OTA has finished.
+        if (s.SSEconnected && &s != firmwareUpdateSub)
+        {
+            uint32_t cbf = __atomic_load_n(&s.consecutiveBufferFull, __ATOMIC_RELAXED);
+            if (cbf >= SSE_MAX_CONSECUTIVE_BUFFER_FULL)
+            {
+                ESP_LOGW(TAG, "SSE orphan (wedged on flow-control) channel=%u uuid=%s ip=%s consecutive=%u — reaping",
+                         (unsigned)i, s.clientUUID.c_str(),
+                         s.clientIP.toString().c_str(),
+                         (unsigned)cbf);
+                s.pendingRemove = true;
+                __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
+                reapedThisTick++;
+                continue;
+            }
         }
         // 5c) idle past the watchdog
         if (s.SSEconnected && s.lastActivity != 0)
@@ -2277,11 +2348,19 @@ void SSEheartbeat(SSESubscription *s)
         // (both = "broadcast loop reached this slot and tried"; peer is
         // alive enough to keep). Only FAILED skips the stamp — that's
         // the real wedge signal where lwIP rejected bytes for delivery.
+        // v47: also reset/increment consecutiveBufferFull for sweep 5d.
         SseWriteResult r = clientWriteEx(s->client, localBuf);
-        if (r != SseWriteResult::FAILED)
+        if (r == SseWriteResult::OK)
         {
             s->lastActivity = (uint32_t)_millis();
+            __atomic_store_n(&s->consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
         }
+        else if (r == SseWriteResult::BUFFER_FULL)
+        {
+            s->lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
+            __atomic_fetch_add(&s->consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+        }
+        // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
         YIELD();
     }
     else
@@ -2322,10 +2401,27 @@ void SSEHandler(uint32_t channel)
     int fd = s.client.fd();
     if (fd >= 0)
     {
+        // v24: SO_SNDTIMEO bounds writes to CLIENT_SLOW_WRITE_MS.
         struct timeval sndto;
         sndto.tv_sec = 0;
         sndto.tv_usec = CLIENT_SLOW_WRITE_MS * 1000;
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sndto, sizeof(sndto));
+
+        // v47: OS-level TCP keepalive. Detects silently-dropped peers
+        // (laptop-lid-close, switch-off, NAT-table-flush) within
+        // KEEPIDLE + KEEPCNT*KEEPINTVL = 60s, well inside the 300s
+        // SSE_IDLE_TIMEOUT_MS belt-and-suspenders. lwIP flips the socket
+        // to !connected() once KEEPCNT probes fail; the next sweep tick
+        // reaps via class 5b. SO_KEEPALIVE per-socket is OFF by default
+        // even when LWIP_TCP_KEEPALIVE=y in sdkconfig — must enable.
+        const int keepAliveOn = 1;
+        const int keepIdle    = 30;  // seconds before first probe
+        const int keepIntvl   = 10;  // seconds between probes
+        const int keepCnt     = 3;   // probes before giving up
+        setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &keepAliveOn, sizeof(keepAliveOn));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keepIdle,    sizeof(keepIdle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepIntvl,   sizeof(keepIntvl));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepCnt,     sizeof(keepCnt));
     }
 #endif
     server.setContentLength(CONTENT_LENGTH_UNKNOWN); // the payload can go on forever
@@ -2583,6 +2679,7 @@ void handle_subscribe()
     subscription[channel].pendingRemove = false;
     subscription[channel].subscribedAt = (uint32_t)_millis();
     subscription[channel].lastActivity = (uint32_t)_millis();
+    subscription[channel].consecutiveBufferFull = 0;  // v47
 
     // 11. counter bumped only AFTER all rejection paths exhausted.
     if (!foundExisting)
@@ -2786,11 +2883,19 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                             // v29: tri-state — stamp on OK or BUFFER_FULL, only skip
                             // on FAILED (real wedge). Tailscale / congested-link
                             // subscribers no longer get reaped every 120s.
+                            // v47: also reset/increment consecutiveBufferFull for sweep 5d.
                             SseWriteResult r = clientWriteEx(subscription[i].client, wb);
-                            if (r != SseWriteResult::FAILED)
+                            if (r == SseWriteResult::OK)
                             {
                                 subscription[i].lastActivity = (uint32_t)_millis();
+                                __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
                             }
+                            else if (r == SseWriteResult::BUFFER_FULL)
+                            {
+                                subscription[i].lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
+                                __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                            }
+                            // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
                         }
                     }
                 }
@@ -2814,11 +2919,19 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                     {
                         // v29: tri-state — stamp on OK or BUFFER_FULL, only skip
                         // on FAILED (real wedge). Same rationale as LOG_MESSAGE.
+                        // v47: also reset/increment consecutiveBufferFull for sweep 5d.
                         SseWriteResult r = clientWriteEx(subscription[i].client, wb);
-                        if (r != SseWriteResult::FAILED)
+                        if (r == SseWriteResult::OK)
                         {
                             subscription[i].lastActivity = (uint32_t)_millis(); // v27
+                            __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
                         }
+                        else if (r == SseWriteResult::BUFFER_FULL)
+                        {
+                            subscription[i].lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
+                            __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                        }
+                        // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
                     }
                 }
             }
@@ -3014,9 +3127,21 @@ void handle_firmware_upload()
                     // upload spans >300s (large firmware on slow link).
                     // v29: tri-state — stamp on OK or BUFFER_FULL, only
                     // skip on FAILED (real wedge).
+                    // v47: also reset/increment consecutiveBufferFull for sweep 5d.
+                    // (OTA slot is exempted from the sweep 5d reap, but the
+                    // counter is still tracked for visibility / consistency.)
                     SseWriteResult r = clientWriteEx(firmwareUpdateSub->client, writeBuffer);
-                    if (r != SseWriteResult::FAILED)
+                    if (r == SseWriteResult::OK)
+                    {
                         firmwareUpdateSub->lastActivity = (uint32_t)_millis();
+                        __atomic_store_n(&firmwareUpdateSub->consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
+                    }
+                    else if (r == SseWriteResult::BUFFER_FULL)
+                    {
+                        firmwareUpdateSub->lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
+                        __atomic_fetch_add(&firmwareUpdateSub->consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                    }
+                    // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
                     GIVE_MUTEX();
                 }
             }

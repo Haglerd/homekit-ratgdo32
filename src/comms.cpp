@@ -2747,7 +2747,7 @@ static void send_force_close_release_then_maybe_retry()
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release retry");
     }
     send_get_status();
-    ESP_LOGD(TAG, "FORCE CLOSE: attempt %d release sent", forceCloseAttempt);
+    ESP_LOGI(TAG, "FORCE CLOSE: attempt %d release sent", forceCloseAttempt);
 
     // If the first press alone got the door moving toward Closed, override
     // wasn't needed (photo-eye wasn't actually blocking). Skip second press
@@ -2763,7 +2763,7 @@ static void send_force_close_release_then_maybe_retry()
 
     if (forceCloseAttempt < 2)
     {
-        ESP_LOGD(TAG, "FORCE CLOSE: scheduling attempt %d after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
+        ESP_LOGI(TAG, "FORCE CLOSE: scheduling attempt %d after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
         // v38 (audit W2): release-store from esp_timer-task producer
         // (this function runs via TTCtimer/delayFnCall). Pairs with
         // acquire-load in force_close_drain_pending_arm on loopTask.
@@ -2779,7 +2779,7 @@ static void send_force_close_release_then_maybe_retry()
 static void send_force_close_press()
 {
     forceCloseAttempt++;
-    ESP_LOGD(TAG, "FORCE CLOSE: attempt %d/2 press hold=%lums", forceCloseAttempt, forceCloseHoldMsCached);
+    ESP_LOGI(TAG, "FORCE CLOSE: attempt %d/2 press hold=%lums", forceCloseAttempt, forceCloseHoldMsCached);
 
     PacketData data;
     data.type = PacketDataType::DoorAction;
