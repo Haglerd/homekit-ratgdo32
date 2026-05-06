@@ -10,6 +10,20 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.50 (2026-05-06)
+
+Fixes the long-standing "stale-UI until manual page refresh" bug that affects both `/logs.html` (live log streaming + HomeKit tab) and `/index.html` (status counter not advancing). **The bug predates v47 — it predates the entire fork's v22+ SSE work.** Origin is upstream commit `4e3063d` (Aug 2025), which introduced an `evtSource.close()` call in the EventSource error handler that permanently transitions readyState to CLOSED and defeats the browser's spec'd auto-reconnect (WHATWG SSE §9.2.6). Once any single transient TCP error fired, the page died for SSE until F5. Investigation cross-referenced against `/var/log/ratgdo.log` on the syslog Pi confirmed the "TCP dropped" reaps every 30-50s were paired AT THE SAME millisecond with `Sending 304 not modified .../logs.html` requests — those reaps were the CONSEQUENCE of the user pressing F5 to recover, not the CAUSE.
+
+**Three surgical changes:**
+
+- `src/www/logs.js:185-189` — removed `evtSource.close()` from the error handler. Browser auto-reconnects per spec.
+- `src/www/functions.js:933-938` — same removal (the explicit `setTimeout(checkStatus, 5000)` was re-implementing what EventSource does natively, less robustly). The separate 30-second `checkHeartbeat` watchdog at `functions.js:907-913` is preserved unchanged — it correctly handles "connection looks alive but device sent nothing" which is a different failure mode.
+- `src/web.cpp:2447-2448` — added `retry: 3000\n\n` SSE field to the handshake. Overrides browser-default exponential backoff (Chrome escalates 3s → 6s → 12s → 24s+ after repeated failures), pinning reconnect interval at 3s for predictable recovery. 3000 ms matches Mercure / sse-pubsub / nginx push-stream defaults.
+
+**Compatibility:** v47's per-socket TCP keepalive STAYS (correctly catches truly-dead peers — was not the cause of this bug). v47's mechanism 2 (sweep class 5d / consecutive-BUFFER_FULL reap) STAYS — verified working in production. v24's SO_SNDTIMEO STAYS. The persistent UUID in localStorage (v27) makes the auto-reconnect path reuse the same SSE slot via handle_subscribe's foundExisting branch (web.cpp:2632-2651). All v22-v49 SSE infrastructure is untouched.
+
+**Upstream-compatible:** this fix improves upstream's behavior too. Could be PR'd back to upstream as a bug fix — recommend doing so.
+
 ### v3.4.4-forceclose.49 (2026-05-06)
 
 Two logs UX hotfixes for issues observed post-v47/v48 deploy.
