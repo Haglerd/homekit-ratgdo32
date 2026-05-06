@@ -10,6 +10,20 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.55 (2026-05-06)
+
+Fixes a deterministic crash during OTA firmware update. Verified via the v52 crash log on the user's device: panic at 80% upload progress, `LoadProhibited` exception in `esp_timer` task. addr2line resolved the backtrace to `homekit_health_log()` at `src/homekit.cpp:679` calling `uxTaskGetStackHighWaterMark()` on a stale task handle.
+
+**Mechanism.** `helperUpdateUnderway` calls "Shutdown HomeKit and GDO communications" at OTA start, which tears down HomeSpan tasks (freeing the `autoPoll` task's TCB). The `homekit_health_log` diagnostic Ticker fires every 3 minutes on a separate `esp_timer` callback. If it fires mid-OTA — which it CAN because that Ticker isn't gated by the `suspend_service_loop` flag that protects most other drains (v43's W20 fix) — `homeSpan.getAutoPollTask()` returns a stale pointer to the now-freed TCB. `uxTaskGetStackHighWaterMark(stale_handle)` dereferences it → panic.
+
+The crash is timing-dependent. Probability rises with OTA duration: a slow upload (Tailscale relay, weak WiFi, large firmware) is more likely to span the 3-minute Ticker boundary. User's v52 crash hit it at 80%; second OTA attempt completed cleanly because the 3-minute Ticker boundary didn't fall during the upload window. **Both successful AND failed OTA attempts in production used to be possible — this fix makes ALL OTA attempts safe.**
+
+**Fix.** Bail early in `homekit_health_log()` (`homekit.cpp:610`) if `firmware_update_in_progress()` returns true. Same defense-in-depth pattern audit W20 used for `service_timer_loop` drains (v43). Health logging naturally resumes after the post-OTA reboot.
+
+**Compatibility.** No protected surfaces touched. v22-v54 SSE infrastructure unchanged. v47 keepalive + class 5d untouched. The `firmware_update_in_progress()` predicate already existed (web.cpp:290) and was already used elsewhere in `homekit.cpp:777`. Adding one more callsite. Zero new state, zero new race surface.
+
+**Worth filing upstream.** This bug exists in upstream too — the `homekit_health_log` Ticker is fork-only (added by Haglerd/v22+), but the underlying race pattern (Ticker callback firing on freed task state during shutdown) is generic. The fix is upstream-mergeable as a defensive guard.
+
 ### v3.4.4-forceclose.54 (2026-05-06)
 
 Fixes the underlying "first prompt rejected, second prompt accepted" + "logs.html prompts more often than settings" UX issues. **Root cause was identified:** arduino-esp32's Digest auth implementation issues a fresh nonce per response and does NOT set `stale=true` on stale-nonce 401 responses. When a browser sends an Authorization header with a cached (now-stale) nonce, the device responds 401 with a fresh challenge. Per WHATWG Digest spec, a server should set `stale=true` to tell the browser "your password is correct, just retry with this new nonce silently." Without that flag, browsers treat the 401 as wrong-credentials and re-prompt the user. Symptom: every 3-second `/showlog` polling fetch could trigger a re-prompt, so /logs.html became prompt-heavy compared to /settings (which only auths once per click).
