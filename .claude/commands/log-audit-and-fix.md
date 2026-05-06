@@ -25,12 +25,22 @@ A finding can be picked for auto-fix ONLY IF all of these are true:
 
 If multiple items pass, sort by priority (P0 first, then P1) and earliest recurrence; auto-fix up to **5 items per run**. Each gets its own commit + PR. The branch-shift guard hook fires between items — if anything shifted the branch mid-batch, processing stops at that point.
 
+## Recovery from hook fires (autonomy: fix the fix, don't abort)
+
+| Hook | Auto-recovery |
+|------|---------------|
+| AI-attribution | strip forbidden patterns from commit message, retry |
+| Branch-shift | `git checkout main && git pull --ff-only origin main`, reset stamp, retry |
+| Fork-PR | rebuild `gh pr create` with `--repo Haglerd/homekit-ratgdo32`, retry |
+
+3-retry budget per hook+item. After exhaustion, mark item `in-progress (auto-fix exhausted)` and continue to next item.
+
 ## Hard stops
 
-- Branch-guard hook flags branch shift → abort, surface to user
-- Fork-PR hook would block (would happen at gh pr create) → abort
-- AI-attribution hook would block → abort, fix message
-- pio build fails locally before commit → leave WIP, mark item `in-progress (build failed)`, exit
+- Cap reached (5/run)
+- Queue empty
+- Item is `needs-human-planning`
+- pio build fails locally — invoke software-engineer to fix the build error, retry the build. After 3 retries, mark `in-progress (build broken)` and continue to next item.
 
 ## After auto-fix
 
