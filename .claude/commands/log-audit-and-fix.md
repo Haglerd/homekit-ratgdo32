@@ -6,7 +6,7 @@ Combined log audit + autonomous fix pipeline. Used by the scheduled task for una
 
 1. Invoke `log-auditor` agent → pulls device + Pi logs since checkpoint, appends new findings to QUEUE.md
 2. If new findings count > 0, evaluate top eligible item against safety rails (below)
-3. If eligible, invoke pipeline: `planner` (if needed) → `software-engineer` → `code-review` → `unit-tester` → `/pr`
+3. If eligible, invoke pipeline: fetch the linked issue's plan (it was generated at audit time), skip planner, route directly to `software-engineer` → `code-review` → `unit-tester` → `/pr` (with `Closes #<issue-number>`)
 4. If no eligible item, report "queued N findings, none auto-fixable, awaiting human triage" and exit
 
 ## Safety rails — auto-fix eligibility
@@ -16,10 +16,12 @@ A finding can be picked for auto-fix ONLY IF all of these are true:
 - **Severity** is P0 OR P1
 - **Status** is `queued`
 - **Source** is `log-audit` (don't auto-fix human-curated audit findings — those wait for /queue-next manually)
-- **NOT** touching force-close / auto-close state machines (those require planner-first per project rule, which auto-fix can't satisfy without human in loop)
-- **NOT** a heap-budget change > 5KB delta (ESP8266 portability needs explicit human review)
-- **NOT** touching > 3 files (broader changes get queued but not auto-shipped)
-- **Recurrence count >= 2** OR **severity P0** (one-off events might be transient; recurring ones are real)
+- **Has linked issue with embedded plan** (issue body includes "Recommended fix (planner sub-agent output)" with actual content, not "Needs human planning")
+- **Auto-fix eligibility marker** in the issue body says `auto-fixable` (NOT `needs-human-planning`)
+- **NOT** touching force-close / auto-close state machines
+- **NOT** a heap-budget change > 5KB delta
+- **NOT** touching > 3 files
+- **Recurrence count >= 2** OR **severity P0**
 
 If multiple items pass, pick highest priority + earliest recurrence. Only ONE auto-fix per run.
 
