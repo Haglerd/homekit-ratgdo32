@@ -47,6 +47,18 @@ window.addEventListener('beforeunload', () => {
 });
 var sysLogLoaded = false;
 var tmpLogMsgs = [];
+// v51: lightweight /showlog poll as a fallback to SSE. Even when SSE is
+// wedged on flow-control (browser tab can't drain TCP fast enough — common
+// during homebridge poll storms or DOM-render-heavy moments), the page
+// stays current via this poll. Compares the FULL buffer text to the
+// last-seen content and only inserts the suffix that's actually new.
+// 3-second interval is "feels live" without flooding the device with
+// /showlog GETs (which are auth'd and serialize through the WebServer
+// task). Stops when the page is hidden via Page Visibility API to avoid
+// background-tab CPU/network burn.
+const SHOWLOG_POLL_INTERVAL_MS = 3000;
+var showlogPoller = undefined;
+var lastShowlogContent = "";
 
 function msToTime(duration) {
     let seconds = Math.floor((duration / 1000) % 60),
@@ -183,15 +195,29 @@ async function loadLogs() {
                 }
             });
             evtSource.addEventListener("error", (event) => {
-                // v50: do NOT call evtSource.close() — that permanently transitions
-                // EventSource.readyState to CLOSED and DEFEATS the browser's
-                // spec'd auto-reconnect (WHATWG SSE §9.2.6 reconnection step).
-                // Pre-v50 a single transient TCP error left the page in a stale
-                // state forever until manual F5. Now the browser reconnects within
-                // the `retry: 3000` interval set by SSEHandler. The persistent
-                // clientUUID in localStorage (v27) makes handle_subscribe's
-                // foundExisting branch reuse the same slot on reconnect.
-                console.log(`SSE error (readyState=${evtSource.readyState}, url=${evtSource.url}) — browser will auto-reconnect`);
+                // v51: explicit re-subscribe on error.
+                // Why not rely on EventSource's spec'd auto-reconnect?
+                // The device's SSE URL scheme requires a TWO-STEP setup:
+                //   1. POST/GET /rest/events/subscribe → returns /rest/events/<channel>
+                //   2. EventSource opens /rest/events/<channel>
+                // EventSource's auto-reconnect retries step 2's URL only —
+                // but if a sweep reap (5b/5c/5d) freed that channel slot
+                // between drop and retry, the device returns 404 to the
+                // GET /rest/events/<channel>, EventSource sees 404, and
+                // CLOSES PERMANENTLY (browser does NOT auto-reconnect on
+                // HTTP 404 — only on network errors). We must therefore
+                // close + re-run the subscribe path to get a fresh
+                // channel allocation. handle_subscribe's foundExisting
+                // branch (web.cpp ~2643) reuses the slot when possible
+                // via persistent UUID (v27).
+                //
+                // v50 attempted to drop this close+resubscribe in favour
+                // of pure spec-compliant auto-reconnect — but EventSource
+                // can't recover from the 404-after-reap case, so we kept
+                // hitting the same trap. v51 restores explicit recovery.
+                console.warn(`SSE error (readyState=${evtSource.readyState}, url=${evtSource.url}) — closing + re-subscribing in 1s`);
+                try { evtSource.close(); } catch (e) { /* ignore */ }
+                setTimeout(loadLogs, 1000);
             });
         })
         .catch((error) => {
@@ -284,7 +310,79 @@ async function loadLogPages() {
             loaderElem.style.visibility = "hidden";
             console.log("All logs loaded");
             //console.log(results);
+            // v51: kick off the /showlog polling fallback after the
+            // initial buffer is loaded. If SSE is delivering events
+            // live, this is mostly idempotent (lastShowlogContent
+            // already covers the SSE-appended lines). If SSE is
+            // wedged, this is what makes the page feel live.
+            startShowlogPoller();
         });
+}
+
+// v51: poll /showlog every SHOWLOG_POLL_INTERVAL_MS and append any
+// content the user hasn't seen yet. Diffs the full buffer text against
+// `lastShowlogContent` — when the device's ring buffer adds new lines,
+// the suffix grows; when the buffer wraps, the diff falls back to a
+// full replace (rare, only happens under sustained log volume).
+//
+// Pauses while the tab is hidden (Page Visibility API) — browsers
+// throttle background tabs anyway, and this avoids burning the
+// device's serialised WebServer task on /showlog GETs the user
+// can't see. Resumes immediately on visibilitychange-to-visible.
+function startShowlogPoller() {
+    if (showlogPoller !== undefined) return; // already running
+    // Seed lastShowlogContent with the initial /showlog text so the
+    // first poll diff is a no-op (avoids replaying the same content
+    // into the DOM). Read what's already in the showlog pre tag.
+    lastShowlogContent = document.getElementById("showlog").innerText || "";
+    const tick = async () => {
+        if (document.visibilityState === "hidden") return;
+        try {
+            const resp = await fetch("showlog");
+            if (!resp.ok || resp.status !== 200) return;
+            let text = await resp.text();
+            text = text.replaceAll('\r\n', '\n');
+            if (text === lastShowlogContent) return; // nothing new
+            // Find the suffix that's new since last poll. If the
+            // device's buffer wrapped (rare), text won't start with
+            // lastShowlogContent — fall back to full replace then.
+            let newPart = "";
+            if (lastShowlogContent && text.startsWith(lastShowlogContent)) {
+                newPart = text.slice(lastShowlogContent.length);
+            } else if (lastShowlogContent) {
+                // Buffer wrapped — replace everything to stay consistent.
+                document.getElementById("showlog").innerText = "";
+                document.getElementById("homekitlog").innerText = "";
+                newPart = text;
+            } else {
+                newPart = text;
+            }
+            lastShowlogContent = text;
+            if (!newPart.trim()) return;
+            // Same split-by-isHomeKitLine logic as the SSE path uses.
+            const newLines = newPart.split('\n').filter(l => l.length > 0);
+            const hkLines = newLines.filter(isHomeKitLine);
+            const sysLines = newLines.filter(l => !isHomeKitLine(l));
+            if (sysLines.length > 0) {
+                const divElem = document.getElementById("logTab");
+                const scroll = (divElem.scrollHeight - divElem.scrollTop - divElem.clientHeight) < 10;
+                document.getElementById("showlog").insertAdjacentText('beforeend', sysLines.join('\n') + '\n');
+                if (scroll) divElem.scrollTop = divElem.scrollHeight;
+            }
+            if (hkLines.length > 0) {
+                const hkPane = document.getElementById("homekitTab");
+                const hkScroll = (hkPane.scrollHeight - hkPane.scrollTop - hkPane.clientHeight) < 10;
+                document.getElementById("homekitlog").insertAdjacentText('beforeend', hkLines.join('\n') + '\n');
+                if (hkScroll) hkPane.scrollTop = hkPane.scrollHeight;
+            }
+        } catch (e) { /* network blip — try again next interval */ }
+    };
+    showlogPoller = setInterval(tick, SHOWLOG_POLL_INTERVAL_MS);
+    // Tick immediately on visibilitychange-to-visible so the user
+    // doesn't wait up to SHOWLOG_POLL_INTERVAL_MS after un-hiding.
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") tick();
+    });
 }
 
 async function clearLog(reload) {

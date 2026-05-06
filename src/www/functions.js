@@ -11,6 +11,14 @@ var serverStatus = {};          // object into which all server status is held.
 var checkHeartbeat = undefined; // setTimeout for heartbeat timeout
 var evtSource = undefined;      // for Server Sent Events (SSE)
 var delayStatusFn = [];         // to keep track of possible checkStatus timeouts
+// v51: local uptime ticker — anchors on every authoritative status
+// update from the device and increments the displayed counter every
+// second between updates. Eliminates dependence on SSE for "is the
+// counter advancing" UX. If SSE wedges (mechanism 2 territory) the
+// counter still advances locally; next status update re-anchors it.
+var serverUptimeBaseline = 0;   // last device-reported upTime in ms
+var serverUptimeAnchorMs = 0;   // local Date.now() when baseline was set
+var localUptimeTicker = undefined; // setInterval handle, started once
 // v28: persist UUID across page reloads — see logs.js for full
 // rationale (foundExisting branch reuses slot instead of leaking).
 // Fallback to a fresh per-load UUID if localStorage is blocked
@@ -128,6 +136,24 @@ async function setServerTimeZone(location) {
         console.log("Time zone not found, tell server to use UTC.");
         await setGDO("timeZone", "Etc/UTC;UTC0");
     }
+}
+
+// v51: 1-Hz local ticker that increments the displayed uptime span
+// between authoritative status updates from the device. Called once
+// the first time `upTime` arrives in setElementsFromStatus; thereafter
+// runs forever, re-anchoring on every status update to bound drift.
+// Doesn't depend on SSE working — if SSE wedges, the counter keeps
+// counting from the last anchored value, so the user sees a live
+// counter even when the underlying transport is failing.
+function startLocalUptimeTicker() {
+    const upTimeElem = document.getElementById("upTime");
+    if (!upTimeElem) return;
+    localUptimeTicker = setInterval(() => {
+        if (serverUptimeAnchorMs === 0) return;
+        const localElapsed = Date.now() - serverUptimeAnchorMs;
+        const currentUptimeMs = serverUptimeBaseline + localElapsed;
+        upTimeElem.innerHTML = msToTime(currentUptimeMs);
+    }, 1000);
 }
 
 // convert milliseconds to dd:hh:mm:ss used to calculate server uptime
@@ -440,6 +466,19 @@ function setElementsFromStatus(status) {
                 document.getElementById(key).innerHTML = msToTime(value);
                 date.setTime(Date.now() - value);
                 document.getElementById("lastRebootAt").innerHTML = date.toLocaleString(tzFormat, tzOptions);
+                // v51: re-base the local uptime counter on every authoritative
+                // status update from the device. The local 1-Hz tick (started
+                // once via startLocalUptimeTicker, defined below) increments
+                // the displayed value between updates so the user sees a
+                // live-counting clock even if SSE is wedged. This baseline
+                // reset keeps drift bounded — every status update (whether
+                // from SSE or the initial /status.json fetch) re-anchors the
+                // counter to the device's authoritative value.
+                serverUptimeBaseline = value;
+                serverUptimeAnchorMs = Date.now();
+                if (localUptimeTicker === undefined) {
+                    startLocalUptimeTicker();
+                }
                 break;
             case "GDOSecurityType":
                 document.getElementById(key).innerHTML = (value == 1) ? "Sec+" : (value == 2) ? "Sec+&nbsp;2.0" : "Dry&nbsp;Contact";
@@ -931,15 +970,28 @@ async function checkStatus() {
                             spanPercent.innerHTML = msgJson.uploadPercent.toString() + '%&nbsp';
                         });
                         evtSource.addEventListener("error", (event) => {
-                            // v50: do NOT call evtSource.close() + setTimeout — both were
-                            // re-implementing what EventSource does natively. Closing forced
-                            // readyState=CLOSED and defeated WHATWG-spec'd auto-reconnect;
-                            // the 5s setTimeout was a slower replacement than the browser's
-                            // own 3s default (overridden to exactly 3000 by SSEHandler's
-                            // `retry:` field in v50). The 30s checkHeartbeat watchdog above
-                            // (line 907-913) is the right place for "no message in N seconds"
-                            // recovery and is preserved unchanged.
-                            console.warn(`SSE error (readyState=${evtSource.readyState}, url=${evtSource.url}) — browser will auto-reconnect`);
+                            // v51: explicit re-subscribe on error. The device's
+                            // SSE URL scheme requires subscribe + EventSource as
+                            // a two-step dance (subscribe returns /rest/events/N,
+                            // then EventSource opens that URL). EventSource's
+                            // spec'd auto-reconnect only retries step 2's URL —
+                            // if a sweep reap (5b/5c/5d) frees the slot between
+                            // drop and retry, the device returns 404 and the
+                            // browser CLOSES the EventSource permanently (no
+                            // auto-reconnect on HTTP 404). Must close + re-run
+                            // the full setup. checkStatus() with a 1s delay
+                            // re-enters the same registerEvents path as the
+                            // initial page load. v50 tried to remove this in
+                            // favour of pure spec auto-reconnect — wrong call,
+                            // because the 404-after-reap case is unrecoverable
+                            // without an explicit re-subscribe.
+                            //
+                            // The separate 30s checkHeartbeat watchdog above
+                            // (line 907-913) is preserved unchanged — different
+                            // failure mode (silent device, not network drop).
+                            console.warn(`SSE error (readyState=${evtSource.readyState}, url=${evtSource.url}) — closing + re-subscribing in 1s`);
+                            try { evtSource.close(); } catch (e) { /* ignore */ }
+                            delayStatusFn.push(setTimeout(checkStatus, 1000));
                         });
 
                     })
