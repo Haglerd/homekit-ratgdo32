@@ -78,34 +78,22 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 
 ---
 
-## Upstream filing — homekit-ratgdo32
+## Fork-internal investigation items
 
-Detailed plan in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md` (gitignored). **NEVER file the next round without explicit user authorization.**
+These are findings whose fork-side fix is partial or unverified. Fork work proceeds regardless of upstream applicability.
 
-### [P1] R1 — Issue #170 (free-slot scan canonical-marker mismatch)
-**Status:** ✅ filed 2026-05-05; awaiting reaction
-**Notes:** if no reply within ~7 days, treat as normal-for-dkerr64.
+### [P3] R-?-fork — Verify `homeSpan.processSerialCommand` thread-safety, fix if unsafe
+**Status:** queued — investigation gate
+**Acceptance:** read HomeSpan repo + docs for re-entrancy contract on `processSerialCommand` while `autoPoll` is running. If documented thread-safe → close as non-finding. If unsafe → defer through a flag drained on the autoPoll task (same v24 reconnect-pattern).
+**Notes:** caller is `helperFactoryReset` in `web.cpp`. Confidence on the bug is LOW — could turn out to be a non-issue.
 
-### [P2] R2 — `subscriptionCount` desync + Log mutex held across IO (paired)
-**Status:** queued — gated on R1 reaction
-**Acceptance:** two issues filed against `ratgdo/homekit-ratgdo32` cross-referencing #170; PRs follow only after acknowledgement.
-**Notes:** issue text drafts in cherry-pick plan Section 8.
+---
 
-### [P2] R3 — SSE self-detach (`SSEheartbeat → removeSSEsubscription`)
-**Status:** queued — gated on R2 acknowledgement
-**Notes:** propose `pendingRemove` bool but defer to maintainer's preferred shape.
+## Upstream filing — DO NOT FILE
 
-### [P2] R4a — Issue A — CSRF / same-origin guard
-**Status:** queued — independent of SSE chain
-**Notes:** issue first, A2 PR follows discussion. Mention fork's substring + missing-headers bypass traps.
+The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are already shipped in the fork. Their upstream-applicability is tracked in audit-notes/ for awareness only — **fork work proceeds regardless of upstream interest**.
 
-### [P2] R4b — Issue B — `userSettings::get` mutex-free race
-**Status:** queued — independent
-**Notes:** mention fork hit this in practice with Ticker-context reader.
-
-### [P3] R-? — Issue C — `processSerialCommand` from web task (optional)
-**Status:** blocked — verify HomeSpan thread-safety contract first
-**Notes:** drop if HomeSpan documents thread safety.
+**Hard rule:** No upstream PRs, no upstream issue filings, no cherry-picks to upstream. Issue #170 was filed historically; do not let it set precedent. Future agents reading this queue: if you find yourself drafting a `gh pr create --repo ratgdo/...`, STOP — that's not how this fork operates.
 
 ---
 
