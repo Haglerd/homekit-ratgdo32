@@ -610,6 +610,20 @@ void homekit_refresh_watchdog_config()
 static void homekit_health_log()
 {
     if (rebooting) return;
+    // v55: bail early during OTA. helperUpdateUnderway calls
+    // "Shutdown HomeKit and GDO communications" which tears down
+    // HomeSpan tasks (freeing the autoPoll task TCB). This Ticker
+    // keeps firing every 3 min on a separate timer. If it fires
+    // mid-OTA, homeSpan.getAutoPollTask() at line 677 returns a
+    // stale pointer to the freed TCB and the subsequent
+    // uxTaskGetStackHighWaterMark dereferences it → LoadProhibited
+    // panic in esp_timer task. Verified via the v52 crash log:
+    // crashed at 80% upload, addr2line resolved to homekit.cpp:679
+    // calling prvTaskCheckFreeStackSpace on the stale apTask.
+    // Same pattern as the audit's W20 fix that defers other drains
+    // during OTA. Health logging resumes naturally after the
+    // post-OTA reboot.
+    if (firmware_update_in_progress()) return;
     int rssi = WiFi.isConnected() ? WiFi.RSSI() : 0;
     const char *wifiState = WiFi.isConnected() ? "connected" : "disconnected";
     // v24: read the cached count instead of iterating HomeSpan's list
