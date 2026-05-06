@@ -23,7 +23,7 @@ A finding can be picked for auto-fix ONLY IF all of these are true:
 - **NOT** touching > 3 files
 - **Recurrence count >= 2** OR **severity P0**
 
-If multiple items pass, pick highest priority + earliest recurrence. Only ONE auto-fix per run.
+If multiple items pass, sort by priority (P0 first, then P1) and earliest recurrence; auto-fix up to **5 items per run**. Each gets its own commit + PR. The branch-shift guard hook fires between items — if anything shifted the branch mid-batch, processing stops at that point.
 
 ## Hard stops
 
@@ -42,6 +42,6 @@ If multiple items pass, pick highest priority + earliest recurrence. Only ONE au
 ## Don't
 
 - Don't merge the PR. Ever. PR is the human review gate.
-- Don't run more than 1 fix per scheduled invocation. Preserves quality control.
+- Don't run more than 5 fixes per scheduled invocation (current cap; adjust here if it proves too aggressive or too slow).
 - Don't auto-pick force-close / auto-close state-machine items. The fork's own rule says these need state diagrams and planner review. The planner can produce them, but an autonomous chain can drift; better to wait for a human-in-loop session.
 - Don't run /audit (the broad code audit) automatically. That's a separate manual decision.
