@@ -1380,7 +1380,23 @@ void handle_everything()
     if (builtInUri.count(uri) > 0)
     {
         // requested page matches one of our built-in handlers
-        ESP_LOGD(TAG, "Client %s requesting: %s (method: %s)", server.client().remoteIP().toString().c_str(), uri, http_methods[method]);
+        // v49: demote the polling-noise endpoints (/status.json, SSE
+        // subscribe/unsubscribe) from ESP_LOGD to ESP_LOGV so DEBUG output
+        // doesn't flood the 16KB on-device ring buffer and wrap user-action
+        // lines (force-close ESP_LOGI, auto-close fire ESP_LOGW) before
+        // /showlog can capture them. Homebridge polls /status.json at 1Hz
+        // steady-state and 1.5Hz during force-close — that alone produced
+        // ~120 lines/min at DEBUG, half the buffer per minute. Other
+        // endpoints (/setgdo, /reboot, /reconnectHomeKit, /showlog, etc.)
+        // stay at LOGD because they fire on user actions and are exactly
+        // what you want to see when debugging.
+        bool quietPath = (strcmp(uri, "/status.json") == 0
+                       || strcmp(uri, "/rest/events/subscribe") == 0
+                       || strcmp(uri, "/rest/events/unsubscribe") == 0);
+        if (quietPath)
+            ESP_LOGV(TAG, "Client %s requesting: %s (method: %s)", server.client().remoteIP().toString().c_str(), uri, http_methods[method]);
+        else
+            ESP_LOGD(TAG, "Client %s requesting: %s (method: %s)", server.client().remoteIP().toString().c_str(), uri, http_methods[method]);
         if (method == builtInUri.at(uri).first)
         {
             builtInUri.at(uri).second();
@@ -1732,7 +1748,11 @@ void handle_status()
         // times/min and burying every other log message. The 95%-buffer
         // WARNING above still fires at WARN level — that's the actionable
         // signal. To see these again, set log level to DEBUG in settings.
-        ESP_LOGD(TAG, "JSON status: %d (%d%%), build time %lums, response time: %lums", (int)jsonLen, (int)(jsonLen * 100 / STATUS_JSON_BUFFER_SIZE), build_time, response_time);
+        // v49: demoted to ESP_LOGV (was ESP_LOGD). Pairs with the /status.json
+        // request-line demotion above — homebridge's 1-1.5Hz status polls
+        // produced ~120 lines/min of low-value output that wrapped user-
+        // action lines out of the 16KB on-device ring buffer.
+        ESP_LOGV(TAG, "JSON status: %d (%d%%), build time %lums, response time: %lums", (int)jsonLen, (int)(jsonLen * 100 / STATUS_JSON_BUFFER_SIZE), build_time, response_time);
     }
     return;
 }
