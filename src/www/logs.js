@@ -123,23 +123,43 @@ async function loadLogs() {
     sysLogLoaded = false;
     tmpLogMsgs.length = 0;
     loaderElem.style.visibility = "visible";
-    // v52: pure polling design. No SSE setup, no /auth call.
-    // /showlog is auth'd via standard browser Digest cache (no
-    // per-IP allowlist needed for non-SSE GETs). Initial load
-    // fetches /showlog + /showrebootlog + /crashlog + /status.json
-    // in parallel, then startShowlogPoller takes over for live
-    // updates every SHOWLOG_POLL_INTERVAL_MS.
+    // v52: pure polling design (no SSE).
+    // v53: restored single /auth fetch BEFORE the parallel
+    // loadLogPages() fetches. v52 dropped the /auth call along
+    // with SSE — but loadLogPages fires THREE auth-required
+    // fetches in parallel (showlog, showrebootlog, crashlog) via
+    // Promise.allSettled. Different browsers handle three
+    // concurrent 401-with-WWW-Authenticate-Digest responses
+    // differently — most lose the prompt or cycle through it
+    // and reject creds. The pre-v52 /auth call worked because
+    // it was a SINGLE auth-receiving request, giving the
+    // browser a clean prompt-then-cache flow. /settings page
+    // works the same way — single checkAuth() → fetch("auth").
+    // Restoring matches that working pattern. Subsequent
+    // loadLogPages fetches replay the now-cached creds without
+    // any prompt confusion.
     //
-    // History note: v40-v51 used SSE for log streaming. The SSE
-    // path had repeated reconnect-cascade issues (sweep reap →
-    // close → re-subscribe → /showlog re-fetch → PREPEND duplicates
-    // → polling next tick clears panes → flicker). Polling is
-    // simpler, more reliable, "live enough" at 3s cadence. The
-    // home page (functions.js) still uses SSE because it has a
-    // local 1-Hz uptime ticker that masks any SSE wedge.
+    // /showlog is auth'd via standard browser Digest cache. The
+    // /auth call here just primes the cache cleanly. No
+    // localStorage skip (v49 removed that — caused the
+    // dead-page-after-reboot trap). No SSE error cascade
+    // (v52 removed SSE entirely — that's what caused /auth
+    // to be re-called in a loop and flash the spinner).
     //
-    // Clear out v51's localStorage skip-auth key (no longer used).
+    // Clear out v46's localStorage skip-auth key (no longer used).
     try { localStorage.removeItem('ratgdo-logs-last-auth-at'); } catch (e) { /* ignore */ }
+    try {
+        const authResp = await fetch("auth", { method: "GET" });
+        if (authResp.status !== 200) {
+            console.warn(`Logs auth failed (HTTP ${authResp.status}). Reload the page to retry.`);
+            loaderElem.style.visibility = "hidden";
+            return;
+        }
+    } catch (e) {
+        console.warn(`Logs auth fetch error: ${e}`);
+        loaderElem.style.visibility = "hidden";
+        return;
+    }
     loadLogPages();
 }
 
