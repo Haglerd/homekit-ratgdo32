@@ -10,6 +10,35 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.48 (2026-05-05)
+
+Workflow optimization. Halves the user-visible Pages-publish wait per release by combining the two `release.yml` commits to `main` into a single commit.
+
+**Why**
+
+The auto-managed `pages-build-deployment` workflow has built-in `cancel-in-progress` concurrency — every push to `main` cancels the in-flight Pages build and starts a new one. Pre-v48 each release pushed twice to `main`:
+
+1. Early commit: `Update manifest.json for vXX` (before the firmware build)
+2. Late commit: `Upload firmware bins for vXX` (after the build, ~4 min later)
+
+Plus the original PR-merge commit. So per release: PR merge → Pages #1 starts → manifest commit → Pages #1 cancelled, #2 starts → bins commit ~4 min later → Pages #2 cancelled, #3 starts → finally completes. User-visible wait: ~8 min for the bins to actually be live on Pages.
+
+**Fix**
+
+`release.yml` now does a single combined commit at the end of the workflow:
+- New `Stash updated manifest.json for combined commit` step (replaces the early `Commit updated manifest.json` step) — saves the action-json'd manifest to `/tmp` without committing or pushing.
+- The existing firmware-bins commit step is renamed `Commit manifest.json + firmware bins to docs/` and now restores `manifest.json` from `/tmp`, stages it alongside the four flash bins, and commits both with the message `Release vXX: manifest + firmware bins`. Single push, single Pages build, no cancellation.
+
+**Side benefit**
+
+If `pio run` fails mid-release, `manifest.json` no longer lands on `main` pointing at non-existent bins. Pre-v48 the early manifest commit could leave a broken manifest if the build subsequently failed. v48 makes manifest+bins atomic w.r.t. `main`.
+
+**Impact**
+
+- Pages publish wait: ~8 min → ~4 min per release.
+- Net commits to `main` per release: 2 → 1 (excluding the original PR-merge commit which is unavoidable).
+- No change to release-attachment behavior, OTA paths, or `docs/firmware/` contents.
+
 ### v3.4.4-forceclose.47 (2026-05-05)
 
 Industry-standard SSE backpressure hardening + the v46 logs UX fixes shipped together. Two SSE mechanisms (this release) layered on top of the v22+ orphan-sweep / `pendingRemove` / tri-state-`clientWriteEx` subsystem. ESP32-only (matches v24 SO_SNDTIMEO gating).
