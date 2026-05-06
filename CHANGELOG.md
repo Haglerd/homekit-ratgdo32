@@ -10,6 +10,24 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.51 (2026-05-06)
+
+Stops depending on SSE for "the page is live." Three independent layers — each one alone keeps the UI advancing — so even if SSE wedges (which it does on slow-draining browser tabs / homebridge poll storms / various network conditions), the page never goes stale.
+
+**Layer 1 — local 1-Hz uptime ticker (functions.js).** The home page's uptime span now counts up locally every second based on the device-reported `upTime` value as a baseline. Each authoritative status update (from SSE OR the initial `/status.json` fetch) re-anchors the counter to the device's value, bounding drift to "between updates." Result: the user sees the counter advance every second from the moment the page loads, regardless of SSE state. Pre-v51 the counter was frozen at the last SSE-delivered value, which on a wedged connection meant frozen-until-refresh.
+
+**Layer 2 — `/showlog` polling fallback (logs.js).** Every 3 seconds, fetch `/showlog` and append any content the user hasn't seen yet. Diffs the full buffer text against `lastShowlogContent` and inserts only the suffix that's actually new. Pauses while the tab is hidden (Page Visibility API) — browsers throttle hidden tabs anyway, no point burning device WebServer ticks for invisible content. If SSE delivers events live (best case), the diff is mostly idempotent. If SSE is wedged (the common failure mode mechanism 2 was reaping), this is what makes the page feel live. 3-second cadence matches "feels live" without flooding `/showlog` (auth'd, serialised through the WebServer task).
+
+**Layer 3 — explicit close + re-subscribe on SSE error (both files).** v50 tried to drop this in favour of pure spec-compliant auto-reconnect, but EventSource auto-reconnect only retries the channel-specific URL — and after a sweep reap (5b/5c/5d) the device returns 404 to that URL, which browsers treat as permanent failure. v51 restores explicit `close() + setTimeout(loadLogs, 1000)` (logs.js) and `close() + setTimeout(checkStatus, 1000)` (functions.js) so a sweep reap triggers a full re-subscribe via the `/rest/events/subscribe` → new EventSource flow. Persistent UUID in localStorage (v27) means `handle_subscribe`'s `foundExisting` branch reuses the slot when possible.
+
+**What stays from v50.** Server-side `retry: 3000\n\n` SSE field in `SSEHandler` — still useful for the cases where EventSource's native auto-reconnect IS appropriate (transient TCP blip, channel slot still alive). Pins reconnect to 3 seconds, overrides Chrome's exponential backoff.
+
+**Compatibility.** All v22-v49 SSE infrastructure preserved unchanged: v22 deferred-cleanup, v24 SO_SNDTIMEO, v27 persistent UUID + heartbeat=10, v29 tri-state SseWriteResult, v37/v39 auth + per-IP allowlist, v46 force-close LOGI, v47 keepalive + class 5d reap, v49 status.json LOGV demotion. The 30s `checkHeartbeat` watchdog at `functions.js:907-913` also unchanged.
+
+**Trade-off.** Layer 2 adds one /showlog GET every 3 seconds while the logs page is open and visible. /showlog returns the on-device 16KB buffer (~10-15KB after gzip-content-encoding negotiation). On the WebServer task (~100ms turnaround per /showlog) this is well within capacity — homebridge's existing 1Hz /status.json poll is the dominant non-event traffic, and that's been working fine. Net cost is ~5KB/s upstream while a logs page is open. Acceptable for "always live" UX.
+
+**Lesson logged.** SSE alone is too fragile for "the page must be live" UX on a constrained device with variable browser-side draining. Production HTTP status pages always layer polling under SSE for exactly this reason. The fork's design before v51 assumed SSE would always work; it doesn't. Architectural fix is complete now.
+
 ### v3.4.4-forceclose.50 (2026-05-06)
 
 Fixes the long-standing "stale-UI until manual page refresh" bug that affects both `/logs.html` (live log streaming + HomeKit tab) and `/index.html` (status counter not advancing). **The bug predates v47 — it predates the entire fork's v22+ SSE work.** Origin is upstream commit `4e3063d` (Aug 2025), which introduced an `evtSource.close()` call in the EventSource error handler that permanently transitions readyState to CLOSED and defeats the browser's spec'd auto-reconnect (WHATWG SSE §9.2.6). Once any single transient TCP error fired, the page died for SSE until F5. Investigation cross-referenced against `/var/log/ratgdo.log` on the syslog Pi confirmed the "TCP dropped" reaps every 30-50s were paired AT THE SAME millisecond with `Sending 304 not modified .../logs.html` requests — those reaps were the CONSEQUENCE of the user pressing F5 to recover, not the CAUSE.
