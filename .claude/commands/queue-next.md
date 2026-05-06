@@ -39,14 +39,27 @@ Queue drain summary (homekit-ratgdo32):
 
 If a hook block, branch shift, or item failure stops the drain at item 4 of 9, the remaining 5 items stay `queued` in QUEUE.md. **Just run `/queue-next` again** — it'll pick up the next eligible item and continue. The queue is durable; nothing's lost on partial drains.
 
-## Stop conditions
+## Environmental blockers — auto-pivot, don't halt
+
+When an item can't be processed due to a tool/access constraint (NOT a code bug), **mark it `blocked: <reason>` and continue to the next eligible item.** Don't surface a "which option do you want" question — pick the next item autonomously. This is the autonomy goal: environmental issues never halt the batch.
+
+Examples:
+- `pio` not found on bash PATH → try `/c/Users/Dakot/.platformio/penv/Scripts/pio.exe` directly. If still inaccessible, mark item `blocked: pio inaccessible from this shell` and pivot.
+- SSH to Pi times out → mark `blocked: pi unreachable`, pivot.
+- Device HTTP endpoint times out → mark `blocked: device unreachable`, pivot.
+- A required env var or file not present → mark blocked, pivot.
+
+Code-bug failures (build fails on real syntax error, tests fail on logic) are NOT environmental — those go through the hook-recovery retry budget and STOP if exhausted.
+
+## Hard stop conditions
 
 - Queue is empty → report and stop.
+- Cap reached → report and stop.
 - Top item is `deferred` → don't unilaterally promote.
 - W42-class concurrency edits without a state diagram in the plan → STOP and call planner.
 - Force-close / auto-close state machine touched without explicit AC → STOP and call planner.
 - About to draft `gh pr create --repo ratgdo/...` (upstream) → STOP — fork doesn't file upstream. The pre-tool-use fork-PR hook will block this anyway.
-- Pre-tool-use hook fires (fork-PR, AI-attribution, branch-shift, heap-warn) → resolve before continuing.
+- Code-bug retry budget exhausted (3 retries on same hook+item) → mark exhausted, continue to next item.
 
 ## Don't
 
