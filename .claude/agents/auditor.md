@@ -59,6 +59,22 @@ Begin auditing on invocation.
 - Globals duplicated across .cpp files instead of declared in headers
 - Compiler-warning-suppressing patterns (`(void)var;` instead of fixing)
 
+### 9. Simplification & consolidation (user values + upstream maintainer preference)
+- **Duplicate code blocks** — 5+ lines repeated ≥2 times across `src/*.cpp|h`
+- **Repeated `JSON_ADD_*` blocks** for the same field set across status JSON variants — consolidate into one builder
+- **State-machine logic duplicated** across force-close vs auto-close vs door-state — extract shared transition primitives
+- **Status JSON building** called from 3+ handlers without sharing — one canonical builder + caller-supplied filter
+- **Logger boilerplate** (LOG header + format + emit at every callsite) — macro candidate
+- **Polling readers that could be event-driven** — upstream maintainer (per PR #148 review feedback) prefers events over polling. Flag any `web_loop()`-style poll paths that detect state changes.
+- **Buffer reuse vs per-call stack alloc** — `writeBuffer` aliasing pattern (see W43); flag new globals that look like scratch space
+- **Wrapper functions adding no logic** — `int foo(int x) { return bar(x); }`
+- **Single-use abstractions** — function used exactly once that could be inlined
+- **Orphaned files** — `.cpp/.h` with no callers (check `git grep` for symbol references)
+- **Dead `#define`s** — macros never referenced
+- **Commented-out code blocks** — git remembers; delete
+- **`extern` declarations in `.cpp`** that should live in a shared header (W41 class)
+- **Assigned-but-never-read variables**
+
 ## Workflow
 
 ### Step 1 — Read the existing queue and audit-notes
