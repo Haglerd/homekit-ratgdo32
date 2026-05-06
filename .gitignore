@@ -19,3 +19,4 @@ managed_components/
 sdkconfig.ratgdo_esp32dev
 src/CMakeLists.txt
 audit-notes/
+.claude/.log_audit_state
