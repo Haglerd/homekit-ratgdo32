@@ -7,7 +7,7 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution.md`. Recommended sequencing: tooling sweeps first (W45/W46/W47) so any new findings they surface fold into the same release.
 
 ### [P2] W45 — Build with `-Wshadow=local -Werror=shadow`, triage shadow warnings
-**Status:** queued
+**Status:** queued — blocker: no pio access in current shell (PowerShell denied; bash PATH lacks pio.exe). Triage requires running `pio run -e ratgdo_esp32dev` to surface warnings.
 **Source:** audit, v45 plan
 **Acceptance:** clean `pio run -e ratgdo_esp32dev` with `-Wshadow=local` permanently in build_flags. Triage results appended to audit doc.
 **Notes:** library-header shadows (arduino-esp32, HomeSpan) are accepted noise per user direction; only fix shadows in fork code. `-Werror=shadow` reverts after triage.
@@ -23,12 +23,6 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Source:** audit, v45 plan
 **Acceptance:** every `.detach()` line carries a one-line provenance comment; `:3318` site fixed inline with `request_force_close_clear` (per user direction — TTC arm-fresh preempts in-flight force-close).
 **Notes:** 24 production sites + 4 comment-only references inventoried in plan.
-
-### [P3] W41 — Move `extern volatile uint32_t` declarations to header
-**Status:** queued
-**Source:** audit, v45 plan
-**Acceptance:** new `src/instrumentation.h` (flat src/ layout, no src/include/) holds 7 declarations; `git grep "extern volatile uint32_t"` returns zero hits in `src/*.cpp`.
-**Notes:** zero behavior change.
 
 ### [P3] W43 — `writeBuffer` rename + invariant comment
 **Status:** queued
@@ -100,3 +94,5 @@ The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are a
 ## Recently completed
 
 _(roll commits in here as W4x/Rx items land — keep last 10)_
+
+- **W41** — instrumentation header (zero behavior change). PR: https://github.com/Haglerd/homekit-ratgdo32/pull/68 (2026-05-06)
