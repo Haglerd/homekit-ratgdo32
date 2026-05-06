@@ -10,6 +10,22 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.54 (2026-05-06)
+
+Fixes the underlying "first prompt rejected, second prompt accepted" + "logs.html prompts more often than settings" UX issues. **Root cause was identified:** arduino-esp32's Digest auth implementation issues a fresh nonce per response and does NOT set `stale=true` on stale-nonce 401 responses. When a browser sends an Authorization header with a cached (now-stale) nonce, the device responds 401 with a fresh challenge. Per WHATWG Digest spec, a server should set `stale=true` to tell the browser "your password is correct, just retry with this new nonce silently." Without that flag, browsers treat the 401 as wrong-credentials and re-prompt the user. Symptom: every 3-second `/showlog` polling fetch could trigger a re-prompt, so /logs.html became prompt-heavy compared to /settings (which only auths once per click).
+
+**Fix:** new macro `AUTHENTICATE_OR_ALLOWLIST()` (`web.cpp` line ~921) that checks the v37/v39 per-IP recent-auth allowlist FIRST. If the client's IP is already allowlisted (was stamped by `/auth` or any other AUTHENTICATE'd endpoint within the last 15 minutes per v52), the request is allowed WITHOUT running Digest. Falls back to full `AUTHENTICATE()` if not allowlisted (first visit, post-reboot, or after 15-min idle). Applied ONLY to read-only polling endpoints — `/showlog`, `/showrebootlog`, `/crashlog`. State-changing endpoints (`/setgdo`, `/reboot`, `/reconnectHomeKit`, `/reset`, etc.) keep full `AUTHENTICATE()` for max security.
+
+**User-visible effect:**
+- First page load of `/logs.html`: Digest prompt fires once via the `/auth` call (v53 design unchanged).
+- Subsequent 3-second `/showlog` polls within 15 min: allowlisted, **no Digest, no prompt**.
+- After 15-min idle: allowlist expires, next request prompts again.
+- Same allowlist powers SSE subscribe (v37/v39), now also powers read-only polling — single source of truth.
+
+**Security model:** identical to the existing SSE allowlist gate. Per-IP. Same-IP attacker (NAT, shared LAN) gets access — but they already could via cached browser Digest creds + replay. The allowlist isn't weaker than the status quo; it's just less chatty about repeated re-auth.
+
+**Compatibility:** v22-v53 SSE infrastructure preserved unchanged. State-changing endpoints unchanged. v52 15-min `AUTH_ALLOWLIST_TTL_MS` tuning interacts cleanly with this change. Upstream-mergeable as a quality-of-life improvement (upstream has the same Digest stale-nonce issue inherited from arduino-esp32; the fix doesn't depend on any v22+ fork-only infrastructure beyond the allowlist itself, which IS fork-only).
+
 ### v3.4.4-forceclose.53 (2026-05-06)
 
 Hotfix for v52. v52 dropped the SSE setup AND the leading `/auth` fetch from `logs.js`. SSE removal was correct. But removing `/auth` was a mistake — `loadLogPages` fires THREE auth-required fetches in parallel (`/showlog`, `/showrebootlog`, `/crashlog`) via `Promise.allSettled`, and browsers handle three concurrent `401 + WWW-Authenticate: Digest` responses inconsistently. Most either lose the prompt or cycle through it and reject the user's credentials.

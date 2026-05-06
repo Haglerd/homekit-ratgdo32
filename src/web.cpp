@@ -909,6 +909,60 @@ String *ratgdoAuthenticate(HTTPAuthMethod mode, String enteredUsernameOrReq, Str
     } while (0)
 #endif
 
+// v54: AUTHENTICATE_OR_ALLOWLIST — fast path for read-only polling
+// endpoints (/showlog, /showrebootlog, /crashlog) that the logs.html
+// page hits every 3 seconds. Pre-v54 every poll ran full Digest auth
+// via AUTHENTICATE(), but arduino-esp32's Digest issues a fresh nonce
+// per response and doesn't set `stale=true` on stale-nonce 401, so
+// browsers see the cached-nonce response as "rejected" and re-prompt.
+// User-visible symptom: /logs.html prompts FAR more often than
+// /settings (which only auths once per click) — every 3s polling
+// fetch could trigger a prompt.
+//
+// v54 path: if the client's IP is already in the v37/v39 per-IP
+// recent-auth allowlist (stamped by /auth or any other AUTHENTICATE'd
+// endpoint within the last AUTH_ALLOWLIST_TTL_MS = 15 min per v52),
+// allow the request without running Digest. Cached creds in the
+// allowlist replace cached creds in the browser for these specific
+// read-only endpoints. Falls back to AUTHENTICATE() if the IP isn't
+// allowlisted (first visit, post-reboot, after 15 min idle).
+//
+// Security model: same as the SSE allowlist gate at handle_subscribe.
+// Per-IP. Same-IP attacker (NAT, shared LAN) gets access — but they
+// already could via cached browser creds + Digest replay anyway.
+// The allowlist is no weaker than what's already exposed; just less
+// chatty about it.
+//
+// Apply ONLY to read-only endpoints. State-changing endpoints
+// (/setgdo, /reboot, /reconnectHomeKit, /reset, /refreshHomeKitMDNS,
+// /dumpHomeKitState, /setssid, /wifiap, /rescan, /update,
+// /clearcrashlog) keep full AUTHENTICATE() for max security.
+// /auth itself stays AUTHENTICATE() — that's what stamps the allowlist
+// in the first place.
+#ifdef ESP8266
+#define AUTHENTICATE_OR_ALLOWLIST()                                                             \
+    do {                                                                                        \
+        if (userConfig->getPasswordRequired()) {                                                \
+            if (!isAuthAllowedForIP(server.client().remoteIP())) {                              \
+                if (!server.authenticateDigest(userConfig->getwwwUsername(), userConfig->getwwwCredentials())) \
+                    return server.requestAuthentication(DIGEST_AUTH, www_realm);                \
+                recordAuthSuccess(server.client().remoteIP());                                  \
+            }                                                                                   \
+        }                                                                                       \
+    } while (0)
+#else
+#define AUTHENTICATE_OR_ALLOWLIST()                                                             \
+    do {                                                                                        \
+        if (userConfig->getPasswordRequired()) {                                                \
+            if (!isAuthAllowedForIP(server.client().remoteIP())) {                              \
+                if (!server.authenticate(ratgdoAuthenticate))                                   \
+                    return server.requestAuthentication(DIGEST_AUTH, www_realm);                \
+                recordAuthSuccess(server.client().remoteIP());                                  \
+            }                                                                                   \
+        }                                                                                       \
+    } while (0)
+#endif
+
 // Same-origin / CSRF guard for state-changing endpoints. Parses the
 // host out of Origin/Referer (scheme://HOST[:port][/path…]) and
 // compares byte-for-byte against the lowercased, port-stripped Host
@@ -2794,21 +2848,30 @@ void handle_unsubscribe()
 
 void handle_crashlog()
 {
-    AUTHENTICATE();
+    // v54: read-only polling endpoint — use allowlist fast-path to
+    // avoid arduino-esp32's stale-nonce re-prompt loop. See
+    // AUTHENTICATE_OR_ALLOWLIST macro definition for full rationale.
+    AUTHENTICATE_OR_ALLOWLIST();
     server.client().print(response200);
     ratgdoLogger->printCrashLog(server.client());
 }
 
 void handle_showlog()
 {
-    AUTHENTICATE();
+    // v54: read-only polling endpoint — use allowlist fast-path to
+    // avoid arduino-esp32's stale-nonce re-prompt loop. logs.html
+    // polls this every 3s; pre-v54 every poll could trigger a
+    // browser auth prompt due to Digest nonce rotation.
+    AUTHENTICATE_OR_ALLOWLIST();
     server.client().print(response200);
     ratgdoLogger->printMessageLog(server.client());
 }
 
 void handle_showrebootlog()
 {
-    AUTHENTICATE();
+    // v54: read-only polling endpoint — use allowlist fast-path to
+    // avoid arduino-esp32's stale-nonce re-prompt loop.
+    AUTHENTICATE_OR_ALLOWLIST();
     server.client().print(response200);
 #ifdef ESP8266
     File file = LittleFS.open(REBOOT_LOG_MSG_FILE, "r");
