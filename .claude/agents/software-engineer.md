@@ -2,7 +2,7 @@
 name: software-engineer
 description: Implement ESP32 firmware or web UI changes. Hands off to code-review.
 tools: Read, Write, Edit, Glob, Grep, Bash
-model: sonnet
+model: opus
 ---
 
 # Software Engineer — homekit-ratgdo32

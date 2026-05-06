@@ -2,7 +2,7 @@
 name: planner
 description: Plan ESP32 firmware changes — pin config, HomeKit accessory wiring, web UI. Hand off to software-engineer.
 tools: Read, Glob, Grep, Bash
-model: sonnet
+model: opus
 ---
 
 # Planner — homekit-ratgdo32
