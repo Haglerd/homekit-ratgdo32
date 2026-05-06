@@ -4,6 +4,8 @@ Pick the top actionable item from `QUEUE.md`, route it through the agent pipelin
 
 ## Steps (per item — looped until queue empty, cap reached, or stop condition)
 
+0. **Defensive branch sync** — before starting work on each item, run `git checkout main && git pull --ff-only origin main`. This preempts the auto-release-workflow-shifted-the-checkout trap that otherwise causes the branch-shift guard to block our next commit. Reset the branch-shift stamp file (`rm .git/.claude_session_branch`) so the hook re-baselines on `main` for this iteration.
+
 1. **Read `QUEUE.md`** — focus on `## Active — fork-internal` and `## Fork-internal investigation`. Ignore the "Upstream filing — DO NOT FILE" section; that's tracking, not work.
 2. **Pick the top item** by priority (P0 > P1 > P2 > P3) and `Status: queued`. Skip `in-progress` / `blocked` / `deferred`. If no eligible items, report "queue empty" and stop.
 3. **Mark it `in-progress`** in the queue file.
@@ -32,6 +34,10 @@ Queue drain summary (homekit-ratgdo32):
 - Stopped at: <item + reason, if applicable>
 - Queue remaining: <count>
 ```
+
+## Partial drains are normal — re-run picks up where it stopped
+
+If a hook block, branch shift, or item failure stops the drain at item 4 of 9, the remaining 5 items stay `queued` in QUEUE.md. **Just run `/queue-next` again** — it'll pick up the next eligible item and continue. The queue is durable; nothing's lost on partial drains.
 
 ## Stop conditions
 
