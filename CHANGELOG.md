@@ -10,6 +10,16 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.53 (2026-05-06)
+
+Hotfix for v52. v52 dropped the SSE setup AND the leading `/auth` fetch from `logs.js`. SSE removal was correct. But removing `/auth` was a mistake — `loadLogPages` fires THREE auth-required fetches in parallel (`/showlog`, `/showrebootlog`, `/crashlog`) via `Promise.allSettled`, and browsers handle three concurrent `401 + WWW-Authenticate: Digest` responses inconsistently. Most either lose the prompt or cycle through it and reject the user's credentials.
+
+Symptom: direct navigation to `/logs.html` shows the auth dialog but rejects credentials. Workaround: visit `/settings` first (which calls `/auth` cleanly via `checkAuth()`), then navigate to `/logs.html` — the cached creds replay through the parallel fetches without confusion.
+
+**Fix:** restore the single `/auth` fetch at the top of `loadLogs()` before `loadLogPages()`. One auth request → one browser prompt → cached creds → parallel fetches replay cleanly. Matches the working `/settings` flow byte-for-byte.
+
+**No regressions reintroduced:** v46 localStorage skip-auth (caused dead-page-after-reboot) — still NOT in v53. v50/v51 SSE error cascade (caused repeated `/auth` calls flashing the spinner) — still NOT possible (no SSE in logs.js since v52). The `/auth` call fires exactly once per page load.
+
 ### v3.4.4-forceclose.52 (2026-05-06)
 
 Two cleanups based on production observation of v51:
