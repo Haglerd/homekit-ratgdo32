@@ -10,6 +10,24 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.57 (2026-05-06)
+
+Hotfix for v56 regression. v56 switched the repo from the auto-managed `pages-build-deployment` workflow to a custom `.github/workflows/pages.yml`. That worked for source-only commits (Pages correctly skipped them per the `paths: ['docs/**']` filter) but broke the actual release path: `release.yml`'s combined commit (which DOES touch `docs/`) didn't trigger Pages.
+
+**Root cause**
+
+GitHub's documented anti-recursion rule: pushes made with `GITHUB_TOKEN` do NOT trigger other workflows. The legacy `pages-build-deployment` workflow was special-cased to ignore that rule, so it deployed every push regardless of token. The custom `pages.yml` is NOT special-cased — `release.yml`'s GITHUB_TOKEN push of v56 firmware bins landed on `main` but Pages didn't rebuild → device-side OTA fetched stale bins from Pages → MD5 mismatch on every v56 OTA attempt.
+
+**Fix**
+
+`release.yml` now dispatches `pages.yml` explicitly via `gh workflow run pages.yml --repo $GITHUB_REPOSITORY --ref main` immediately after the combined commit pushes. `workflow_dispatch` events ARE allowed under `GITHUB_TOKEN`. Job-level `permissions: actions: write` added so the gh CLI call succeeds.
+
+The dispatch is gated on a new `FW_BINS_PUSHED` env var that's only set when the combined commit actually pushed (skipped when re-running a release on already-uploaded bins to avoid redundant deploys).
+
+**Net effect**
+
+Future releases: 1 Pages run per release cycle, fired explicitly after `release.yml` lands the combined commit. Source-only commits, hook commits, README edits → 0 Pages runs (v56's paths filter still in effect).
+
 ### v3.4.4-forceclose.56 (2026-05-06)
 
 Workflow optimization (round 2). Replaces GitHub's auto-managed `pages-build-deployment` workflow with a custom `pages.yml` that has a `paths: ['docs/**']` filter — Pages now only rebuilds when files Pages actually serves (the `docs/` tree) actually change.
