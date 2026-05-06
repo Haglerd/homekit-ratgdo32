@@ -15,6 +15,10 @@ jobs:
   release:
     permissions:
       contents: write
+      # v57: needed for `gh workflow run pages.yml` at end of workflow.
+      # Job-level permissions override the top-level block, so explicitly
+      # adding actions:write here ensures the dispatch call succeeds.
+      actions: write
     runs-on: ubuntu-latest
 
     steps:
@@ -217,9 +221,34 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "Release ${{ steps.tag.outputs.latestTag }}: manifest + firmware bins"
             git push origin main
+            echo "FW_BINS_PUSHED=true" >> "$GITHUB_ENV"
           else
             echo "manifest + firmware bins already up-to-date on main, skipping commit"
+            echo "FW_BINS_PUSHED=false" >> "$GITHUB_ENV"
           fi
+        shell: bash
+
+      # v57: explicitly dispatch the custom Pages workflow (added in v56).
+      # GitHub's documented anti-recursion rule says pushes made by
+      # GITHUB_TOKEN do NOT trigger other workflows by default. The legacy
+      # auto-managed `pages-build-deployment` workflow was special-cased to
+      # ignore that rule; the custom `pages.yml` we now use is NOT. Result
+      # observed on v56: release.yml's combined commit landed on main but
+      # Pages didn't redeploy → device-side OTA fetched stale bins from
+      # Pages → MD5 mismatch.
+      #
+      # `gh workflow run` issues a workflow_dispatch event, which IS allowed
+      # under GITHUB_TOKEN. Only fires if we actually pushed bins (the gate
+      # set above) — avoids a redundant deploy when the release was a re-run
+      # on already-uploaded bins.
+      - name: Trigger custom Pages deploy (post-bins-commit)
+        if: env.FW_BINS_PUSHED == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "Dispatched pages.yml — Pages will deploy v56-or-newer bins"
         shell: bash
 
       # Keep the .elf as a workflow artifact for crash backtrace decoding
