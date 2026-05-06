@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(pio *)",
+      "Bash(platformio *)",
+      "Bash(gh pr *)",
+      "Bash(gh run *)",
+      "Bash(gh api *)",
+      "Bash(ssh dakot@100.121.96.114 *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git reset --hard *)"
+    ]
+  }
+}
