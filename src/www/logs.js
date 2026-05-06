@@ -122,107 +122,25 @@ function openTab(evt, tabName) {
 async function loadLogs() {
     sysLogLoaded = false;
     tmpLogMsgs.length = 0;
-    // Load all the logs in parallel, showing progress indicator while we do...
     loaderElem.style.visibility = "visible";
-    // v40 (+ v41 fix): inline /auth fetch BEFORE the SSE subscribe to
-    // trigger Digest credentials AND stamp the device's per-IP recent-auth
-    // allowlist (v39). Cannot call checkAuth() — that lives in functions.js
-    // which logs.html does not load. Without this, the v37 SSE auth gate
-    // returns 401 to EventSource, EventSource has no API to retry, the
-    // user sees a stuck spinner. No-password installs return 200 from /auth
-    // immediately (AUTHENTICATE no-ops when getPasswordRequired() is false).
+    // v52: pure polling design. No SSE setup, no /auth call.
+    // /showlog is auth'd via standard browser Digest cache (no
+    // per-IP allowlist needed for non-SSE GETs). Initial load
+    // fetches /showlog + /showrebootlog + /crashlog + /status.json
+    // in parallel, then startShowlogPoller takes over for live
+    // updates every SHOWLOG_POLL_INTERVAL_MS.
     //
-    // v49: removed the v46 localStorage skip-auth window. It had a hole:
-    // when the device rebooted, its per-IP allowlist cleared, but the
-    // browser's localStorage timestamp didn't know. The page would skip
-    // /auth, then the SSE subscribe got a 401 from the now-empty allowlist,
-    // and the recovery path was missing — the user got trapped with no
-    // working logs and no clear way to recover. Reverting to "always call
-    // /auth on page load" restores predictable behaviour. Also clean up
-    // any stale localStorage entry from prior v46 builds so users don't
-    // need to manually clear it.
+    // History note: v40-v51 used SSE for log streaming. The SSE
+    // path had repeated reconnect-cascade issues (sweep reap →
+    // close → re-subscribe → /showlog re-fetch → PREPEND duplicates
+    // → polling next tick clears panes → flicker). Polling is
+    // simpler, more reliable, "live enough" at 3s cadence. The
+    // home page (functions.js) still uses SSE because it has a
+    // local 1-Hz uptime ticker that masks any SSE wedge.
+    //
+    // Clear out v51's localStorage skip-auth key (no longer used).
     try { localStorage.removeItem('ratgdo-logs-last-auth-at'); } catch (e) { /* ignore */ }
-    try {
-        const authResp = await fetch("auth", { method: "GET" });
-        if (authResp.status !== 200) {
-            console.warn(`Logs auth failed (HTTP ${authResp.status}). Reload the page to retry.`);
-            loaderElem.style.visibility = "hidden";
-            return;
-        }
-    } catch (e) {
-        console.warn(`Logs auth fetch error: ${e}`);
-        loaderElem.style.visibility = "hidden";
-        return;
-    }
-    console.log("Subscribe to Server Sent Events");
-    // v27: heartbeat=10 (was 0). The orphan sweep on the firmware needs
-    // a Ticker driving SSEheartbeat for class-5b cleanup (TCP-dropped
-    // sockets that haven't seen a broadcast yet). Firmware coerces
-    // heartbeat=0 → 30 anyway so this is mostly cache-safety; the
-    // request also keeps lastActivity fresh, preventing class-5c idle reaps.
-    fetch("rest/events/subscribe?id=" + clientUUID + "&log=1&heartbeat=10")
-        .then((response) => {
-            if (!response.ok || response.status !== 200) {
-                reject(`Error registering for Server Sent Events, RC: ${response.status}`);
-            } else {
-                return response.text();
-            }
-        })
-        .then((text) => {
-            const evtUrl = text + '?id=' + clientUUID;
-            console.log(`Register for Server Sent Events at ${evtUrl}`);
-            evtSource = new EventSource(evtUrl);
-            evtSource.onopen = () => {
-                console.log("Load each log page");
-                loadLogPages();
-            };
-            evtSource.addEventListener("logger", (event) => {
-                // v22: HomeKit lines are EXCLUSIVE to the HomeKit tab —
-                // they no longer also clutter the system log. If a line
-                // matches isHomeKitLine() it goes ONLY to the HomeKit
-                // pre, otherwise it goes ONLY to the system log pre.
-                if (isHomeKitLine(event.data)) {
-                    let hkPane = document.getElementById("homekitTab");
-                    let hkScroll = (hkPane.scrollHeight - hkPane.scrollTop - hkPane.clientHeight) < 10;
-                    document.getElementById("homekitlog").insertAdjacentText('beforeend', event.data + "\n");
-                    if (hkScroll) hkPane.scrollTop = hkPane.scrollHeight;
-                } else {
-                    let divElem = document.getElementById("logTab");
-                    let scroll = (divElem.scrollHeight - divElem.scrollTop - divElem.clientHeight) < 10;
-                    document.getElementById("showlog").insertAdjacentText('beforeend', event.data + "\n");
-                    if (!sysLogLoaded) tmpLogMsgs.push(event.data);
-                    if (scroll) divElem.scrollTop = divElem.scrollHeight;
-                }
-            });
-            evtSource.addEventListener("error", (event) => {
-                // v51: explicit re-subscribe on error.
-                // Why not rely on EventSource's spec'd auto-reconnect?
-                // The device's SSE URL scheme requires a TWO-STEP setup:
-                //   1. POST/GET /rest/events/subscribe → returns /rest/events/<channel>
-                //   2. EventSource opens /rest/events/<channel>
-                // EventSource's auto-reconnect retries step 2's URL only —
-                // but if a sweep reap (5b/5c/5d) freed that channel slot
-                // between drop and retry, the device returns 404 to the
-                // GET /rest/events/<channel>, EventSource sees 404, and
-                // CLOSES PERMANENTLY (browser does NOT auto-reconnect on
-                // HTTP 404 — only on network errors). We must therefore
-                // close + re-run the subscribe path to get a fresh
-                // channel allocation. handle_subscribe's foundExisting
-                // branch (web.cpp ~2643) reuses the slot when possible
-                // via persistent UUID (v27).
-                //
-                // v50 attempted to drop this close+resubscribe in favour
-                // of pure spec-compliant auto-reconnect — but EventSource
-                // can't recover from the 404-after-reap case, so we kept
-                // hitting the same trap. v51 restores explicit recovery.
-                console.warn(`SSE error (readyState=${evtSource.readyState}, url=${evtSource.url}) — closing + re-subscribing in 1s`);
-                try { evtSource.close(); } catch (e) { /* ignore */ }
-                setTimeout(loadLogs, 1000);
-            });
-        })
-        .catch((error) => {
-            console.warn(`Failed to register for Server Sent Events: ${error}`);
-        });
+    loadLogPages();
 }
 
 async function loadLogPages() {
