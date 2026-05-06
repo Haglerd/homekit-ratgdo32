@@ -18,15 +18,26 @@ ESP32 firmware fork that exposes a ratgdo garage-door controller as a HomeKit ac
 - **Force-close / auto-close state machine** is the #1 bug source. Touching it requires a state diagram and reasoned transition coverage.
 - **Fork-only PRs**: `gh pr create --repo Haglerd/homekit-ratgdo32`. The CLI has misfired against upstream multiple times — explicit `--repo` every time.
 
-## Build tools — pio.exe path
+## Build tools — pio is CI-only on this machine
 
-Bash PATH on Windows git-bash often doesn't include `~/.platformio/penv/Scripts/`. If `pio` resolves to "command not found", invoke by full path:
+**PlatformIO is NOT installed locally.** No `~/.platformio/`, no `pio.exe` in PATH, no VSCode extension. Builds happen on GitHub Actions, not locally.
 
-```bash
-/c/Users/Dakot/.platformio/penv/Scripts/pio.exe run -e ratgdo_esp32dev
-```
+**For autonomous fix loops:** any QUEUE.md item whose `Acceptance` requires running `pio run` locally must be marked `blocked: pio not installed locally; verify via CI after merge`. The agent does NOT halt the drain — it pivots to the next pio-independent item.
 
-Both forward-slash and Windows-style paths are pre-allowed in `.claude/settings.json`. **Never invoke `pwsh.exe` or `powershell.exe`** to wrap pio — they're in the deny list and will pause the session.
+Pio-INDEPENDENT items (can run autonomously):
+- Hygiene refactors that don't change behavior (W41 header move, W43 buffer rename — verified by `git grep`)
+- Documentation audits (W48)
+- Ticker.detach() comment sweep (W47 — comments only; the comms.cpp:3318 fix needs build verify, gate that piece)
+- npm-based tooling (W46 eslint — `npx works` per local check)
+- ssh-based Pi log work
+
+Pio-DEPENDENT items (mark blocked, defer to CI):
+- W45 `-Wshadow=local` build flag + warning triage
+- W42 mutex on userSettings::get (build verify needed)
+- W44 DST cap (build verify needed)
+- Any change that produces firmware behavior changes
+
+If you want these auto-fixable locally, install PlatformIO Core (`pip install platformio` or use the VSCode extension); the path will then live at `~/.platformio/penv/Scripts/pio.exe`. **Never invoke `pwsh.exe` / `powershell.exe`** to wrap pio — they're in the deny list and will pause the session.
 
 ## Pi log access
 
