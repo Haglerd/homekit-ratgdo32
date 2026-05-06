@@ -10,6 +10,18 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.50 (2026-05-06)
+
+Fixes the regression that made SSE-driven UI go stale every ~50s post-v47, requiring a page refresh to see live updates. Affected both `/logs.html` (live log streaming + HomeKit tab population) and `/index.html` (status counter not advancing). Reverts v47's per-socket TCP keepalive setsockopt calls; keeps everything else from v47 (sweep class 5d / consecutive-BUFFER_FULL reap is verifiably working and stays).
+
+**Root cause.** v47's `SSEHandler` enabled `SO_KEEPALIVE` with aggressive parameters (`KEEPIDLE=30s` + `KEEPCNT=3 × KEEPINTVL=10s = 60s` total). The intent was to detect silently-dropped peers (laptop-lid-close etc.) faster than the existing 300s `SSE_IDLE_TIMEOUT_MS` 5c reap. In production it had the unintended effect of flipping `client.connected()=false` on healthy SSE sockets when the keepalive probes encountered any momentary network hiccup or browser-side slowness — the OS-level dead-peer detection was too eager. Sweep class 5b then reaped the slot, and the browser's `EventSource` auto-reconnect didn't recover fast enough, so the user-facing UI froze until refresh. User's syslog showed `TCP dropped` reaps every ~50s for the same persistent client UUID.
+
+**Fix.** v50 removes the four `setsockopt(SO_KEEPALIVE / TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT)` calls from `SSEHandler`. lwIP falls back to its default (no TCP-layer keepalive on per-socket basis), matching upstream behavior. The `LWIP_TCP_KEEPALIVE=y` in `sdkconfig.defaults` stays (zero cost — the kernel-level capability is wired up but no socket enables it now), and the `<netinet/tcp.h>` include stays. Future work can re-enable keepalive with much-less-aggressive parameters (`KEEPIDLE=120s+` would avoid the false-positive while still beating 5c's 300s) without re-touching the build config. v24's `SO_SNDTIMEO` (200ms write timeout) is unchanged — that bounds individual write times so a single wedged subscriber doesn't block the broadcast loop.
+
+**What's preserved from v47.** Mechanism 2 — sweep class 5d on consecutive `BUFFER_FULL` — stays. That's the application-layer wedge detection (verified working in production: user's syslog showed `wedged on flow-control` reaps firing correctly with `consecutive=30`). It detects truly-wedged subscribers (background tabs that stop draining) within ~30s without false-positiving on healthy slow connections, because it counts BUFFER_FULL events (peer not draining) rather than network-level keepalive failures.
+
+**Compatibility.** This change reverts v47's only addition to upstream's TCP setup. Any future merge from upstream into this fork will not conflict here. The `LWIP_TCP_KEEPALIVE=y` sdkconfig line remains as a fork-only addition but is harmless (and matches what most production firmwares enable as default).
+
 ### v3.4.4-forceclose.49 (2026-05-06)
 
 Two logs UX hotfixes for issues observed post-v47/v48 deploy.

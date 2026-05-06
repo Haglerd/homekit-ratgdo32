@@ -2427,21 +2427,29 @@ void SSEHandler(uint32_t channel)
         sndto.tv_usec = CLIENT_SLOW_WRITE_MS * 1000;
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sndto, sizeof(sndto));
 
-        // v47: OS-level TCP keepalive. Detects silently-dropped peers
-        // (laptop-lid-close, switch-off, NAT-table-flush) within
-        // KEEPIDLE + KEEPCNT*KEEPINTVL = 60s, well inside the 300s
-        // SSE_IDLE_TIMEOUT_MS belt-and-suspenders. lwIP flips the socket
-        // to !connected() once KEEPCNT probes fail; the next sweep tick
-        // reaps via class 5b. SO_KEEPALIVE per-socket is OFF by default
-        // even when LWIP_TCP_KEEPALIVE=y in sdkconfig — must enable.
-        const int keepAliveOn = 1;
-        const int keepIdle    = 30;  // seconds before first probe
-        const int keepIntvl   = 10;  // seconds between probes
-        const int keepCnt     = 3;   // probes before giving up
-        setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &keepAliveOn, sizeof(keepAliveOn));
-        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keepIdle,    sizeof(keepIdle));
-        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepIntvl,   sizeof(keepIntvl));
-        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepCnt,     sizeof(keepCnt));
+        // v50: REVERTED v47 per-socket SO_KEEPALIVE. v47's KEEPIDLE=30s +
+        // KEEPCNT=3 × KEEPINTVL=10s caused lwIP to flip client.connected()
+        // false on healthy SSE sockets under marginal LAN conditions —
+        // sweep class 5b reaped them within ~50-60s. The browser's
+        // EventSource auto-reconnect didn't always fire fast enough, so
+        // /index.html status counters and /logs.html live updates went
+        // stale and forced page-refresh as the only recovery. Symptom
+        // visible in user's syslog: TCP-dropped reaps every ~50s for the
+        // same UUID. Reverting per-socket keepalive falls back to lwIP's
+        // default behavior (no keepalive at TCP layer) and the existing
+        // 300s SSE_IDLE_TIMEOUT_MS 5c reap as the dead-peer safety net,
+        // matching upstream behavior. Mechanism 2 (sweep class 5d on
+        // consecutive BUFFER_FULL — added in v47, verified working in
+        // production) stays — that's the wedge detection that doesn't
+        // false-positive on healthy slow connections.
+        //
+        // Keeping the setup of LWIP_TCP_KEEPALIVE=y in sdkconfig.defaults
+        // and the <netinet/tcp.h> include — both are zero-cost and let
+        // future code re-enable per-socket keepalive (with better-tuned
+        // parameters) without re-touching the build config.
+        // SO_SNDTIMEO above remains — bounds individual write times to
+        // CLIENT_SLOW_WRITE_MS so a wedged subscriber can't block the
+        // broadcast loop.
     }
 #endif
     server.setContentLength(CONTENT_LENGTH_UNKNOWN); // the payload can go on forever
