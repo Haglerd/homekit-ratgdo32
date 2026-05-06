@@ -10,6 +10,32 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.56 (2026-05-06)
+
+Workflow optimization (round 2). Replaces GitHub's auto-managed `pages-build-deployment` workflow with a custom `pages.yml` that has a `paths: ['docs/**']` filter — Pages now only rebuilds when files Pages actually serves (the `docs/` tree) actually change.
+
+**Why**
+
+v48 cut release.yml from 2 commits to 1 per release, which halved the cancellation churn. But the auto-managed Pages workflow still fires on EVERY push to `main` regardless of paths — so direct hook commits, source-only PRs, README tweaks, and the auto-release PR mechanics all triggered redundant Pages runs that deployed identical content. Observed during the v54/v55 releases: 6 cancellations across 12 commits in a 10-min window because Pages couldn't distinguish "docs/ changed" from "any other file changed."
+
+**Fix**
+
+New file `.github/workflows/pages.yml`:
+- Triggers on `push` to `main` only when `paths: ['docs/**']` matches.
+- `workflow_dispatch` retained for manual re-deploy.
+- Same `concurrency: pages, cancel-in-progress: true` as the auto-managed workflow — back-to-back commits to `docs/` still dedupe.
+- Standard `actions/configure-pages@v5` + `actions/upload-pages-artifact@v3` + `actions/deploy-pages@v4` chain.
+
+After the PR merges, the repo's Pages `build_type` is flipped from `legacy` (auto-managed branch deployment) to `workflow` (custom workflow-driven) via `gh api -X PUT repos/Haglerd/homekit-ratgdo32/pages -f build_type=workflow` — done as a post-merge step in the same release motion, no manual UI click needed.
+
+**Effect**
+
+- Hook commits, source-only PRs, README edits → **0 Pages runs**
+- Release.yml's combined commit (touches `docs/manifest.json` + `docs/firmware/*`) → 1 Pages run
+- Auto-release PR mechanics (merge commit doesn't touch `docs/`) → 0 Pages runs
+
+Net: from ~3-5 Pages runs per release cycle down to 1.
+
 ### v3.4.4-forceclose.55 (2026-05-06)
 
 Fixes a deterministic crash during OTA firmware update. Verified via the v52 crash log on the user's device: panic at 80% upload progress, `LoadProhibited` exception in `esp_timer` task. addr2line resolved the backtrace to `homekit_health_log()` at `src/homekit.cpp:679` calling `uxTaskGetStackHighWaterMark()` on a stale task handle.

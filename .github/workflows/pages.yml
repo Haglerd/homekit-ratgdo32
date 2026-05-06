@@ -1,0 +1,61 @@
+# v56: custom GitHub Pages deployment workflow with paths-filter.
+#
+# Replaces the GitHub-auto-managed `pages-build-deployment` workflow (which
+# fires on EVERY push to main regardless of paths). With this custom workflow,
+# Pages only rebuilds when `docs/` actually changes — hook commits, source-
+# only edits, README tweaks no longer trigger redundant Pages runs.
+#
+# REPO SETTING REQUIRED to activate this workflow:
+#   Repo Settings → Pages → Build and deployment → Source: "GitHub Actions"
+#
+# Until that setting is flipped, BOTH workflows will fire on every push (the
+# auto-managed one + this one). After the flip, only this one fires, and only
+# when paths matched below.
+#
+# Concurrency: keeps `cancel-in-progress` so back-to-back commits to docs/
+# (release.yml's combined commit) still dedupe correctly.
+
+name: Deploy Pages (custom)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Only deploy when files Pages actually serves are touched.
+      - 'docs/**'
+  # Allow manual re-deploy from the Actions tab (mirrors the auto-managed
+  # workflow's Run-button behavior so we don't lose a manual escape hatch).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Match the auto-managed workflow's concurrency: cancel any in-flight build
+# when a new push lands. Avoids two parallel deploys racing.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact (docs/)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'docs'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
