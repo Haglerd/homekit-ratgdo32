@@ -34,9 +34,12 @@
 #include <ESPmDNS.h>
 #ifndef ESP8266
 // v24: setsockopt(SO_SNDTIMEO) on SSE TCP sockets to bound write times.
+// v47: setsockopt(TCP_KEEPIDLE/INTVL/CNT) on SSE TCP sockets so kernel
+// detects silently-dropped peers within ~60s.
 // esp_timer_get_time for clientWrite slow-write instrumentation.
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <netinet/tcp.h>
 #include <esp_timer.h>
 #endif
 #endif
@@ -2335,10 +2338,27 @@ void SSEHandler(uint32_t channel)
     int fd = s.client.fd();
     if (fd >= 0)
     {
+        // v24: SO_SNDTIMEO bounds writes to CLIENT_SLOW_WRITE_MS.
         struct timeval sndto;
         sndto.tv_sec = 0;
         sndto.tv_usec = CLIENT_SLOW_WRITE_MS * 1000;
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sndto, sizeof(sndto));
+
+        // v47: OS-level TCP keepalive. Detects silently-dropped peers
+        // (laptop-lid-close, switch-off, NAT-table-flush) within
+        // KEEPIDLE + KEEPCNT*KEEPINTVL = 60s, well inside the 300s
+        // SSE_IDLE_TIMEOUT_MS belt-and-suspenders. lwIP flips the socket
+        // to !connected() once KEEPCNT probes fail; the next sweep tick
+        // reaps via class 5b. SO_KEEPALIVE per-socket is OFF by default
+        // even when LWIP_TCP_KEEPALIVE=y in sdkconfig — must enable.
+        const int keepAliveOn = 1;
+        const int keepIdle    = 30;  // seconds before first probe
+        const int keepIntvl   = 10;  // seconds between probes
+        const int keepCnt     = 3;   // probes before giving up
+        setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &keepAliveOn, sizeof(keepAliveOn));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keepIdle,    sizeof(keepIdle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepIntvl,   sizeof(keepIntvl));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepCnt,     sizeof(keepCnt));
     }
 #endif
     server.setContentLength(CONTENT_LENGTH_UNKNOWN); // the payload can go on forever
