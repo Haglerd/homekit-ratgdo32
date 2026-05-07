@@ -44,7 +44,7 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 ## Active — log-audit findings (2026-05-07)
 
 ### [P1] BOOT-OOM-MDNS — Boot-time heap exhaustion → `tiT` mDNS-OOM crash (CONFIRMED root cause)
-**Status:** queued — needs-human-planning
+**Status:** blocked — pre-req log-audit-20260507-003 (esp_reset_reason syslog) must land first; needs-human-planning
 **Source:** v37 preserved crash log + log-audit-20260507-001 + user-provided fresh crash trace 2026-05-07 (consolidates these into one finding — they are the same bug)
 **Acceptance:** boot-time heap profile shows mdns_networking receive() allocations have headroom across the 9-second 194212→108B descent; reproduce-and-recover smoke covering >=5 OTA cycles with no second-boot crash; 24h post-OTA soak with no IllegalInstruction in tiT.
 **Notes:** **Root cause confirmed from fresh crash 2026-05-06 23:53:12 CDT (uptime 89s, firmware v3.4.4-forceclose.61):**
@@ -73,7 +73,7 @@ Force-close FSM untouched. NOT auto-fixable — needs planner + heap budget revi
 **Notes:** `homekit.cpp:835` increments `hkConsecutiveHealthyTicks` only inside `else if (hkRecoverAttempts > 0)` branch. With `hkAutoRecover=false` (user's config; default), `hkRecoverAttempts` stays 0 forever, so counter never increments and diag-hk reporting is misleading — it falsely suggests HomeKit is unhealthy. Observed on 110 consecutive diag-hk lines over ~5h: every line shows `hkHealthyTicks=0` despite `controllers=4 paired=yes wifi=connected` and observed iOS reads (`last_hap_read_ago=44s` at times). Fix: hoist the increment+reset logic to run independently of recoverAttempts. Cosmetic/observability only — does not affect actual HomeKit recovery. Force-close FSM untouched. Single function in single file.
 
 ### [P2] log-audit-20260507-003 — `esp_reset_reason()` log fires pre-syslog, never reaches Pi
-**Status:** queued — auto-fixable
+**Status:** in-progress — auto-fixable
 **Source:** log-audit 2026-05-07 (Pi syslog)
 **Acceptance:** `System restart reason: <code>` appears in Pi syslog after a non-power-on boot; silent post-OTA reboots become attributable.
 **Notes:** `ratgdo.cpp:189-203` calls `esp_reset_reason()` and `ESP_LOGI("System restart reason: %d", r)` during very early init, **before** the syslog forwarder is bound. Confirmed: `grep "System restart"` across 7 days of Pi syslog returns ZERO hits despite 5 boots in the last 24h alone. Without this signal we cannot distinguish panic-reboots from sw-resets from brownouts. Fix options: (a) persist reset_reason to NVS in early boot, log it AFTER syslog is up; (b) buffer the log line and re-emit later. Option (a) is cleaner. Pre-req for log-audit-20260507-001 root cause. Force-close FSM untouched. Single boot-init function.
