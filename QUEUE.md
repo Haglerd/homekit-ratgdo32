@@ -43,12 +43,6 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — log-audit findings (2026-05-07)
 
-### [P2] log-audit-20260507-002 — `hkConsecutiveHealthyTicks` always reports 0 when auto-recover disabled
-**Status:** queued — auto-fixable
-**Source:** log-audit 2026-05-07 (Pi syslog)
-**Acceptance:** counter increments on every healthy tick regardless of `hkAutoRecover` setting; diag-hk log line shows non-zero values during normal HomeKit activity.
-**Notes:** `homekit.cpp:835` increments `hkConsecutiveHealthyTicks` only inside `else if (hkRecoverAttempts > 0)` branch. With `hkAutoRecover=false` (user's config; default), `hkRecoverAttempts` stays 0 forever, so counter never increments and diag-hk reporting is misleading — it falsely suggests HomeKit is unhealthy. Observed on 110 consecutive diag-hk lines over ~5h: every line shows `hkHealthyTicks=0` despite `controllers=4 paired=yes wifi=connected` and observed iOS reads (`last_hap_read_ago=44s` at times). Fix: hoist the increment+reset logic to run independently of recoverAttempts. Cosmetic/observability only — does not affect actual HomeKit recovery. Force-close FSM untouched. Single function in single file.
-
 ### [P2] log-audit-20260507-004 — `errno 11 "No more processes"` recurrence beyond browser fan-out (post log-audit-002 fix)
 **Status:** done — PR https://github.com/Haglerd/homekit-ratgdo32/pull/94 (merged 2026-05-07)
 **Source:** log-audit 2026-05-07 (Pi syslog) — user-surfaced, multi-boot pattern
@@ -96,6 +90,7 @@ The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are a
 
 _(roll commits in here as W4x/Rx items land — keep last 10)_
 
+- **log-audit-20260507-002** — hoist `hkConsecutiveHealthyTicks` increment out of recover-attempts branch so it runs every tick. Type bumped uint8_t → uint32_t to avoid wrap. PR https://github.com/Haglerd/homekit-ratgdo32/pull/96 (merged 2026-05-07).
 - **log-audit-20260507-004** — SSE clientWriteEx direct lwip_send rewrite (ESP32-only). Eliminates `errno 11 fail on fd N` syslog noise + fixes silent-broadcast bug from broken `availableForWrite` fast-path. PR https://github.com/Haglerd/homekit-ratgdo32/pull/94 (merged 2026-05-07). 24 h soak verification pending on-device after release.66.
 - **BOOT-OOM-MDNS** — defer ratgdo mDNS service registration until heap >= 50 KB (option a from QUEUE candidates). ESP32-only; ESP8266 path unchanged. PR https://github.com/Haglerd/homekit-ratgdo32/pull/89 (merged 2026-05-07). Validates via post-flash syslog: expect `ratgdo mDNS deferred:` then `floor cleared` within 30 s; absence of `mdns_networking: Cannot allocate memory` and tiT IllegalInstruction. >=5 OTA cycle smoke + 24 h soak still pending on-device.
 - **log-audit-20260507-003** — `esp_reset_reason()` re-emit after syslog bound — PR https://github.com/Haglerd/homekit-ratgdo32/pull/88 (merged 2026-05-07). Pre-req for BOOT-OOM-MDNS unblocked.
