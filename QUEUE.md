@@ -50,7 +50,7 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 **Notes:** `homekit.cpp:835` increments `hkConsecutiveHealthyTicks` only inside `else if (hkRecoverAttempts > 0)` branch. With `hkAutoRecover=false` (user's config; default), `hkRecoverAttempts` stays 0 forever, so counter never increments and diag-hk reporting is misleading — it falsely suggests HomeKit is unhealthy. Observed on 110 consecutive diag-hk lines over ~5h: every line shows `hkHealthyTicks=0` despite `controllers=4 paired=yes wifi=connected` and observed iOS reads (`last_hap_read_ago=44s` at times). Fix: hoist the increment+reset logic to run independently of recoverAttempts. Cosmetic/observability only — does not affect actual HomeKit recovery. Force-close FSM untouched. Single function in single file.
 
 ### [P2] log-audit-20260507-004 — `errno 11 "No more processes"` recurrence beyond browser fan-out (post log-audit-002 fix)
-**Status:** queued — needs-investigation
+**Status:** in-progress — investigation underway on `queue/log-audit-004-errno11-recurrence`
 **Source:** log-audit 2026-05-07 (Pi syslog) — user-surfaced, multi-boot pattern
 **Acceptance:** root cause identified for the non-browser-fanout occurrences; either second client-side mitigation OR firmware-side socket-pool / cleanup fix lands; 24 h soak with <2 errno 11 events per 6 h window.
 **Notes:** log-audit-002 (PR #77, sequentialize browser fetches) handled the diagnostics-page concurrent-fetch pattern. errno 11 still recurring on .64+ across multiple boots:
