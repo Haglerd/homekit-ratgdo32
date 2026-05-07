@@ -56,6 +56,7 @@
 #include "softAP.h"
 #include "json.h"
 #include "led.h"
+#include "instrumentation.h"
 #ifdef ESP8266
 #include "wifi_8266.h"
 #endif
