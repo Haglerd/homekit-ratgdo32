@@ -81,6 +81,13 @@ GarageDoor garage_door = {
 // Some initialization is postponed until after we have an IP address
 bool wifi_got_ip = false;
 
+#ifndef ESP8266
+// Captured at very early boot in setup() and re-emitted in the post-IP
+// block below once syslog forwarding is live, so silent post-OTA
+// reboots become attributable in Pi syslog. (log-audit-20260507-003)
+static esp_reset_reason_t boot_reset_reason = ESP_RST_UNKNOWN;
+#endif
+
 // Track our memory usage
 #ifdef ESP8266
 #define SYSTEM_STACK_END_ADDRESS 0x3FFFC000
@@ -187,6 +194,7 @@ void setup()
     }
 #else
     esp_reset_reason_t r = esp_reset_reason();
+    boot_reset_reason = r;
     switch (r)
     {
     case ESP_RST_POWERON:
@@ -307,6 +315,13 @@ void loop()
         setup_after_IP_done = true;
         ESP_LOGI(TAG, "=== Initialization after IP address acquired complete");
         // Some additional logging so that they are sent to syslog (which only works after we have IP address)
+#ifndef ESP8266
+        // Re-emit reset reason captured at early boot. The early-init
+        // ESP_LOGI fires before syslog forwarder is bound and never
+        // reaches the Pi, so silent post-OTA reboots were unattributable.
+        // (log-audit-20260507-003)
+        ESP_LOGI(TAG, "System restart reason: %d", boot_reset_reason);
+#endif
         ESP_LOGI(TAG, "Free heap at boot:  %d", free_heap_at_boot);
         ESP_LOGI(TAG, "Current free heap:  %d", ESP.getFreeHeap());
 #ifdef MMU_IRAM_HEAP
