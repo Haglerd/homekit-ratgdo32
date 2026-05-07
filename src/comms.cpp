@@ -29,7 +29,13 @@
 #ifdef USE_GDOLIB
 #include "gdo.h"
 #else // USE_GDOLIB
+// v45 W45: EspSoftwareSerial declares two locals 'byte' / 'word' that
+// shadow Arduino global typedefs. Vendored library — suppress -Wshadow
+// only across the include rather than touch the dependency.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
 #include "SoftwareSerial.h"
+#pragma GCC diagnostic pop
 #include "Reader.h"
 #include "secplus2.h"
 #include "Packet.h"

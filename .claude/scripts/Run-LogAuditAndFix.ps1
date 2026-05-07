@@ -2,13 +2,13 @@
 # Invoked by Windows Task Scheduler to run unattended log-audit-and-fix
 # against this project. Fires on whatever cadence the scheduled task is set to.
 #
-# Safe to run while interactive sessions are active — Claude Code spawns
+# Safe to run while interactive sessions are active -- Claude Code spawns
 # its own session for headless invocations.
 
 $ErrorActionPreference = 'Stop'
 
 # Project root (resolves to homekit-ratgdo32/)
-$ProjectRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $LogDir = Join-Path $env:USERPROFILE '.claude\log-audit-history'
 $LogFile = Join-Path $LogDir ("homekit-ratgdo32-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
@@ -24,9 +24,9 @@ Set-Location $ProjectRoot
 "" | Out-File -FilePath $LogFile -Append -Encoding utf8
 
 # Headless Claude Code invocation. -p runs the prompt then exits.
-# 30-minute timeout — generous for a full pipeline run including a PR.
-$proc = Start-Process -FilePath 'claude' `
-    -ArgumentList '-p', '/log-audit-and-fix' `
+# 30-minute timeout -- generous for a full pipeline run including a PR.
+$proc = Start-Process -FilePath 'cmd.exe' `
+    -ArgumentList '/c', 'claude', '-p', '/log-audit-and-fix' `
     -WorkingDirectory $ProjectRoot `
     -RedirectStandardOutput "$LogFile.stdout" `
     -RedirectStandardError "$LogFile.stderr" `
@@ -35,7 +35,7 @@ $proc = Start-Process -FilePath 'claude' `
 
 if (-not $proc.WaitForExit(30 * 60 * 1000)) {
     $proc.Kill()
-    "ERROR: timed out after 30 minutes — killed process" | Out-File -FilePath $LogFile -Append -Encoding utf8
+    "ERROR: timed out after 30 minutes -- killed process" | Out-File -FilePath $LogFile -Append -Encoding utf8
     exit 1
 }
 

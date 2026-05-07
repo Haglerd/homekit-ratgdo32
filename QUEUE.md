@@ -22,7 +22,7 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Status:** DONE — branch `w47-ticker-detach-sweep` (PR pending)
 **Source:** audit, v45 plan
 **Acceptance:** every `.detach()` line carries a one-line provenance comment; `:3318` site fixed inline with `request_force_close_clear` (per user direction — TTC arm-fresh preempts in-flight force-close).
-**Notes:** 24 production sites + 4 comment-only references inventoried in plan. Fourth same-shape leak closed at `src/comms.cpp:3370` (line shifted from `:3318` due to comment additions earlier in file).
+**Notes:** v1 (`a6368d5`) broke force-close (preempted itself). v2 (`bd358db`) added `preempt_force_close=true` param to `delayFnCall`; only force-close-internal caller at `:2825` opts out via `false`. v3 (`78657d8`) fixed CRASH_DEBUG dup-default. Code-review walked the 8-step 2-attempt sequence and verified force-close intact.
 
 ### [P3] W41 — Move `extern volatile uint32_t` declarations to header
 **Status:** queued
