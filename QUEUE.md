@@ -6,8 +6,8 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution.md`. Recommended sequencing: tooling sweeps first (W45/W46/W47) so any new findings they surface fold into the same release.
 
-### [P2] W45 — Build with `-Wshadow=local -Werror=shadow`, triage shadow warnings
-**Status:** queued
+### [P2] ~~W45~~ — Build with `-Wshadow=local -Werror=shadow`, triage shadow warnings
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/72 (branch `w45-wshadow-triage`)
 **Source:** audit, v45 plan
 **Acceptance:** clean `pio run -e ratgdo_esp32dev` with `-Wshadow=local` permanently in build_flags. Triage results appended to audit doc.
 **Notes:** library-header shadows (arduino-esp32, HomeSpan) are accepted noise per user direction; only fix shadows in fork code. `-Werror=shadow` reverts after triage.
@@ -53,6 +53,31 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Source:** audit, v45 plan
 **Acceptance:** inventory table appended; written conclusion (Conclusion A or B); knock-on classification of W40.
 **Notes:** default expected outcome — Conclusion A: existing split is deliberate, audit looked at wrong file when raising W40, W48 closes with documentation comment.
+
+---
+
+## Active — log-audit findings (2026-05-06)
+
+### [P2] log-audit-20260506-001 — SSE subscriptionCount=8 on every boot, reconciler hides root cause
+**Status:** queued
+**Source:** log-audit 2026-05-06 (Pi syslog, 7979 lines, 42h window)
+**Issue:** Haglerd/homekit-ratgdo32#69
+**Acceptance:** root cause identified; post-fix soak shows zero `counter=8 actual=0` warnings within 10s of `Initialization complete` across 5 consecutive reboots.
+**Notes:** P2 — 24/24 reproducibility over 24 different boots. Functional impact nil (reconciler clamps), but counter=`SSE_MAX_CHANNELS` exact match suggests a deterministic init-path bump or BSS issue. **needs-human-planning** (investigation-shaped, root cause unknown).
+
+### [P2] log-audit-20260506-002 — Socket fd exhaustion (errno 11) under browser concurrent-fetch burst
+**Status:** queued
+**Source:** log-audit 2026-05-06 (Pi syslog)
+**Issue:** Haglerd/homekit-ratgdo32#70
+**Acceptance:** zero `errno 11 No more processes` over 5 diagnostics-page loads; 3 reboots with browser open and no GDO init timeout.
+**Notes:** P2 — 14× errno 11 events + 1× `Not enough memory to allocate buffer` co-incident with a `Garage door is not responding to initialization sequence (3000ms)` at 2026-05-06T16:38:05. Browser at 10.112.60.248 fans out 4-5 concurrent fetches (`/showlog`, `/showrebootlog`, `/crashlog`, `/site.webmanifest`, SSE) and exhausts the lwIP socket pool. **needs-human-planning** — three viable mitigations (raise CONFIG_LWIP_MAX_SOCKETS, sequentialize browser fetches, or 503-with-retry-after); user picks direction.
+
+### [P2] log-audit-20260506-003 — SSE wedged-on-flow-control reaper churn, same UUIDs reaped 28+ times
+**Status:** queued
+**Source:** log-audit 2026-05-06 (Pi syslog)
+**Issue:** Haglerd/homekit-ratgdo32#71
+**Acceptance:** PR landing per-UUID rapid-recurrence dampener (60s 429 lockout) + extended log line; 24h soak shows <5 wedged-reaps per UUID (down from 28).
+**Notes:** P2 — 80 `wedged on flow-control` reaps across 4 UUIDs from same client IP (10.112.60.248), same UUID re-subscribing after reap and re-wedging. Reaper functioning but client is misbehaving (likely iOS Safari background-tab SSE silencing). **auto-fixable** — ~30 LoC contained to `web.cpp` SSE block.
 
 ---
 
