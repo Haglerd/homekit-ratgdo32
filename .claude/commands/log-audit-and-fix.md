@@ -5,9 +5,10 @@ Combined log audit + autonomous fix pipeline. Used by the scheduled task for una
 ## Pipeline
 
 1. Invoke `log-auditor` agent → pulls device + Pi logs since checkpoint, appends new findings to QUEUE.md
-2. If new findings count > 0, evaluate top eligible item against safety rails (below)
-3. If eligible: fetch the linked issue's plan (or invoke planner if no plan / `needs-human-planning` flag — planner ALWAYS produces a plan), route to `software-engineer` → `code-review` → `unit-tester` → `/pr` (with `Closes #<issue-number>`) → **agent merges after CI green**: `gh pr checks <#> --watch` then `gh pr merge <#> --squash --delete-branch`. If CI red, leave open + comment.
-4. If no eligible item, report "queued N findings, none auto-fixable, awaiting human triage" and exit.
+2. **Persist auditor changes to git BEFORE evaluating auto-fix.** If `git status --short QUEUE.md` shows `M`, branch (`queue/log-audit-<YYYY-MM-DD>-findings`), commit (`queue: log-audit <date> findings (<N> items: <comma-list>)`), push, open a PR via `/pr` with body summarizing the new findings, squash-merge after CI green. **Never exit with QUEUE.md uncommitted** — findings must be durable even if auto-fix bails or hits a halt.
+3. If new findings count > 0, evaluate top eligible item against safety rails (below)
+4. If eligible: fetch the linked issue's plan (or invoke planner if no plan / `needs-human-planning` flag — planner ALWAYS produces a plan), route to `software-engineer` → `code-review` → `unit-tester` → `/pr` (with `Closes #<issue-number>`) → **agent merges after CI green**: `gh pr checks <#> --watch` then `gh pr merge <#> --squash --delete-branch`. If CI red, leave open + comment.
+5. If no eligible item, report "queued N findings, none auto-fixable, awaiting human triage" and exit. (QUEUE.md already committed via step 2.)
 
 ## Safety rails — auto-fix eligibility
 
