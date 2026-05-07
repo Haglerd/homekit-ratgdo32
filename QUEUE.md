@@ -13,16 +13,16 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Notes:** library-header shadows (arduino-esp32, HomeSpan) are accepted noise per user direction; only fix shadows in fork code. `-Werror=shadow` reverts after triage.
 
 ### [P2] ~~W46~~ — Add eslint over `src/www/` + GitHub Actions CI lint
-**Status:** DONE — branch `w46-eslint-lint` (PR pending)
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/73 (branch `w46-eslint-lint`)
 **Source:** audit, v45 plan
 **Acceptance:** `npx eslint src/www/` exits 0; `.github/workflows/lint.yml` runs on push + PR. Vendored `marked.umd.js` + `qrcode.js` excluded.
-**Notes:** include CI integration in same commit per user direction (don't defer).
+**Notes:** Lint surfaced 9 real bugs (5× dead `reject()` ReferenceErrors in `logs.js`, 4× implicit-global hazards in `functions.js`/`logs.js`). 119 warnings deferred (HTML-event-handler unused-vars; `eqeqeq` mass-flip risk).
 
 ### [P2] W47 — `Ticker.detach()` audit sweep with provenance comments
-**Status:** queued — fourth same-shape leak candidate identified at `comms.cpp:3318`
+**Status:** in-progress — BLOCKED by code-review (commit `a6368d5` on branch `w47-ticker-detach-sweep`, NOT pushed; needs planner)
 **Source:** audit, v45 plan
 **Acceptance:** every `.detach()` line carries a one-line provenance comment; `:3318` site fixed inline with `request_force_close_clear` (per user direction — TTC arm-fresh preempts in-flight force-close).
-**Notes:** 24 production sites + 4 comment-only references inventoried in plan.
+**Notes:** 24 provenance comments are clean. Substantive `:3370` (was `:3318`) fix BREAKS force-close 2-attempt sequence: `send_force_close_press()` → `delayFnCall(forceCloseHoldMsCached, …)` → new `request_force_close_clear()` line fires immediately, loopTask drains it within ms, `forceCloseAttempt` is reset to 0 long before the press hold ends, press 2 silently dropped on every force-close. The `delayFnCall` level is the wrong abstraction — it caught force-close calling itself. Needs planner: either (a) move the clear out of `delayFnCall` to specific external-preemption sites (audit shows :3243/:3421/:3490 already paired by v40/W15 — may be no fourth external site exists), or (b) add a `preempt_force_close = true` parameter to `delayFnCall` and have force-close-internal callers pass `false`. Latent: also breaks `USE_GDOLIB` build (function gated `#ifndef USE_GDOLIB` while call site is outside the gate).
 
 ### [P3] W41 — Move `extern volatile uint32_t` declarations to header
 **Status:** queued

@@ -1705,12 +1705,14 @@ void DEV_GarageDoor::loop()
 /****************************************************************************
  * Light Service Handler
  */
-DEV_Light::DEV_Light(Light_t type) : Service::LightBulb()
+// v45 W45: param renamed lightType to avoid shadowing member DEV_Light::type
+// (caught by -Wshadow=local under build_src_flags).
+DEV_Light::DEV_Light(Light_t lightType) : Service::LightBulb()
 {
-    DEV_Light::type = type;
-    if (type == Light_t::GDO_LIGHT)
+    DEV_Light::type = lightType;
+    if (lightType == Light_t::GDO_LIGHT)
         ESP_LOGI(TAG, "Configuring HomeKit Light Service for GDO Light");
-    else if (type == Light_t::ASSIST_LASER)
+    else if (lightType == Light_t::ASSIST_LASER)
         ESP_LOGI(TAG, "Configuring HomeKit Light Service for Laser");
     event_q = xQueueCreate(10, sizeof(GDOEvent));
     DEV_Light::on = new Characteristic::On(DEV_Light::on->OFF);
@@ -1757,11 +1759,13 @@ void DEV_Light::loop()
 /****************************************************************************
  * Motion Service Handler
  */
-DEV_Motion::DEV_Motion(const char *name) : Service::MotionSensor()
+// v45 W45: param renamed motionName to avoid shadowing member DEV_Motion::name
+// (caught by -Wshadow=local under build_src_flags).
+DEV_Motion::DEV_Motion(const char *motionName) : Service::MotionSensor()
 {
-    ESP_LOGI(TAG, "Configuring HomeKit Motion Service for %s", name);
+    ESP_LOGI(TAG, "Configuring HomeKit Motion Service for %s", motionName);
     event_q = xQueueCreate(10, sizeof(GDOEvent));
-    strlcpy(this->name, name, sizeof(this->name));
+    strlcpy(this->name, motionName, sizeof(this->name));
     DEV_Motion::motion = new Characteristic::MotionDetected(motion->NOT_DETECTED);
 }
 
