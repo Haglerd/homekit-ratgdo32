@@ -81,6 +81,14 @@ Code-bug failures (build fails on real syntax error, tests fail on logic) are NO
 
 ## Hard stop conditions (last-resort halts only)
 
+This list is **EXHAUSTIVE.** No other reason halts a drain. In particular:
+
+- ❌ "context is getting heavy" / "checkpoint here" → **NOT a halt reason.** The user has stated 3+ times: autonomous execution, no self-imposed pauses. If you feel context-bound, finish the current item, pick the smallest remaining queued item, and keep going. Only the listed hard-stops halt. If a halt happens for any other reason it is treated as an autonomy violation.
+- ❌ "want to confirm with the user before continuing" → not a halt; the user pre-authorized the whole drain by invoking `/queue-next`.
+- ❌ "this PR introduced something risky, let me pause" → still not a halt; if code-review caught something real, that's the planner-revision-iteration loop (see below). Otherwise file the PR and continue.
+
+**Valid hard-stops (these and only these):**
+
 - Queue is empty → report and stop.
 - Cap reached → report and stop.
 - Top item is `deferred` → don't unilaterally promote.
