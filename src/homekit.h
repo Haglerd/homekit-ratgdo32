@@ -149,7 +149,7 @@ struct DEV_Light : Service::LightBulb
     QueueHandle_t event_q;
     Light_t type;
 
-    explicit DEV_Light(Light_t type = Light_t::GDO_LIGHT);
+    explicit DEV_Light(Light_t lightType = Light_t::GDO_LIGHT);
     boolean update();
     void loop();
 };
@@ -161,7 +161,7 @@ struct DEV_Motion : Service::MotionSensor
     QueueHandle_t event_q;
     char name[16];
 
-    explicit DEV_Motion(const char *name);
+    explicit DEV_Motion(const char *motionName);
     void loop();
 };
 
