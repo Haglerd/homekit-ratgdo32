@@ -58,16 +58,12 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 
 ## Active — log-audit findings (2026-05-06)
 
-### [P2] log-audit-20260506-001 — SSE subscriptionCount=8 on every boot, reconciler hides root cause
-**Status:** queued — **DIRECTION: option (a) — deep investigation, fix root cause** (not symptom-suppression)
+### [P2] ~~log-audit-20260506-001~~ — SSE subscriptionCount=8 on every boot, reconciler hides root cause
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/76 (branch `log-audit-001-sse-init-order`)
 **Source:** log-audit 2026-05-06 (Pi syslog, 7979 lines, 42h window)
-**Issue:** Haglerd/homekit-ratgdo32#69
-**Acceptance:** root cause identified and fixed; post-fix soak shows zero `counter=8 actual=0` warnings within 10s of `Initialization complete` across 5 consecutive reboots.
-**Notes:** P2 — 24/24 reproducibility over 24 different boots. Functional impact nil (reconciler clamps), but counter=`SSE_MAX_CHANNELS` exact match suggests a deterministic init-path bump or BSS issue.
-
-**User decision (2026-05-06):** option (a) — find and fix the root cause. NOT symptom-suppression (don't just silence the warning).
-
-**Constraint (user 2026-05-06):** no buffer/heap impact. If the root-cause fix requires adding tracking state / BSS / heap to detect the path, halt and surface to user before adding RAM. ESP8266 heap is tight; an architectural fix with RAM cost needs explicit approval.
+**Issue:** Haglerd/homekit-ratgdo32#69 (closed via PR)
+**Acceptance:** root cause identified — `setup_web()` ran `server.begin()` BEFORE the slot-init loop and never explicitly reset `subscriptionCount` to 0. Browser EventSources auto-reconnecting between socket-up and slot-init landed in lwIP's accept queue and hit pre-init state. Fix: zero `subscription[]` + `subscriptionCount` BEFORE `server.begin()`. Pure reorder + 1 assignment, zero RAM.
+**Notes:** Post-flash soak (5 reboots browser-closed + 5 with logs.html/status.html open in 4 tabs) deferred until next user device-flash window.
 
 ### [P2] log-audit-20260506-002 — Socket fd exhaustion (errno 11) under browser concurrent-fetch burst
 **Status:** queued — **DIRECTION CHOSEN: option (b) sequentialize browser fetches client-side** (auto-fixable)
@@ -112,6 +108,12 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 ## Fork-internal investigation items
 
 These are findings whose fork-side fix is partial or unverified. Fork work proceeds regardless of upstream applicability.
+
+### [P2] Sec2-FC — Force-close override is Sec+1.0-only; verify Sec+2.0 protocol path
+**Status:** queued — investigation gate
+**Source:** user observation 2026-05-06 — physical hold-button on Sec+ 2.0 wall panel closes obstructed door, but firmware's `door_command_force_close()` at `comms.cpp:2842` early-returns to a normal close on `doorControlType != 1`. User has a second device running Sec+ 2.0; current behavior on that device is "force-close button = normal close, photo eye still blocks."
+**Acceptance:** confirm or refute the inherited comment at `comms.cpp:2660` ("Sec+2.0 has no equivalent protocol message"). EITHER document why Sec+2.0 truly can't do the override and update the warning log to say so explicitly, OR implement the Sec+ 2.0 hold-button packet path. State machine (forceCloseInProgress / forceCloseAttempt / gap timer / preempt_force_close) is reused verbatim; only the per-press packet emission differs. No infrastructure rework.
+**Notes:** comment likely inherited from upstream and never validated for the fork. Sec+ 2.0 button-press packets carry button-state (press/release/held); wired wall panels emit the held variant when physically held, and the GDO honors it for the photo-eye override. If true, the firmware can emit the same packet sequence. Investigation: read `secplus2.h` packet definitions + check what a wired Sec+2.0 panel actually transmits during a hold (Pi syslog from a Sec+ 2.0 unit's RX-monitor mode would settle it).
 
 ### [P3] R-?-fork — Verify `homeSpan.processSerialCommand` thread-safety, fix if unsafe
 **Status:** queued — investigation gate
