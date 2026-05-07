@@ -10,19 +10,26 @@ Pick the top actionable item from `QUEUE.md`, route it through the agent pipelin
 2. **Pick the top item** by priority (P0 > P1 > P2 > P3) and `Status: queued`. Skip `in-progress` / `blocked` / `deferred`. If no eligible items, report "queue empty" and stop.
 3. **Mark it `in-progress`** in the queue file.
 4. **Route based on item type:**
-   - **Item has `**Issue:**` field with linked GitHub issue** → fetch issue body via `gh issue view <number> --repo Haglerd/homekit-ratgdo32`, use the embedded plan; skip planner; go straight to `software-engineer`. (This is the auditor + log-auditor pattern.)
-   - **Item is `needs-human-planning`** (per issue label or Notes) → STOP, surface to user.
+   - **Item has `**Issue:**` field with embedded plan** → fetch issue body via `gh issue view <number> --repo Haglerd/homekit-ratgdo32`, use the embedded plan, go to `software-engineer`.
+   - **Item is `needs-human-planning`** (per issue label or Notes) → invoke planner; planner ALWAYS produces a plan (picks default-with-rationale on ambiguity), proceed to engineer. PR is the user's review gate, not a pre-PR halt.
    - **Tooling sweep (W45/W46)**: software-engineer directly — well-spec'd in audit-notes, no planner needed
    - **Hygiene refactor (W41/W43)**: software-engineer directly
    - **Concurrency fix (W42)**: planner first (mutex placement risks), then software-engineer
-   - **Verification gate (W44)**: software-engineer reads the gate condition, decides path A vs drop
+   - **Verification gate (W44)**: software-engineer reads the gate condition, decides path A vs marks `done: verified non-applicable`
    - **Documentation audit (W48)**: software-engineer (writing task)
    - **Investigation item (R-?-fork)**: software-engineer reads HomeSpan source/docs first; close as non-finding OR file follow-up fork-internal item
-5. **Run through the pipeline:** software-engineer → code-review → unit-tester. The audit-notes files have the spec; the agents have the rules.
+5. **Run through the pipeline:** software-engineer → code-review → unit-tester.
 6. **Audit-notes update**: when complete, update `audit-notes/2026-05-04-fork-vs-upstream-attribution.md` to move the finding from "Open" to "Done" or `audit-notes/2026-05-04-fork-vs-upstream-attribution - Whats Done.md`.
-7. **On success**: open a PR via `/pr` (always `--repo Haglerd/homekit-ratgdo32`). If item has `**Issue:**` field, include `Closes #<number>` in the PR body so the issue auto-closes on merge. Mark item `done <pr-url>` in QUEUE.md. Move to "Recently completed".
-8. **On failure**: leave `in-progress` with one-line blocker, surface to user, STOP the drain (failures are signals, don't burn through more).
-9. **On success**: loop back to step 1 unless the cap is reached or a stop condition fires.
+7. **PR via /pr** (always `--repo Haglerd/homekit-ratgdo32`). If item has `**Issue:**` field, include `Closes #<number>`.
+8. **Wait for CI + merge** — agent owns the merge:
+   - `gh pr checks <#> --repo Haglerd/homekit-ratgdo32 --watch`
+   - If green → `gh pr merge <#> --repo Haglerd/homekit-ratgdo32 --squash --delete-branch`
+   - If red → leave open, surface failures, continue to next item
+9. **Update queue**: mark `done <pr-url>`, move to "Recently completed".
+10. **On code-review architectural problem**: re-invoke planner with code-review findings as context. Loop up to 3 planner-revision iterations.
+11. **On unit-test failure**: engineer fixes → code-review → retest. Loop up to 3 iterations.
+12. **On hook fire**: apply auto-recovery, retry up to 3 times on same hook+item.
+13. **On success**: loop back to step 0 unless cap reached or hard stop fires.
 
 ## Drain summary report
 
@@ -53,15 +60,17 @@ Examples:
 
 Code-bug failures (build fails on real syntax error, tests fail on logic) are NOT environmental — those go through the hook-recovery retry budget and STOP if exhausted.
 
-## Hard stop conditions
+## Hard stop conditions (last-resort halts only)
 
 - Queue is empty → report and stop.
 - Cap reached → report and stop.
 - Top item is `deferred` → don't unilaterally promote.
-- W42-class concurrency edits without a state diagram in the plan → STOP and call planner.
-- Force-close / auto-close state machine touched without explicit AC → STOP and call planner.
+- 3 planner-revision iterations on same item didn't converge.
+- 3 engineer+test iterations didn't pass on same item.
+- 3 hook auto-recovery attempts in a row failed on same hook+item.
 - About to draft `gh pr create --repo ratgdo/...` (upstream) → STOP — fork doesn't file upstream. The pre-tool-use fork-PR hook will block this anyway.
-- Code-bug retry budget exhausted (3 retries on same hook+item) → mark exhausted, continue to next item.
+
+Each halt files a comment on the linked issue summarizing every attempt (plans considered, code-review feedback per attempt, test failures). Halt is a hand-off with full context, not an early bail.
 
 ## Don't
 

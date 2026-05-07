@@ -6,8 +6,8 @@ Combined log audit + autonomous fix pipeline. Used by the scheduled task for una
 
 1. Invoke `log-auditor` agent → pulls device + Pi logs since checkpoint, appends new findings to QUEUE.md
 2. If new findings count > 0, evaluate top eligible item against safety rails (below)
-3. If eligible, invoke pipeline: fetch the linked issue's plan (it was generated at audit time), skip planner, route directly to `software-engineer` → `code-review` → `unit-tester` → `/pr` (with `Closes #<issue-number>`)
-4. If no eligible item, report "queued N findings, none auto-fixable, awaiting human triage" and exit
+3. If eligible: fetch the linked issue's plan (or invoke planner if no plan / `needs-human-planning` flag — planner ALWAYS produces a plan), route to `software-engineer` → `code-review` → `unit-tester` → `/pr` (with `Closes #<issue-number>`) → **agent merges after CI green**: `gh pr checks <#> --watch` then `gh pr merge <#> --squash --delete-branch`. If CI red, leave open + comment.
+4. If no eligible item, report "queued N findings, none auto-fixable, awaiting human triage" and exit.
 
 ## Safety rails — auto-fix eligibility
 
@@ -16,9 +16,7 @@ A finding can be picked for auto-fix ONLY IF all of these are true:
 - **Severity** is P0 OR P1
 - **Status** is `queued`
 - **Source** is `log-audit` (don't auto-fix human-curated audit findings — those wait for /queue-next manually)
-- **Has linked issue with embedded plan** (issue body includes "Recommended fix (planner sub-agent output)" with actual content, not "Needs human planning")
-- **Auto-fix eligibility marker** in the issue body says `auto-fixable` (NOT `needs-human-planning`)
-- **NOT** touching force-close / auto-close state machines
+- **NOT** touching force-close / auto-close state machines (those need explicit human design review)
 - **NOT** a heap-budget change > 5KB delta
 - **NOT** touching > 3 files
 - **Recurrence count >= 2** OR **severity P0**
@@ -35,23 +33,25 @@ If multiple items pass, sort by priority (P0 first, then P1) and earliest recurr
 
 3-retry budget per hook+item. After exhaustion, mark item `in-progress (auto-fix exhausted)` and continue to next item.
 
-## Hard stops
+## Hard stops (last resort)
 
 - Cap reached (5/run)
 - Queue empty
-- Item is `needs-human-planning`
-- pio build fails locally — invoke software-engineer to fix the build error, retry the build. After 3 retries, mark `in-progress (build broken)` and continue to next item.
+- 3 planner-revision iterations on same item didn't converge
+- 3 engineer+test iterations didn't pass on same item
+- 3 hook auto-recovery attempts in a row failed on same hook+item
+- pio build fails 3 times in a row after engineer fixes — mark `in-progress (build broken)` and continue
+
+Each halt files a comment on the linked issue with everything tried.
 
 ## After auto-fix
 
 - PR opened against `Haglerd/homekit-ratgdo32` main with full description (log evidence + plan summary + heap impact)
+- **Agent waits for CI then merges** (`gh pr checks --watch` then `gh pr merge --squash --delete-branch`). If CI red, leaves open + comments.
 - QUEUE.md item marked `done <pr-url>`, moved to "Recently completed"
 - Checkpoint state file updated
-- User reviews the PR in the morning, merges or closes
 
 ## Don't
-
-- Don't merge the PR. Ever. PR is the human review gate.
 - Don't run more than 5 fixes per scheduled invocation (current cap; adjust here if it proves too aggressive or too slow).
 - Don't auto-pick force-close / auto-close state-machine items. The fork's own rule says these need state diagrams and planner review. The planner can produce them, but an autonomous chain can drift; better to wait for a human-in-loop session.
 - Don't run /audit (the broad code audit) automatically. That's a separate manual decision.
