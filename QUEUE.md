@@ -17,12 +17,6 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 
 
-### [P3] W44 — DST spring-forward edge case in auto-close schedule
-**Status:** queued — verification gate first
-**Source:** audit, v45 plan
-**Acceptance:** EITHER cap `autoCloseTicker` wake horizon at 30 min (option-A) OR drop the commit if `autoCloseInWindow()` compares in UTC seconds (verified non-applicable).
-**Notes:** SNTP `time_is_set` callback misses DST transitions on every ESP-IDF version (DST is a localtime view, not a clock event).
-
 ---
 
 ## Active — log-audit findings (2026-05-06)
@@ -78,7 +72,8 @@ The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are a
 
 _(roll commits in here as W4x/Rx items land — keep last 10)_
 
-- **W48** — `_C` vs raw `JSON_ADD_*` field consistency audit. Conclusion A: split is deliberate. Doc comment + audit-notes table. W40 closes as non-finding. PR pending (this drain).
+- **W44** — auto-close DST mitigation. Verified applicable: `autoCloseInWindow` / `autoCloseSecsUntilNextStart` use `localtime_r` (DST-affected). Cap long-sleep horizon at 30 min in `autoCloseSecsUntilNextStart` so DST drift is bounded instead of ~23 h. PR pending (this drain).
+- **W48** — `_C` vs raw `JSON_ADD_*` field consistency audit. Conclusion A: split is deliberate. Doc comment + audit-notes table. W40 closes as non-finding. PR https://github.com/Haglerd/homekit-ratgdo32/pull/99 (merged 2026-05-07).
 - **W43** — rename file-scope `writeBuffer` → `loopTaskScratchBuf512` + invariant comment block. PR https://github.com/Haglerd/homekit-ratgdo32/pull/98 (merged 2026-05-07).
 - **log-audit-20260507-002** — hoist `hkConsecutiveHealthyTicks` increment out of recover-attempts branch so it runs every tick. Type bumped uint8_t → uint32_t to avoid wrap. PR https://github.com/Haglerd/homekit-ratgdo32/pull/96 (merged 2026-05-07).
 - **log-audit-20260507-004** — SSE clientWriteEx direct lwip_send rewrite (ESP32-only). Eliminates `errno 11 fail on fd N` syslog noise + fixes silent-broadcast bug from broken `availableForWrite` fast-path. PR https://github.com/Haglerd/homekit-ratgdo32/pull/94 (merged 2026-05-07). 24 h soak verification pending on-device after release.66.
