@@ -10,6 +10,12 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.72 (2026-05-07) — SEC1 TX-fail log rate-limit (obstruction noise)
+
+Hygiene fix surfaced from .71 soak. When a SEC1 (Sears/Genie) wall-panel send fails repeatedly — typically because the door is **physically obstructed** during a close, so the GDO is busy reversing and not ACKing — the wall-panel emulator queues the next packet → that one also exhausts retries → another `ESP_LOGE`. A single obstructed-close event from `comms.cpp:1665` produces ~45 identical `SEC1 TX send failed, exceeded max retry` lines over ~12 seconds, dominating the 16 KB on-device ring buffer and wrapping out the surrounding user-action context (door state transitions, light toggles, motion clears) before `/showlog` can be fetched.
+
+**Fix**: rate-limit the per-packet "exceeded max retry" log to one line per 5 s window. First failure logs immediately. Subsequent failures within the window are counted but not logged. Next failure after the window emits a summary line with the suppressed count: `SEC1 TX send failed, exceeded max retry [+N suppressed in last Xms — obstructed door / busy bus]`. Same v46 pattern as the SSE buffer-full skip rate-limit. Packet-delivery semantics unchanged — only log cadence. ESP8266 path unchanged (same code, same fix applies).
+
 ### v3.4.4-forceclose.71 (2026-05-07) — log-audit-005 BOOT-OOM-MDNS panic real fix (`tiT` re-entry into lwIP)
 
 **P0 fix.** PR #89 (.65 release) was a misdiagnosis — it deferred ratgdo's `mdns_service_add` calls until heap recovered above 50 KB, but the actual crash had nothing to do with our service registration timing.
