@@ -757,7 +757,14 @@ void setup_web()
     size_t headerkeyssize = sizeof(headerkeys) / sizeof(char *);
     // ask server to track these headers
     server.collectHeaders(headerkeys, headerkeyssize);
-    server.begin();
+    // log-audit-001: zero SSE slots AND subscriptionCount BEFORE server.begin().
+    // Boot-time race: opening the listening socket before subscription[] is
+    // INADDR_NONE'd and subscriptionCount is reset can let a browser-side
+    // EventSource auto-reconnect land on stale slot state. With browsers
+    // holding open clients across reboot, /rest/events/subscribe could fire
+    // before this loop ran. Symptom: 24/24 boots showing counter=8
+    // (=SSE_MAX_CHANNELS) at first orphan-sweep tick.
+    subscriptionCount = 0;
     // initialize all the Server-Sent Events (SSE) slots.
     for (uint32_t i = 0; i < SSE_MAX_CHANNELS; i++)
     {
@@ -774,6 +781,8 @@ void setup_web()
         subscription[i].lastActivity = 0;
         subscription[i].consecutiveBufferFull = 0;  // v47
     }
+    // Now safe to start accepting HTTP connections.
+    server.begin();
 
     // Initialize connection tracking
     for (int i = 0; i < MAX_CONCURRENT_REQUESTS; i++)
