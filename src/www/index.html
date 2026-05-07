@@ -488,22 +488,28 @@
                    the key. Sec+1.0 only — Sec+2.0 falls through to a normal
                    close transparently. -->
               <tr id="homekitForceCloseRow" style="display: none;">
-                <td class="label">Force-Close Mode:</td>
+                <td class="label">Force-Close:</td>
                 <td>
+                  <span style="display: inline-block; min-width: 90px;">Mode:</span>
                   <select id="forceCloseHomeKit" name="forceCloseHomeKit">
-                    <option value="0">Off — primary close uses normal toggle</option>
-                    <option value="1">Companion tile — adds a separate force-close tile</option>
-                    <option value="2">Replace — primary close uses force-close hold</option>
+                    <option value="0">Off (single tile, normal close)</option>
+                    <option value="1">Companion tile (two tiles)</option>
+                    <option value="2">Replace (single tile, force-close)</option>
                   </select>
-                  <span style="font-size:0.85em;">&nbsp;Sec+1.0 only.</span>
                   <br>
-                  <span style="font-size:0.85em;">Hold (ms):
-                    <input type="number" id="forceCloseHoldMs" name="forceCloseHoldMs"
-                           min="1000" max="10000" value="3500" style="width:70px;">
-                    &nbsp;
-                    <input type="checkbox" id="forceCloseSingleHold" name="forceCloseSingleHold" value="no">
-                    <label for="forceCloseSingleHold">Single continuous hold (no retry)</label>
-                  </span>
+                  <span style="display: inline-block; min-width: 90px;">Mechanic:</span>
+                  <input type="checkbox" id="forceCloseSingleHold" name="forceCloseSingleHold" value="no">
+                  <label for="forceCloseSingleHold">Single continuous hold (no retry)</label>
+                  <br>
+                  <span style="display: inline-block; min-width: 90px;">2-attempt:</span>
+                  <input type="number" id="forceCloseHoldMs" name="forceCloseHoldMs"
+                         min="1000" max="10000" value="3500" style="width: 70px;"> ms hold per press
+                  <br>
+                  <span style="display: inline-block; min-width: 90px;">Single hold:</span>
+                  <input type="number" id="forceCloseHoldMsSingle" name="forceCloseHoldMsSingle"
+                         min="1000" max="15000" value="7000" style="width: 70px;"> ms total hold
+                  <br>
+                  <span style="font-size: 0.75em; color: #888;">Sec+1.0 only. Sec+2.0 / dry-contact falls through to normal close.</span>
                 </td>
               </tr>
               <tr>

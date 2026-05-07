@@ -10,6 +10,26 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.75 (2026-05-07) — HK-FC: separate hold-ms per mechanic + UI cleanup + logging fixes
+
+User-feedback follow-up to `.74`. Three issues addressed in one PR:
+
+**1. Two independent hold-ms fields, one per mechanic.** `.74` shared a single `forceCloseHoldMs` between the 2-attempt and single-hold mechanics; flipping the checkbox without remembering to bump the duration left users at 3500 ms in single-hold mode (way too short to trigger override on most GDOs). Now there are two persisted fields:
+- `forceCloseHoldMs` (default 3500, range 1000-10000) — per-press hold for 2-attempt mechanic
+- `forceCloseHoldMsSingle` (default 7000, range 1000-15000) — total continuous hold for single-hold mechanic
+
+The active value is picked at force-close-fire time based on `forceCloseSingleHold`. Flipping the mechanic checkbox no longer trashes either timing. `comms_refresh_force_close_single_hold` chains into `comms_refresh_force_close_hold_ms` so the cache rotates correctly when the flag flips. `door_command_force_close` clamp range bumped to [1000, 15000] (union of both mechanics' ranges).
+
+**2. Web UI cleanup.** The Force-Close row was a jam of inline `style="font-size:0.85em;"` and `&nbsp;` filler. Reworked to match the project's existing pattern (HomeKit Hint Levels block as the reference): label spans with `display: inline-block; min-width: 90px;`, `<br>` separators between fields, hint text styled `font-size: 0.75em; color: #888;`. Both hold-ms inputs visible all the time — clearer than hide-on-checkbox.
+
+**3. Logging fixes.** The `.74` `send_force_close_press` log line said `attempt %d/2 press hold=Xms` even when in single-hold mode (where there is no "/2" — only one attempt). Same problem in `send_force_close_release_then_maybe_retry`'s `attempt %d release sent`. Both now branch on the cached mechanic flag:
+- 2-attempt: `FORCE CLOSE: press fired, attempt 1/2 holding for 3500ms`
+- single-hold: `FORCE CLOSE: press fired, holding for 7000ms (single-hold mechanic)`
+
+**Empirical note from .74 testing**: single-hold (8000 ms) did NOT trigger photo-eye override on at least one Sec+1.0 GDO model (door closed-then-reopened — held press registered as repeated toggles after door reached Closed). 2-attempt at lower per-press hold (2500 ms) worked cleanly on the same hardware. Single-hold stays as an opt-in for users whose GDO does need continuous-hold semantics. See PR #115 for full test data.
+
+ESP8266 path unchanged. Force-close FSM untouched. Build: Flash 96.1%, RAM 26.2%.
+
 ### v3.4.4-forceclose.74 (2026-05-07) — HK-FC single-hold press mechanic (opt-in)
 
 User feature, complements `.73`'s tri-state mode. Adds an opt-in flag `forceCloseSingleHold` controlling the **press mechanic** of `door_command_force_close`:
