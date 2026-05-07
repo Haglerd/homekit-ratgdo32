@@ -2657,8 +2657,19 @@ void door_command(DoorAction action)
 // If the door starts closing after press 1 alone (not blocked by photo
 // eye), the second cycle is skipped automatically — no double-trigger.
 //
-// Only meaningful on Sec+1.0. Sec+2.0 has no equivalent protocol message,
-// so it falls back to the normal close path.
+// Only meaningful on Sec+1.0. Verified 2026-05-06 against
+// lib/ratgdo/Packet.h: the Sec+2.0 DoorAction packet
+// (PacketCommand::DoorAction = 0x280) carries only a 1-bit `pressed`
+// field (DoorActionCommandData, Packet.h:125) — there is no
+// held/hold-override/photo-eye-skip variant. No other PacketCommand
+// in the Sec+2.0 wireline command set encodes a force-close override
+// either. A wired Sec+2.0 wall panel asserting hold-to-close talks to
+// the GDO over the same one-wire bus we share, but the held semantics
+// live in physical button-down duration, not in a distinguishable
+// packet type we could re-emit. The two-press/hold sequence above
+// therefore degrades to a single normal-close request on Sec+2.0,
+// which the motor will refuse if the photo eye is tripped — same as
+// any non-held wall-button tap.
 static volatile int forceCloseAttempt = 0;
 static volatile uint32_t forceCloseHoldMsCached = 3500;
 static volatile bool forceCloseInProgress = false;
@@ -2841,7 +2852,7 @@ void door_command_force_close(uint32_t hold_ms)
 {
     if (doorControlType != 1)
     {
-        ESP_LOGW(TAG, "FORCE CLOSE: hold-to-close override only meaningful on Sec+1.0; falling back to normal close (doorControlType=%lu)", doorControlType);
+        ESP_LOGW(TAG, "FORCE CLOSE: Sec+2.0 protocol has no force-close-override packet (DoorAction carries press/release only); falling back to normal close (doorControlType=%lu) — photo-eye obstruction will still block", doorControlType);
         door_command(DoorAction::Close);
         return;
     }
