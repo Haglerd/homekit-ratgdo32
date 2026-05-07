@@ -100,6 +100,9 @@ void handle_firmware_upload();
 void SSEHandler(uint32_t channel);
 void add_static_mdns();
 void add_dynamic_mdns();
+#ifndef ESP8266
+void try_register_ratgdo_mdns();
+#endif
 
 // Built in URI handlers
 const char restEvents[] = "/rest/events/";
@@ -369,6 +372,20 @@ enum class SseWriteResult : uint8_t { OK, BUFFER_FULL, FAILED };
 static _millis_t lastMDNSupdate = 0;
 static bool mdnsUpdatePending = false;
 
+// BOOT-OOM-MDNS: defer the ratgdo mDNS service-registration burst at the
+// end of setup_web until ESP32 free heap recovers above the floor below.
+// The synchronous burst at boot (4 calls: http, ratgdo, static-TXT,
+// dynamic-TXT) momentarily allocates ~10-20 KB transiently and has been
+// observed driving free heap below the mDNS lwIP send threshold during
+// the post-WiFi-up boot window, triggering a panic. Polled from web_loop
+// once heap recovers, with a hard 30 s timeout fallback so registration
+// happens even if heap stays pinned. ESP8266 path is unchanged.
+#ifndef ESP8266
+static bool ratgdo_mdns_register_pending = false;
+static constexpr uint32_t RATGDO_MDNS_HEAP_FLOOR_BYTES = 50 * 1024;
+static constexpr uint32_t RATGDO_MDNS_MAX_DEFER_MS = 30 * 1000;
+#endif
+
 // Connection throttling
 #define MAX_CONCURRENT_REQUESTS 8
 #define REQUEST_TIMEOUT_MS 2000
@@ -560,23 +577,32 @@ void web_loop()
     if (!web_setup_done)
         return;
 
+#ifndef ESP8266
+    if (ratgdo_mdns_register_pending) try_register_ratgdo_mdns();
+#endif
+
     static char *json = status_json;
     _millis_t upTime = _millis();
     static _millis_t last_request_time = 0;
 
     // manage frequency of mDNS updates
-    if (mdnsUpdatePending)
+#ifndef ESP8266
+    if (!ratgdo_mdns_register_pending)
+#endif
     {
-        if (upTime - lastMDNSupdate > MDNS_UPDATE_INTERVAL)
+        if (mdnsUpdatePending)
         {
-            // This function also resets mdnsUpdatePending and lastMDNSupdate.
+            if (upTime - lastMDNSupdate > MDNS_UPDATE_INTERVAL)
+            {
+                // This function also resets mdnsUpdatePending and lastMDNSupdate.
+                add_dynamic_mdns();
+            }
+        }
+        else if (upTime - lastMDNSupdate > MDNS_ANNOUNCE_TIMEOUT)
+        {
+            // if it has been more than MDNS_ANNOUNCE_TIMEOUT since last update, re-announce
             add_dynamic_mdns();
         }
-    }
-    else if (upTime - lastMDNSupdate > MDNS_ANNOUNCE_TIMEOUT)
-    {
-        // if it has been more than MDNS_ANNOUNCE_TIMEOUT since last update, re-announce
-        add_dynamic_mdns();
     }
 
     TAKE_MUTEX();
@@ -835,6 +861,15 @@ void setup_web()
 
     IRAM_END(TAG);
 
+#ifndef ESP8266
+    // BOOT-OOM-MDNS: defer the 4-step ratgdo mDNS register burst until
+    // free heap recovers above RATGDO_MDNS_HEAP_FLOOR_BYTES (with a
+    // 30 s timeout fallback). Polled from web_loop via
+    // try_register_ratgdo_mdns(). HomeSpan's _hap registration is on a
+    // separate code path and is unaffected.
+    ratgdo_mdns_register_pending = true;
+    web_setup_done = true;
+#else
     if (MDNS.addService("http", "tcp", 80))
     {
         ESP_LOGI(TAG, "Added MDNS service for _http._tcp on port 80");
@@ -856,6 +891,7 @@ void setup_web()
     }
 
     web_setup_done = true;
+#endif
     return;
 }
 
@@ -1726,6 +1762,77 @@ void build_status_json(char *json)
     JSON_ADD_INT("ttcActive", is_ttc_active());
     JSON_END();
 }
+
+#ifndef ESP8266
+// BOOT-OOM-MDNS: polled from web_loop while ratgdo_mdns_register_pending.
+// Runs the original 4-step ratgdo mDNS registration burst once free heap
+// recovers above RATGDO_MDNS_HEAP_FLOOR_BYTES, or unconditionally after
+// RATGDO_MDNS_MAX_DEFER_MS as a safety fallback. Idempotent guard
+// (cleared on success or timeout) plus the rate-limited deferral log
+// keep this from spamming the syslog while we wait.
+void try_register_ratgdo_mdns()
+{
+    // Use _millis_t (int64_t on ESP32) to match the codebase pattern and
+    // avoid the 49-day uint32_t wrap concern even though this only runs in
+    // the first ~30 s of boot. A bool sentinel for "first call" sidesteps
+    // any theoretical zero-value ambiguity.
+    static bool firstAttemptStamped = false;
+    static _millis_t firstAttemptMs = 0;
+    static _millis_t lastDeferLogMs = 0;
+    _millis_t nowMs = _millis();
+    if (!firstAttemptStamped)
+    {
+        firstAttemptMs = nowMs;
+        firstAttemptStamped = true;
+    }
+    uint32_t freeHeap = ESP.getFreeHeap();
+    _millis_t waitedMs = nowMs - firstAttemptMs;
+    bool floorCleared = (freeHeap >= RATGDO_MDNS_HEAP_FLOOR_BYTES);
+    bool timedOut = (waitedMs >= (_millis_t)RATGDO_MDNS_MAX_DEFER_MS);
+    if (!floorCleared && !timedOut)
+    {
+        if (lastDeferLogMs == 0 || (nowMs - lastDeferLogMs) >= 5000)
+        {
+            lastDeferLogMs = nowMs;
+            ESP_LOGI(TAG, "ratgdo mDNS deferred: free=%u floor=%u waited_ms=%u",
+                     (unsigned)freeHeap,
+                     (unsigned)RATGDO_MDNS_HEAP_FLOOR_BYTES,
+                     (unsigned)waitedMs);
+        }
+        return;
+    }
+    if (floorCleared)
+    {
+        ESP_LOGI(TAG, "ratgdo mDNS register: floor cleared free=%u after_ms=%u",
+                 (unsigned)freeHeap, (unsigned)waitedMs);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "ratgdo mDNS register: deferral TIMEOUT free=%u floor=%u -- registering anyway",
+                 (unsigned)freeHeap,
+                 (unsigned)RATGDO_MDNS_HEAP_FLOOR_BYTES);
+    }
+    if (MDNS.addService("http", "tcp", 80))
+    {
+        ESP_LOGI(TAG, "Added MDNS service for _http._tcp on port 80");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to add MDNS service for _http._tcp on port 80");
+    }
+    if (MDNS.addService("ratgdo", "tcp", 80))
+    {
+        ESP_LOGI(TAG, "Added MDNS service for _ratgdo._tcp on port 80");
+        add_static_mdns();
+        add_dynamic_mdns();
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to add MDNS service for _ratgdo._tcp on port 80");
+    }
+    ratgdo_mdns_register_pending = false;
+}
+#endif
 
 void add_static_mdns()
 {
