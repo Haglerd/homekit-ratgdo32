@@ -15,11 +15,11 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — fork-internal (W41-W48 audit cleanup)
 
-### [P3] W41 — Move `extern volatile uint32_t` declarations to header
-**Status:** queued — **DIRECTION: option (b) — all 7 declarations including `syslogDrops`** (currently same-TU-only in log.cpp; audit recommends preemptive add)
+### [P3] ~~W41~~ — Move `extern volatile uint32_t` declarations to header
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/83 (branch `w41-instrumentation-header`)
 **Source:** audit, v45 plan
-**Acceptance:** new `src/instrumentation.h` (flat src/ layout, no src/include/) holds all 7 declarations (`logMtxMaxWaitMs`, `sseSlowWrites`, `sseBufferFullSkips`, `sseSlotsAlloc`, `sseOrphansReaped`, `statusJsonPeakLen`, `syslogDrops`); `git grep "extern volatile uint32_t"` returns zero hits in `src/*.cpp`.
-**Notes:** zero behavior change. Zero RAM impact — `extern` declarations are name-binding only; definitions stay in their current `.cpp` files.
+**Acceptance:** New `src/instrumentation.h` holds all 7 decls (`logMtxMaxWaitMs`, `sseSlowWrites`, `sseBufferFullSkips`, `sseSlotsAlloc`, `sseOrphansReaped`, `statusJsonPeakLen`, `syslogDrops`); `git grep "extern volatile uint32_t" src/*.cpp` returns zero hits.
+**Notes:** Pure name-binding refactor; build report shows RAM/Flash byte-identical to pre-change. **No release bump** (refactor-only — will roll into next firmware-behavior PR's release).
 
 ### [P3] W43 — `writeBuffer` rename + invariant comment
 **Status:** queued
