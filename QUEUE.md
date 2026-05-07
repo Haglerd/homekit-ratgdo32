@@ -4,26 +4,6 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — fork-internal (W41-W48 audit cleanup)
 
-Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution.md`. Recommended sequencing: tooling sweeps first (W45/W46/W47) so any new findings they surface fold into the same release.
-
-### [P2] ~~W45~~ — Build with `-Wshadow=local -Werror=shadow`, triage shadow warnings
-**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/72 (branch `w45-wshadow-triage`)
-**Source:** audit, v45 plan
-**Acceptance:** clean `pio run -e ratgdo_esp32dev` with `-Wshadow=local` permanently in build_flags. Triage results appended to audit doc.
-**Notes:** library-header shadows (arduino-esp32, HomeSpan) are accepted noise per user direction; only fix shadows in fork code. `-Werror=shadow` reverts after triage.
-
-### [P2] ~~W46~~ — Add eslint over `src/www/` + GitHub Actions CI lint
-**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/73 (branch `w46-eslint-lint`)
-**Source:** audit, v45 plan
-**Acceptance:** `npx eslint src/www/` exits 0; `.github/workflows/lint.yml` runs on push + PR. Vendored `marked.umd.js` + `qrcode.js` excluded.
-**Notes:** Lint surfaced 9 real bugs (5× dead `reject()` ReferenceErrors in `logs.js`, 4× implicit-global hazards in `functions.js`/`logs.js`). 119 warnings deferred (HTML-event-handler unused-vars; `eqeqeq` mass-flip risk).
-
-### [P2] ~~W47~~ — `Ticker.detach()` audit sweep with provenance comments
-**Status:** DONE — branch `w47-ticker-detach-sweep` (PR pending)
-**Source:** audit, v45 plan
-**Acceptance:** every `.detach()` line carries a one-line provenance comment; `:3318` site fixed inline with `request_force_close_clear` (per user direction — TTC arm-fresh preempts in-flight force-close).
-**Notes:** v1 (`a6368d5`) broke force-close (preempted itself). v2 (`bd358db`) added `preempt_force_close=true` param to `delayFnCall`; only force-close-internal caller at `:2825` opts out via `false`. v3 (`78657d8`) fixed CRASH_DEBUG dup-default. Code-review walked the 8-step 2-attempt sequence and verified force-close intact.
-
 ### [P3] W41 — Move `extern volatile uint32_t` declarations to header
 **Status:** queued — **DIRECTION: option (b) — all 7 declarations including `syslogDrops`** (currently same-TU-only in log.cpp; audit recommends preemptive add)
 **Source:** audit, v45 plan
@@ -35,12 +15,6 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Source:** audit, v45 plan
 **Acceptance:** rename to `loopTaskScratchBuf512` (or similar); add comment block documenting loopTask-only invariant; ESP8266 alias preserved.
 **Notes:** zero behavior change. Option-A (per-caller stack buffers) rejected for ESP8266 stack pressure.
-
-### [P2] ~~W42~~ — Add mutex to `userSettings::get()` + `getDetail()` + `contains()`
-**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/75 (branch `w42-userconfig-read-mutex`)
-**Source:** audit, v45 plan
-**Acceptance:** mutex-wrapped reads on all three accessor methods; cache pattern preserved as fast path; smoke-tested via config toggle + homekit_health_log read.
-**Notes:** Three accessor bodies wrapped in `TAKE_MUTEX/GIVE_MUTEX` matching existing `set()` pattern in `src/config.cpp:689-707`. ESP8266 macros no-op; ESP32 ~1µs uncontended. Code-review noted non-blocking follow-up: comment on `comms.cpp:3388` `delayFnCall` site documenting loopTask-only invariant for `getTTClight()` callers. Out-of-scope (deferred): `configStr.str` pointer aliasing in `get()` return — separate lifetime ticket.
 
 ### [P3] W44 — DST spring-forward edge case in auto-close schedule
 **Status:** queued — verification gate first
@@ -58,26 +32,12 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 
 ## Active — log-audit findings (2026-05-06)
 
-### [P2] ~~log-audit-20260506-001~~ — SSE subscriptionCount=8 on every boot, reconciler hides root cause
-**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/76 (branch `log-audit-001-sse-init-order`)
-**Source:** log-audit 2026-05-06 (Pi syslog, 7979 lines, 42h window)
-**Issue:** Haglerd/homekit-ratgdo32#69 (closed via PR)
-**Acceptance:** root cause identified — `setup_web()` ran `server.begin()` BEFORE the slot-init loop and never explicitly reset `subscriptionCount` to 0. Browser EventSources auto-reconnecting between socket-up and slot-init landed in lwIP's accept queue and hit pre-init state. Fix: zero `subscription[]` + `subscriptionCount` BEFORE `server.begin()`. Pure reorder + 1 assignment, zero RAM.
-**Notes:** Post-flash soak (5 reboots browser-closed + 5 with logs.html/status.html open in 4 tabs) deferred until next user device-flash window.
-
-### [P2] ~~log-audit-20260506-002~~ — Socket fd exhaustion (errno 11) under browser concurrent-fetch burst
-**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/77 (branch `log-audit-002-www-fetch-sequentialize`)
+### [P2] ~~log-audit-20260506-003~~ — SSE wedged-on-flow-control reaper churn, same UUIDs reaped 28+ times
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/78 (branch `log-audit-003-sse-wedge-dampener`)
 **Source:** log-audit 2026-05-06 (Pi syslog)
-**Issue:** Haglerd/homekit-ratgdo32#70 (closed via PR)
-**Acceptance:** `loadLogPages()` in `src/www/logs.js` rewritten from `Promise.allSettled` fan-out to sequential `await` chain; per-fetch try/catch keeps chain alive on single failure; spinner+poller fire once via `finally`. Concurrent socket count drops from 5-6 to ~2.
-**Notes:** Web-UI-only change (gzipped + embedded in firmware flash). Zero firmware RAM cost. ESLint clean (0 errors, 118 warnings — was 119; one unused-param eliminated). Soak (5 page-loads + 3 reboots with browser open) deferred to next user device-flash window.
-
-### [P2] log-audit-20260506-003 — SSE wedged-on-flow-control reaper churn, same UUIDs reaped 28+ times
-**Status:** queued
-**Source:** log-audit 2026-05-06 (Pi syslog)
-**Issue:** Haglerd/homekit-ratgdo32#71
-**Acceptance:** PR landing per-UUID rapid-recurrence dampener (60s 429 lockout) + extended log line; 24h soak shows <5 wedged-reaps per UUID (down from 28).
-**Notes:** P2 — 80 `wedged on flow-control` reaps across 4 UUIDs from same client IP (10.112.60.248), same UUID re-subscribing after reap and re-wedging. Reaper functioning but client is misbehaving (likely iOS Safari background-tab SSE silencing). **auto-fixable** — ~30 LoC contained to `web.cpp` SSE block.
+**Issue:** Haglerd/homekit-ratgdo32#71 (closed via PR)
+**Acceptance:** Per-UUID 60s 429 dampener landed in `handle_subscribe`. `recentReaps[8]` table (~352 BSS, zero heap) populated by wedged-flow-control reap path. Wedged-reap log line extended with `wedgedFor=Xms`. Code-review fixes folded in: `id=-1` sentinel + String temp lifetime guard.
+**Notes:** Soak (24h Pi syslog watching for <5 wedged-reaps per UUID) deferred to next user device-flash window.
 
 ---
 
