@@ -53,10 +53,7 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 These are findings whose fork-side fix is partial or unverified. Fork work proceeds regardless of upstream applicability.
 
-### [P3] R-?-fork — Verify `homeSpan.processSerialCommand` thread-safety, fix if unsafe
-**Status:** queued — investigation gate
-**Acceptance:** read HomeSpan repo + docs for re-entrancy contract on `processSerialCommand` while `autoPoll` is running. If documented thread-safe → close as non-finding. If unsafe → defer through a flag drained on the autoPoll task (same v24 reconnect-pattern).
-**Notes:** caller is `helperFactoryReset` in `web.cpp`. Confidence on the bug is LOW — could turn out to be a non-issue.
+_(R-?-fork closed as non-finding — see Recently completed)_
 
 ---
 
@@ -72,7 +69,8 @@ The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are a
 
 _(roll commits in here as W4x/Rx items land — keep last 10)_
 
-- **W44** — auto-close DST mitigation. Verified applicable: `autoCloseInWindow` / `autoCloseSecsUntilNextStart` use `localtime_r` (DST-affected). Cap long-sleep horizon at 30 min in `autoCloseSecsUntilNextStart` so DST drift is bounded instead of ~23 h. PR pending (this drain).
+- **R-?-fork** — `homeSpan.processSerialCommand` thread-safety investigation. HomeSpan exposes `getMutex()` returning the `pollMutex` (`std::shared_mutex`) for thread-safe state mutation; pollTask holds it during each iteration. Inspected all 4 fork call sites: `handle_reset` ('U' via `homekit_unpair`) and `helperFactoryReset` ('F') both reboot within ms-to-~500 ms collapsing the race window; `homekit_dump_state` ('s'/'i'/'d') is read-only — torn-read cosmetic only. Mutex NOT added: pollTask iterations can take seconds, waiting from loopTask could trip the loop watchdog. **Closed as non-finding.** Doc comments added to `homekit_dump_state` and `helperFactoryReset` (the `homekit_unpair` call site already had the v43/W29 comment). PR pending (this drain).
+- **W44** — auto-close DST mitigation. Verified applicable: `autoCloseInWindow` / `autoCloseSecsUntilNextStart` use `localtime_r` (DST-affected). Cap long-sleep horizon at 30 min in `autoCloseSecsUntilNextStart` so DST drift is bounded instead of ~23 h. PR https://github.com/Haglerd/homekit-ratgdo32/pull/102 (merged 2026-05-07).
 - **W48** — `_C` vs raw `JSON_ADD_*` field consistency audit. Conclusion A: split is deliberate. Doc comment + audit-notes table. W40 closes as non-finding. PR https://github.com/Haglerd/homekit-ratgdo32/pull/99 (merged 2026-05-07).
 - **W43** — rename file-scope `writeBuffer` → `loopTaskScratchBuf512` + invariant comment block. PR https://github.com/Haglerd/homekit-ratgdo32/pull/98 (merged 2026-05-07).
 - **log-audit-20260507-002** — hoist `hkConsecutiveHealthyTicks` increment out of recover-attempts branch so it runs every tick. Type bumped uint8_t → uint32_t to avoid wrap. PR https://github.com/Haglerd/homekit-ratgdo32/pull/96 (merged 2026-05-07).

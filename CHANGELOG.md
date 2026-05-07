@@ -10,6 +10,10 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.70 (2026-05-07) — R-?-fork HomeSpan processSerialCommand thread-safety doc
+
+Investigation-gate close. HomeSpan's `pollTask` holds `pollMutex` (a `std::shared_mutex`, exposed via `homeSpan.getMutex()`) for each iteration; state-mutating CLI commands ('F' factory reset, 'U' unpair) called from another task without taking that mutex would race with pollTask's accesses. Inspected the 4 fork call sites: `handle_reset` ('U' via `homekit_unpair`) and `helperFactoryReset` ('F') both reboot within ms-to-~500 ms, collapsing the race window; `homekit_dump_state` ('s'/'i'/'d') is read-only — torn-read cosmetic only. Mutex NOT added: pollTask iterations can take seconds, waiting on it from loopTask could trip the loop watchdog. **Closed as non-finding.** Doc comments added to `homekit_dump_state` and `helperFactoryReset` documenting the rationale (the unpair site already had the v43/W29 comment).
+
 ### v3.4.4-forceclose.69 (2026-05-07) — W44 auto-close DST spring-forward / fall-back mitigation
 
 **Verified applicable** at the gate: `autoCloseInWindow` and `autoCloseSecsUntilNextStart` both run against `localtime_r` (`comms.cpp:2935`/`2974`) → DST shifts move the comparison. SNTP's `time_is_set` callback fires only on initial sync / step, NOT on DST transitions (DST is a localtime view, not a clock event). So a one-shot `autoCloseTicker.once_ms(secs)` could sleep ~22 h waiting for next window-start; if a DST transition happens mid-sleep, the actual fire-time drifts by ±1 h relative to local-time intent.
