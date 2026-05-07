@@ -1871,7 +1871,10 @@ void build_status_json(char *json)
     JSON_ADD_BOOL(cfg_motionHomeKit, userConfig->getMotionHomeKit());
     // HK-FC: surface the new toggle + hold-ms so the web UI can render
     // the row state and current value.
-    JSON_ADD_BOOL(cfg_forceCloseHomeKit, userConfig->getForceCloseHomeKit());
+    // HK-FC tri-state: 0=off, 1=companion tile, 2=replace primary close.
+    // Explicit (int32_t) cast disambiguates the JSON add_int overloads
+    // (int matches both int32_t and uint32_t signatures otherwise).
+    JSON_ADD_INT(cfg_forceCloseHomeKit, (int32_t)userConfig->getForceCloseHomeKit());
     JSON_ADD_INT(cfg_forceCloseHoldMs,  userConfig->getForceCloseHoldMs());
 #endif
     JSON_ADD_INT("webRequests", request_count);

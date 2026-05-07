@@ -1482,9 +1482,16 @@ bool enable_service_homekit_motion_sensor(bool enable)
 // The toggle is exposed regardless of GDOSecurityType so users on
 // Sec+2.0 / dry-contact still get the visual second tile (close
 // path falls through to a normal close — see comms.cpp:2853-2858).
-bool enable_service_homekit_force_close(bool enable)
+//
+// Tri-state mode (cfg_forceCloseHomeKit):
+//   0 = OFF       — no force-close tile, primary close uses normal toggle
+//   1 = COMPANION — separate force-close tile alongside primary
+//   2 = REPLACE   — no second tile; primary close calls force-close path
+// Only mode == 1 instantiates the second accessory; mode 0 and mode 2
+// both delete it (if present from a previous mode-1 session).
+bool enable_service_homekit_force_close(int mode)
 {
-    if (enable)
+    if (mode == 1)
     {
         if (!forceCloseDoor)
         {
@@ -1502,7 +1509,10 @@ bool enable_service_homekit_force_close(bool enable)
     }
     else if (forceCloseDoor)
     {
-        ESP_LOGI(TAG, "Deleting HomeKit Force-Close Garage Door Service");
+        // mode 0 or 2 — delete the second tile if it exists. Mode 2's
+        // close-replacement is wired in DEV_GarageDoor::update(), not
+        // via a second accessory.
+        ESP_LOGI(TAG, "Deleting HomeKit Force-Close Garage Door Service (mode=%d)", mode);
         if (homeSpan.deleteAccessory(HOMEKIT_AID_FORCE_CLOSE_DOOR))
         {
             forceCloseDoor = nullptr;
@@ -1615,12 +1625,14 @@ void setup_homekit()
     }
 
     // HK-FC: optionally create the second GarageDoorOpener accessory at boot.
-    // Default OFF — users see no extra tile in iOS Home unless they tick the
-    // setting. Runtime toggle handled via enable_service_homekit_force_close
-    // so users don't need to reboot to add/remove the tile.
-    if (userConfig->getForceCloseHomeKit())
+    // Tri-state mode: only mode 1 (companion) instantiates the second tile.
+    // Mode 0 (off) and mode 2 (replace) both skip — mode 2's close-replacement
+    // wires into DEV_GarageDoor::update() instead. Runtime toggle of the tile
+    // handled via enable_service_homekit_force_close so users don't reboot.
+    const int fcMode = userConfig->getForceCloseHomeKit();
+    if (fcMode == 1)
     {
-        ESP_LOGI(TAG, "Creating HomeKit Force-Close Garage Door Service");
+        ESP_LOGI(TAG, "Creating HomeKit Force-Close Garage Door Service (mode=1 companion)");
         new SpanAccessory(HOMEKIT_AID_FORCE_CLOSE_DOOR);
         new DEV_Info("Force Close Door");
         new Characteristic::Manufacturer("Ratcloud llc");
@@ -1629,9 +1641,13 @@ void setup_homekit()
         new Characteristic::FirmwareRevision(AUTO_VERSION);
         forceCloseDoor = new DEV_GarageDoorForceClose();
     }
+    else if (fcMode == 2)
+    {
+        ESP_LOGI(TAG, "Force-close HomeKit mode=2 (replace) — primary close will use force-close path");
+    }
     else
     {
-        ESP_LOGI(TAG, "Force-close HomeKit accessory disabled in settings");
+        ESP_LOGI(TAG, "Force-close HomeKit disabled in settings (mode=0)");
     }
 
     // only create motion if we know we have motion sensor(s) AND it's enabled in settings
@@ -1763,7 +1779,34 @@ DEV_GarageDoor::DEV_GarageDoor() : Service::GarageDoorOpener()
 boolean DEV_GarageDoor::update()
 {
     ESP_LOGI(TAG, "Garage Door Characteristics Update, door target: %s", DOOR_STATE(target->getNewVal()));
-    GarageDoorCurrentState state = (target->getNewVal() == target->OPEN) ? open_door() : close_door();
+    GarageDoorCurrentState state;
+    if (target->getNewVal() == target->OPEN)
+    {
+        state = open_door();
+    }
+    else
+    {
+        // HK-FC mode 2 (replace): the primary close button calls
+        // force-close directly — saves the cascade of "try normal close
+        // → detect failure → fall back to force-close" for setups whose
+        // GDO always needs the long-press hold. Mode 0/1 keep the
+        // standard close path. door_command_force_close clamps hold-ms
+        // and falls back to a normal close for Sec+2.0 / dry-contact
+        // (comms.cpp:2880-2881), so this is safe across security types.
+#ifndef ESP8266
+        if (userConfig->getForceCloseHomeKit() == 2)
+        {
+            ESP_LOGI(TAG, "HK-FC mode=2 — primary close dispatching force-close (hold=%ums)",
+                     (unsigned)userConfig->getForceCloseHoldMs());
+            door_command_force_close(userConfig->getForceCloseHoldMs());
+            state = garage_door.current_state;
+        }
+        else
+#endif
+        {
+            state = close_door();
+        }
+    }
     obstruction->setVal(false);
     current->setVal(state);
 
