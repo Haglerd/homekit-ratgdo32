@@ -25,27 +25,10 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — log-audit findings (2026-05-07)
 
-### [P0] log-audit-20260507-005 — BOOT-OOM-MDNS recurring on .65 (PR #89 fix INCOMPLETE — wrong code path)
-**Status:** queued — needs-human-planning
-**Source:** user-pulled `/crashlog` from device 2026-05-07 08:19 CDT after observing post-OTA panic
-**Acceptance:** mdns_networking 176-byte allocation no longer fails; zero `Cannot allocate memory (receive(176))` events across 5 consecutive OTA cycles + 24h soak; no tiT IllegalInstruction crashes.
-**Notes:** **Fresh crash trace from .65 firmware (the BOOT-OOM-MDNS fix release):**
-- Boot: 07-May-2026 07:28:42 CDT
-- Crash: 07-May-2026 08:04:14 CDT (uptime 35:32)
-- Reason: IllegalInstruction in task `tiT`
-- Last log: `E (00:07:23.483) mdns_networking: Cannot allocate memory (receive(176), free heap: ...)`
-- Stack: `0x4008EBBC 0x4008EB81 0x400955E9 0x401E6B8B 0x4010BC9F 0x4010BF29 0x4010BFEA 0x40095331 0x40171FD2 0x4014551D 0x40148AF3 0x4014DBFE 0x4013CC1E 0x4008FB41`
-- Compare to original yesterday's trace on .61: `0x4008EBBC 0x4008EB81 0x400955E9 0x401E5D9F 0x4010B3D3 0x4010B65D 0x4010B71E 0x40095331 0x401711E6 0x40144771 0x40147D47 0x4014CE52 0x4013BE72 0x4008FB41` — first 3 + last identical, same call shape, ASLR/relocation-shifted middle.
-
-**Why PR #89 didn't fix it:** the fix deferred mDNS *service registration* until heap >= 50 KB. But the crash is in mDNS *receive()* — the 176-byte allocation happens whenever a query arrives on port 5353, regardless of whether services are registered. Receive runs as soon as `mdns_init()` is called, which still happens at boot. Three diagnostic candidates:
-
-- **(a)** lwIP/mdns receive buffer pool exhaustion ≠ general heap exhaustion. The 50KB free-heap check looked at the wrong thing. mDNS receive uses lwIP `MEMP_PBUF` / `MEMP_NETBUF` pools sized in sdkconfig.
-- **(b)** `mdns_init()` itself should be deferred, not just `mdns_service_add` calls. Without `mdns_init`, the receive path doesn't run.
-- **(c)** Cap mDNS service-record TXT length so the announce burst doesn't peak-alloc the receive buffer at the same time.
-
-**Pre-req:** `addr2line` analysis on the new stack trace using the .65 ELF (already in the GitHub release) to confirm the failing function. Without function names, planner picks among (a)/(b)/(c) speculatively.
-
-**Hard constraint:** force-close FSM untouched. NOT auto-fixable. P0 because the device crashes on a real recurring bug that the previous "fix" didn't address.
+### [P0] ~~log-audit-20260507-005~~ — BOOT-OOM-MDNS recurring on .65 (PR #89 fix INCOMPLETE — wrong code path)
+**Status:** done — PR https://github.com/Haglerd/homekit-ratgdo32/pull/105 (merged 2026-05-07)
+**Acceptance:** root cause was NOT mDNS OOM. addr2line on the .65 stack trace showed the panic was in `tiT` task at `_strerror_r` from `__assert_func`, with the chain `mdns_mem_calloc` → `ESP_LOGE` → our `esp_log_hook` → `LOG::logToBuffer` → `logToSyslog` → `WiFiUDP::beginPacket` → `socket()` from inside `tcpip_thread`. lwIP's socket API forwards every call as a tcpip-message to `tcpip_thread` and waits for a reply; if the caller IS `tcpip_thread`, the wait is for itself → `LWIP_ASSERT` → panic. PR #89 deferred mDNS *service registration* but the crash had nothing to do with service-registration timing. Fix in PR #105: cache `tiT`/`wifi`/`sys_evt` task handles in `LOG::logToBuffer`, skip `SSEBroadcastState` + `logToSyslog` calls when originating task matches. Belt-and-suspenders `xPortInIsrContext()` gate also added.
+**Notes:** PR #89's heap-floor service-registration deferral kept (orthogonal heap-pressure mitigation). 24 h soak verification on-device pending after release.71.
 
 ### [P2] ~~log-audit-20260507-004~~ — `errno 11 "No more processes"` recurrence beyond browser fan-out (post log-audit-002 fix)
 **Status:** done — PR https://github.com/Haglerd/homekit-ratgdo32/pull/94 (merged 2026-05-07)
@@ -91,7 +74,8 @@ The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are a
 
 _(roll commits in here as W4x/Rx items land — keep last 10)_
 
-- **R-?-fork** — `homeSpan.processSerialCommand` thread-safety investigation. HomeSpan exposes `getMutex()` returning the `pollMutex` (`std::shared_mutex`) for thread-safe state mutation; pollTask holds it during each iteration. Inspected all 4 fork call sites: `handle_reset` ('U' via `homekit_unpair`) and `helperFactoryReset` ('F') both reboot within ms-to-~500 ms collapsing the race window; `homekit_dump_state` ('s'/'i'/'d') is read-only — torn-read cosmetic only. Mutex NOT added: pollTask iterations can take seconds, waiting from loopTask could trip the loop watchdog. **Closed as non-finding.** Doc comments added to `homekit_dump_state` and `helperFactoryReset` (the `homekit_unpair` call site already had the v43/W29 comment). PR pending (this drain).
+- **log-audit-20260507-005** (P0) — gate `tiT`/`wifi`/`sys_evt` from SSE+syslog re-entry into lwIP. PR #89 (.65 release) was a misdiagnosis. Real cause: mDNS's harmless `ESP_LOGE("Cannot allocate memory")` from `tcpip_thread` ran through our log hook → `logToSyslog` → `socket()` from inside `tiT` → lwIP self-deadlock → `IllegalInstruction` panic. Fix: cache network-task handles, skip broadcast/syslog when current task is one of them. PR https://github.com/Haglerd/homekit-ratgdo32/pull/105 (merged 2026-05-07). 24 h soak pending on-device after release.71.
+- **R-?-fork** — `homeSpan.processSerialCommand` thread-safety investigation. HomeSpan exposes `getMutex()` returning the `pollMutex` (`std::shared_mutex`); pollTask holds it during each iteration. Inspected all 4 fork call sites: `handle_reset` ('U' via `homekit_unpair`) and `helperFactoryReset` ('F') both reboot ~500 ms after the call, collapsing the race window; `homekit_dump_state` ('s'/'i'/'d') is read-only — torn-read cosmetic only. Mutex NOT added: pollTask iterations can take seconds, waiting from loopTask could trip the loop watchdog. **Closed as non-finding.** Doc comments added to `homekit_dump_state` and `helperFactoryReset`. PR https://github.com/Haglerd/homekit-ratgdo32/pull/104 (merged 2026-05-07).
 - **W44** — auto-close DST mitigation. Verified applicable: `autoCloseInWindow` / `autoCloseSecsUntilNextStart` use `localtime_r` (DST-affected). Cap long-sleep horizon at 30 min in `autoCloseSecsUntilNextStart` so DST drift is bounded instead of ~23 h. PR https://github.com/Haglerd/homekit-ratgdo32/pull/102 (merged 2026-05-07).
 - **W48** — `_C` vs raw `JSON_ADD_*` field consistency audit. Conclusion A: split is deliberate. Doc comment + audit-notes table. W40 closes as non-finding. PR https://github.com/Haglerd/homekit-ratgdo32/pull/99 (merged 2026-05-07).
 - **W43** — rename file-scope `writeBuffer` → `loopTaskScratchBuf512` + invariant comment block. PR https://github.com/Haglerd/homekit-ratgdo32/pull/98 (merged 2026-05-07).
