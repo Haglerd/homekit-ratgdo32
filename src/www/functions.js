@@ -614,6 +614,11 @@ function setElementsFromStatus(status) {
             case "forceCloseHoldMs":
                 document.getElementById(key).value = value;
                 break;
+            case "forceCloseSingleHold":
+                // HK-FC press-mechanic: false=legacy 2-attempt sequence,
+                // true=single continuous press hold for forceCloseHoldMs.
+                document.getElementById(key).checked = value;
+                break;
             case "vehicleHomeKit":
                 document.getElementById(key).checked = value;
                 setVehicleSensorOptionState(value);
@@ -1678,6 +1683,7 @@ async function saveSettings() {
     let forceCloseHomeKit = parseInt(document.getElementById("forceCloseHomeKit").value, 10);
     if (isNaN(forceCloseHomeKit) || forceCloseHomeKit < 0 || forceCloseHomeKit > 2) forceCloseHomeKit = 0;
     forceCloseHomeKit = String(forceCloseHomeKit);
+    const forceCloseSingleHold = (document.getElementById("forceCloseSingleHold").checked) ? '1' : '0';
     let forceCloseHoldMs = parseInt(document.getElementById("forceCloseHoldMs").value, 10);
     if (isNaN(forceCloseHoldMs)) forceCloseHoldMs = 3500;
     forceCloseHoldMs = Math.max(1000, Math.min(10000, forceCloseHoldMs));
@@ -1747,6 +1753,7 @@ async function saveSettings() {
         "motionHomeKit", motionHomeKit,
         "forceCloseHomeKit", forceCloseHomeKit,
         "forceCloseHoldMs", forceCloseHoldMs,
+        "forceCloseSingleHold", forceCloseSingleHold,
     );
     if (reboot) {
         countdown(rebootSeconds, "Settings saved, RATGDO device rebooting...&nbsp;");

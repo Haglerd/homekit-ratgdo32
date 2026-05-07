@@ -853,6 +853,13 @@ void setup_comms()
     // first tick fires. After this, checkAutoClose reads from the
     // cache instead of taking userConfig (audit #8 race).
     comms_refresh_auto_close_config();
+    // HK-FC: seed the press-mechanic + hold-ms caches at boot so the
+    // first force-close after reboot uses the saved config rather than
+    // the static initializer value. Pre-this-commit a user-set
+    // forceCloseHoldMs would only take effect after the first settings
+    // save post-reboot — surprising. Now boot-load matches.
+    comms_refresh_force_close_hold_ms();
+    comms_refresh_force_close_single_hold();
 
     // v22: window-aware scheduler instead of unconditional 60s tick.
     // When autoClose is OFF, no ticker is attached. When ON with
@@ -2706,6 +2713,12 @@ void door_command(DoorAction action)
 // any non-held wall-button tap.
 static volatile int forceCloseAttempt = 0;
 static volatile uint32_t forceCloseHoldMsCached = 3500;
+// HK-FC press-mechanic cache. false = legacy 2-attempt sequence
+// (press → release → 1.5s gap → press → release). true = single
+// continuous hold for forceCloseHoldMsCached ms (mimics a human
+// holding the wall button). Updated via comms_refresh_force_close_single_hold
+// from helperForceCloseSingleHold (settings save) and at boot in setup_comms.
+static volatile bool forceCloseSingleHoldCached = false;
 static volatile bool forceCloseInProgress = false;
 // Deferred gap-timer arm (Ticker → loopTask). 0 = no pending arm;
 // non-zero = arm forceCloseGapTimer for that ms. force_close_drain_pending_arm
@@ -2834,6 +2847,18 @@ static void send_force_close_release_then_maybe_retry()
         return;
     }
 
+    // HK-FC press-mechanic gate. Single-hold mode terminates after the
+    // first press's release — the GDO has already seen one continuous
+    // button-down for forceCloseHoldMsCached, which on Sec+1.0 is the
+    // human-wall-button-equivalent override pattern. The 2-attempt
+    // sequence below is reserved for the legacy mechanic.
+    if (forceCloseSingleHoldCached)
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: single-hold mode — sequence complete after attempt 1");
+        request_force_close_clear("single-hold mode complete");
+        return;
+    }
+
     if (forceCloseAttempt < 2)
     {
         ESP_LOGI(TAG, "FORCE CLOSE: scheduling attempt %d after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
@@ -2911,6 +2936,22 @@ void comms_refresh_force_close_hold_ms()
 #endif
 }
 
+// HK-FC: refresh the press-mechanic cache. Same RELAXED-store rationale
+// as comms_refresh_force_close_hold_ms — single-byte volatile bool, only
+// racing reader is send_force_close_release_then_maybe_retry which reads
+// once per release callback. Worst case observation: a single press
+// runs under the prior mechanic before the cache flip is visible. No
+// safety implications either way.
+void comms_refresh_force_close_single_hold()
+{
+#ifndef ESP8266
+    bool single = userConfig->getForceCloseSingleHold();
+    __atomic_store_n(&forceCloseSingleHoldCached, single, __ATOMIC_RELAXED);
+    ESP_LOGD(TAG, "FORCE CLOSE: cached single-hold mode refreshed to %s",
+             single ? "true (single press)" : "false (2-attempt)");
+#endif
+}
+
 void door_command_force_close(uint32_t hold_ms)
 {
     if (doorControlType != 1)
@@ -2950,7 +2991,14 @@ void door_command_force_close(uint32_t hold_ms)
     // sequence can fire concurrently with the new press 1.
     forceCloseGapTimer.detach();
 
-    ESP_LOGI(TAG, "FORCE CLOSE: starting 2-attempt sequence (hold=%lums, gap=%lums)", hold_ms, FORCE_CLOSE_GAP_MS);
+    if (forceCloseSingleHoldCached)
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: starting single-hold sequence (hold=%lums)", hold_ms);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: starting 2-attempt sequence (hold=%lums, gap=%lums)", hold_ms, FORCE_CLOSE_GAP_MS);
+    }
     send_force_close_press();
 }
 
@@ -3234,6 +3282,7 @@ void force_close_drain_pending_clear()   {}
 // HK-FC: same-shape stub for the gdolib path. cache lives only in the
 // non-gdolib branch alongside door_command_force_close itself.
 void comms_refresh_force_close_hold_ms() {}
+void comms_refresh_force_close_single_hold() {}
 
 #endif // not USE_GDOLIB
 

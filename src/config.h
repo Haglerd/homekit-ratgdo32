@@ -181,6 +181,16 @@ constexpr char cfg_motionHomeKit[] PROGMEM = "motionHomeKit";
 // plugin and door_command_force_close's default fallback.
 constexpr char cfg_forceCloseHomeKit[] PROGMEM = "forceCloseHomeKit";
 constexpr char cfg_forceCloseHoldMs[]  PROGMEM = "forceCloseHoldMs";
+// HK-FC press-and-hold mechanic (fork addition, ESP32-only).
+// Default OFF: existing 2-attempt sequence (press 3.5s → release → 1.5s gap
+// → press 3.5s → release). When ON: single continuous press hold for
+// `forceCloseHoldMs`, mimicking a human holding the wall button. From the
+// GDO's perspective ON is one long button-down (the override-photo-eye
+// pattern); OFF is two distinct close presses with a gap. ON is more
+// reliable for stubborn obstructed-close cases on Sec+1.0 GDOs that
+// require continuous-hold override semantics. Default OFF preserves
+// existing user behaviour.
+constexpr char cfg_forceCloseSingleHold[] PROGMEM = "forceCloseSingleHold";
 #endif
 
 constexpr char nvram_id_code[] PROGMEM = "id_code";
@@ -309,8 +319,10 @@ public:
     bool getMotionHomeKit() { return std::get<bool>(get(cfg_motionHomeKit)); };
     // HK-FC (fork addition, ESP32-only).
     // HK-FC tri-state mode: 0=off, 1=companion tile, 2=replace primary close.
-    int      getForceCloseHomeKit() { return std::get<int>(get(cfg_forceCloseHomeKit)); };
-    uint32_t getForceCloseHoldMs()  { return std::get<int>(get(cfg_forceCloseHoldMs)); };
+    int      getForceCloseHomeKit()    { return std::get<int>(get(cfg_forceCloseHomeKit)); };
+    uint32_t getForceCloseHoldMs()     { return std::get<int>(get(cfg_forceCloseHoldMs)); };
+    // HK-FC single-hold mechanic: false=2-attempt sequence (legacy), true=single continuous press.
+    bool     getForceCloseSingleHold() { return std::get<bool>(get(cfg_forceCloseSingleHold)); };
 #endif
 };
 extern userSettings *userConfig;

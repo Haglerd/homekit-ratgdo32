@@ -52,6 +52,10 @@ extern void comms_refresh_auto_close_config();
 // HK-FC: refresh forceCloseHoldMsCached after a /setgdo settings save.
 // Loop-task only — same call discipline as comms_refresh_auto_close_config.
 extern void comms_refresh_force_close_hold_ms();
+// HK-FC: refresh forceCloseSingleHoldCached after a /setgdo settings save.
+// false = legacy 2-attempt sequence; true = single continuous press hold.
+// Loop-task only.
+extern void comms_refresh_force_close_single_hold();
 // Drains for the force-close deferred-arm and deferred-clear flags.
 // Both run on loopTask via service_timer_loop and serialize all
 // Ticker manipulation onto a single task. Audit findings #3, A, G.
