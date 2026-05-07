@@ -612,11 +612,15 @@ function setElementsFromStatus(status) {
                 document.getElementById("homekitForceCloseRow").style.display = "table-row";
                 break;
             case "forceCloseHoldMs":
+            case "forceCloseHoldMsSingle":
+                // HK-FC has two independent hold-ms fields, one per
+                // mechanic. forceCloseHoldMs is per-press in 2-attempt
+                // mode; forceCloseHoldMsSingle is total continuous hold.
                 document.getElementById(key).value = value;
                 break;
             case "forceCloseSingleHold":
                 // HK-FC press-mechanic: false=legacy 2-attempt sequence,
-                // true=single continuous press hold for forceCloseHoldMs.
+                // true=single continuous press hold.
                 document.getElementById(key).checked = value;
                 break;
             case "vehicleHomeKit":
@@ -1684,6 +1688,9 @@ async function saveSettings() {
     if (isNaN(forceCloseHomeKit) || forceCloseHomeKit < 0 || forceCloseHomeKit > 2) forceCloseHomeKit = 0;
     forceCloseHomeKit = String(forceCloseHomeKit);
     const forceCloseSingleHold = (document.getElementById("forceCloseSingleHold").checked) ? '1' : '0';
+    let forceCloseHoldMsSingle = parseInt(document.getElementById("forceCloseHoldMsSingle").value, 10);
+    if (isNaN(forceCloseHoldMsSingle)) forceCloseHoldMsSingle = 7000;
+    forceCloseHoldMsSingle = Math.max(1000, Math.min(15000, forceCloseHoldMsSingle));
     let forceCloseHoldMs = parseInt(document.getElementById("forceCloseHoldMs").value, 10);
     if (isNaN(forceCloseHoldMs)) forceCloseHoldMs = 3500;
     forceCloseHoldMs = Math.max(1000, Math.min(10000, forceCloseHoldMs));
@@ -1754,6 +1761,7 @@ async function saveSettings() {
         "forceCloseHomeKit", forceCloseHomeKit,
         "forceCloseHoldMs", forceCloseHoldMs,
         "forceCloseSingleHold", forceCloseSingleHold,
+        "forceCloseHoldMsSingle", forceCloseHoldMsSingle,
     );
     if (reboot) {
         countdown(rebootSeconds, "Settings saved, RATGDO device rebooting...&nbsp;");

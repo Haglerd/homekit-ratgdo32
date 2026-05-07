@@ -180,17 +180,19 @@ constexpr char cfg_motionHomeKit[] PROGMEM = "motionHomeKit";
 // source of truth). Default 3500 matches the existing homebridge
 // plugin and door_command_force_close's default fallback.
 constexpr char cfg_forceCloseHomeKit[] PROGMEM = "forceCloseHomeKit";
+// 2-attempt mechanic uses cfg_forceCloseHoldMs (per-press hold; total
+// = 2× this + 1500 ms gap). Default 3500 — preserves legacy behaviour.
 constexpr char cfg_forceCloseHoldMs[]  PROGMEM = "forceCloseHoldMs";
 // HK-FC press-and-hold mechanic (fork addition, ESP32-only).
-// Default OFF: existing 2-attempt sequence (press 3.5s → release → 1.5s gap
-// → press 3.5s → release). When ON: single continuous press hold for
-// `forceCloseHoldMs`, mimicking a human holding the wall button. From the
-// GDO's perspective ON is one long button-down (the override-photo-eye
-// pattern); OFF is two distinct close presses with a gap. ON is more
-// reliable for stubborn obstructed-close cases on Sec+1.0 GDOs that
-// require continuous-hold override semantics. Default OFF preserves
-// existing user behaviour.
-constexpr char cfg_forceCloseSingleHold[] PROGMEM = "forceCloseSingleHold";
+// Default OFF: 2-attempt sequence (press 3.5s → release → 1.5s gap →
+// press 3.5s → release) — uses forceCloseHoldMs above.
+// When ON: single continuous press hold for forceCloseHoldMsSingle,
+// mimicking a human holding the wall button (override-photo-eye
+// pattern on Sec+1.0). The two mechanics need different durations
+// (~3500 per-press vs ~7000 total continuous) so they have separate
+// fields — flipping the checkbox keeps both values intact.
+constexpr char cfg_forceCloseSingleHold[]   PROGMEM = "forceCloseSingleHold";
+constexpr char cfg_forceCloseHoldMsSingle[] PROGMEM = "forceCloseHoldMsSingle";
 #endif
 
 constexpr char nvram_id_code[] PROGMEM = "id_code";
@@ -319,10 +321,13 @@ public:
     bool getMotionHomeKit() { return std::get<bool>(get(cfg_motionHomeKit)); };
     // HK-FC (fork addition, ESP32-only).
     // HK-FC tri-state mode: 0=off, 1=companion tile, 2=replace primary close.
-    int      getForceCloseHomeKit()    { return std::get<int>(get(cfg_forceCloseHomeKit)); };
-    uint32_t getForceCloseHoldMs()     { return std::get<int>(get(cfg_forceCloseHoldMs)); };
+    int      getForceCloseHomeKit()        { return std::get<int>(get(cfg_forceCloseHomeKit)); };
+    // 2-attempt mechanic: per-press hold (total = 2× this + 1500 gap).
+    uint32_t getForceCloseHoldMs()         { return std::get<int>(get(cfg_forceCloseHoldMs)); };
     // HK-FC single-hold mechanic: false=2-attempt sequence (legacy), true=single continuous press.
-    bool     getForceCloseSingleHold() { return std::get<bool>(get(cfg_forceCloseSingleHold)); };
+    bool     getForceCloseSingleHold()     { return std::get<bool>(get(cfg_forceCloseSingleHold)); };
+    // Single-hold mechanic: total continuous hold duration.
+    uint32_t getForceCloseHoldMsSingle()   { return std::get<int>(get(cfg_forceCloseHoldMsSingle)); };
 #endif
 };
 extern userSettings *userConfig;
