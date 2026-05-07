@@ -482,6 +482,23 @@
                   <input type="checkbox" id="lightHomeKit" name="lightHomeKit" value="no" checked>
                   <label for="lightHomeKit">HomeKit Light Switch</label>
                 </td>
+              </tr>
+              <!-- HK-FC: optional second GarageDoorOpener tile in iOS Home.
+                   Default OFF; row is kept hidden until /status.json reveals
+                   the key. Sec+1.0 only — Sec+2.0 falls through to a normal
+                   close transparently. -->
+              <tr id="homekitForceCloseRow" style="display: none;">
+                <td class="label">Force-Close Tile:</td>
+                <td>
+                  <input type="checkbox" id="forceCloseHomeKit" name="forceCloseHomeKit" value="no">
+                  <label for="forceCloseHomeKit">HomeKit Force-Close Accessory (Sec+1.0 only)</label>
+                  <br>
+                  <span style="font-size:0.85em;">Hold (ms):
+                    <input type="number" id="forceCloseHoldMs" name="forceCloseHoldMs"
+                           min="1000" max="10000" value="3500" style="width:70px;">
+                  </span>
+                </td>
+              </tr>
               <tr>
                 <td class="label">Motion Triggers:</td>
                 <td>

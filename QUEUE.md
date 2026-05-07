@@ -5,7 +5,7 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 ## Active — fork-internal feature work
 
 ### [P2] HK-FC — Native HomeKit Force-Close GarageDoorOpener accessory
-**Status:** queued — full plan embedded in issue body
+**Status:** in-progress — full plan embedded in issue body
 **Source:** user request 2026-05-06; planner produced full layered plan
 **Issue:** Haglerd/homekit-ratgdo32#79 (embedded plan — software-engineer goes direct, no planner re-invocation needed)
 **Acceptance:** new optional `forceCloseHomeKit` toggle (default OFF) registers a second `GarageDoorOpener` accessory; Open mirrors normal open; Close fires `door_command_force_close(<configured hold ms>)`; state mirrors primary in lockstep across Current/Target/Obstruction characteristics. Web UI checkbox + `forceCloseHoldMs` number input (clamped 1000-10000). No regression on existing primary tile. Heap budget verified: ~28 B BSS when OFF, ~1 KB heap when ON (within user-stated thresholds: ≤500 B disabled, ≤1.5 KB enabled).

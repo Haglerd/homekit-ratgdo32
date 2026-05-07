@@ -167,6 +167,20 @@ constexpr char cfg_enableIPv6[] PROGMEM = "enableIPv6";
 constexpr char cfg_homespanCLI[] PROGMEM = "homespanCLI";
 constexpr char cfg_lightHomeKit[] PROGMEM = "lightHomeKit";
 constexpr char cfg_motionHomeKit[] PROGMEM = "motionHomeKit";
+// HK-FC (fork addition, ESP32-only): optional second GarageDoorOpener
+// HomeKit accessory whose Open mirrors normal door open and whose
+// Close fires door_command_force_close(forceCloseHoldMs). Default OFF
+// — users see no behaviour change unless they enable it. Once stable,
+// enables deprecation of the homebridge-ratgdo-forceclose plugin
+// (which talks to the existing forceClose=<ms> POST endpoint, kept
+// preserved for backward compatibility).
+//
+// forceCloseHoldMs is the press-hold duration in milliseconds. Clamped
+// in /setgdo to [1000, 10000] (matches comms.cpp:2880-2881 single
+// source of truth). Default 3500 matches the existing homebridge
+// plugin and door_command_force_close's default fallback.
+constexpr char cfg_forceCloseHomeKit[] PROGMEM = "forceCloseHomeKit";
+constexpr char cfg_forceCloseHoldMs[]  PROGMEM = "forceCloseHoldMs";
 #endif
 
 constexpr char nvram_id_code[] PROGMEM = "id_code";
@@ -293,6 +307,9 @@ public:
     bool getEnableHomeSpanCLI() { return std::get<bool>(get(cfg_homespanCLI)); };
     bool getLightHomeKit() { return std::get<bool>(get(cfg_lightHomeKit)); };
     bool getMotionHomeKit() { return std::get<bool>(get(cfg_motionHomeKit)); };
+    // HK-FC (fork addition, ESP32-only).
+    bool     getForceCloseHomeKit() { return std::get<bool>(get(cfg_forceCloseHomeKit)); };
+    uint32_t getForceCloseHoldMs()  { return std::get<int>(get(cfg_forceCloseHoldMs)); };
 #endif
 };
 extern userSettings *userConfig;
