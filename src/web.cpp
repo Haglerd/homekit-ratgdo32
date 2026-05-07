@@ -408,7 +408,26 @@ int activeRequestCount = 0;
 // caller indefinitely. Combined with the lwIP SO_SNDTIMEO set in
 // SSEHandler this caps the write to ~200ms.
 #define CLIENT_SLOW_WRITE_MS 200
-static char writeBuffer[512];
+// W43: 512 B scratch buffer used to assemble formatted strings before
+// they're written to the network (303 redirect URLs, status JSON open/
+// close history blocks, OTA upload-progress SSE frames, ESP8266
+// SSEBroadcastState payloads).
+//
+// INVARIANT (ESP32): only written from loopTask context — Arduino
+// WebServer dispatch, OTA UPLOAD_FILE_WRITE handler, and the loopTask
+// web_loop status-broadcast path. SSEBroadcastState on ESP32 uses a
+// stack-local 512 B buffer instead of this global (see comment in
+// SSEBroadcastState for the v38 race that motivated that split).
+//
+// INVARIANT (ESP8266): single-task cooperative scheduling means there
+// is no concurrent writer; SSEBroadcastState reuses this global on the
+// 8266 (the ~4 KB main-task stack is too tight to absorb +512 B of
+// stack-local state per call).
+//
+// Renamed from `writeBuffer` (W43) to make the loopTask-only contract
+// explicit at every call site. Per-caller stack buffers were rejected
+// during planning for ESP8266 stack pressure.
+static char loopTaskScratchBuf512[512];
 // v24: bump per-broadcast slow-write counter when a single channel
 // exceeds CLIENT_SLOW_WRITE_MS. homekit_health_log reads + zeros this
 // every 180s. Climbing values pre-freeze identify a wedged subscriber.
@@ -1511,17 +1530,17 @@ void load_page(const char *page)
         if (!strcmp(gitUser, "ratgdo"))
         {
             // If we are building on ratgdo (for published release) then use tagged URL to make sure map file matches the one embedded in the firmware
-            strlcpy(writeBuffer, gitTaggedURL, sizeof(writeBuffer));
+            strlcpy(loopTaskScratchBuf512, gitTaggedURL, sizeof(loopTaskScratchBuf512));
         }
         else
         {
             // else we are building for our test purposes, point to the raw URL
-            strlcpy(writeBuffer, gitRawURL, sizeof(writeBuffer));
+            strlcpy(loopTaskScratchBuf512, gitRawURL, sizeof(loopTaskScratchBuf512));
         }
-        strlcat(writeBuffer, "/src/www", sizeof(writeBuffer));
-        strlcat(writeBuffer, page, sizeof(writeBuffer));
-        ESP_LOGD(TAG, "Sending 303 redirect to client %s for: %s", clientIP.toString().c_str(), writeBuffer);
-        server.sendHeader(F("Location"), writeBuffer);
+        strlcat(loopTaskScratchBuf512, "/src/www", sizeof(loopTaskScratchBuf512));
+        strlcat(loopTaskScratchBuf512, page, sizeof(loopTaskScratchBuf512));
+        ESP_LOGD(TAG, "Sending 303 redirect to client %s for: %s", clientIP.toString().c_str(), loopTaskScratchBuf512);
+        server.sendHeader(F("Location"), loopTaskScratchBuf512);
         server.send_P(303, type_txt, "", 0);
         return;
     }
@@ -1776,18 +1795,18 @@ void build_status_json(char *json)
     if (garage_door.openDuration)
     {
         JSON_ADD_INT("openDuration", garage_door.openDuration);
-        snprintf_P(writeBuffer, sizeof(writeBuffer), PSTR("{ \"max\": %d, \"count\": %d, \"duration\": [ %d, %d, %d, %d, %d, %d ] }"),
+        snprintf_P(loopTaskScratchBuf512, sizeof(loopTaskScratchBuf512), PSTR("{ \"max\": %d, \"count\": %d, \"duration\": [ %d, %d, %d, %d, %d, %d ] }"),
                    openHistory.max, openHistory.count,
                    openHistory(1), openHistory(2), openHistory(3), openHistory(4), openHistory(5), openHistory(6));
-        JSON_ADD_RAW("openHistory", writeBuffer);
+        JSON_ADD_RAW("openHistory", loopTaskScratchBuf512);
     }
     if (garage_door.closeDuration)
     {
         JSON_ADD_INT("closeDuration", garage_door.closeDuration);
-        snprintf_P(writeBuffer, sizeof(writeBuffer), PSTR("{ \"max\": %d, \"count\": %d, \"duration\": [ %d, %d, %d, %d, %d, %d ] }"),
+        snprintf_P(loopTaskScratchBuf512, sizeof(loopTaskScratchBuf512), PSTR("{ \"max\": %d, \"count\": %d, \"duration\": [ %d, %d, %d, %d, %d, %d ] }"),
                    closeHistory.max, closeHistory.count,
                    closeHistory(1), closeHistory(2), closeHistory(3), closeHistory(4), closeHistory(5), closeHistory(6));
-        JSON_ADD_RAW("closeHistory", writeBuffer);
+        JSON_ADD_RAW("closeHistory", loopTaskScratchBuf512);
     }
 #ifdef ESP8266
 #define accessoryID arduino_homekit_get_running_server() ? arduino_homekit_get_running_server()->accessory_id : "Inactive"
@@ -2705,12 +2724,12 @@ void SSEheartbeat(SSESubscription *s)
         JSON_END();
         JSON_REMOVE_NL(json);
         // v24: copy the formatted SSE event to a local stack buffer
-        // BEFORE releasing the mutex (because writeBuffer is shared
+        // BEFORE releasing the mutex (because loopTaskScratchBuf512 is shared
         // between heartbeat callers and could be overwritten by another
         // SSE channel firing simultaneously). Then release the mutex
         // and write — clientWrite is now bounded by SO_SNDTIMEO and
         // skips full TCP buffers via availableForWrite.
-        char localBuf[sizeof(writeBuffer)];
+        char localBuf[sizeof(loopTaskScratchBuf512)];
         snprintf_P(localBuf, sizeof(localBuf), PSTR("event: message\ndata: %s\n\n"), json);
         GIVE_MUTEX();
         // v27: capture clientWrite return so we can stamp lastActivity
@@ -3278,8 +3297,8 @@ void SSEBroadcastState(const char *data, BroadcastType type)
         return;
 
     // v38 (audit W7): use a stack-local write buffer instead of the
-    // file-scope `writeBuffer` global. Pre-v38 SSEBroadcastState filled
-    // `writeBuffer` then called clientWriteEx, while
+    // file-scope `loopTaskScratchBuf512` global. Pre-v38 SSEBroadcastState filled
+    // `loopTaskScratchBuf512` then called clientWriteEx, while
     // simultaneously web_loop's RATGDO_STATUS path AND any
     // ESP_LOGx-triggered LOG_MESSAGE path could be calling here
     // concurrently from different tasks (loopTask, esp_timer, WiFi
@@ -3297,8 +3316,8 @@ void SSEBroadcastState(const char *data, BroadcastType type)
     // scheduling means the race doesn't exist there, AND ESP8266's
     // 4 KB main stack is too tight to absorb +512 B.
 #ifdef ESP8266
-    char *wb = writeBuffer;
-    const size_t wbSize = sizeof(writeBuffer);
+    char *wb = loopTaskScratchBuf512;
+    const size_t wbSize = sizeof(loopTaskScratchBuf512);
 #else
     char wb[512];
     const size_t wbSize = sizeof(wb);
@@ -3659,7 +3678,7 @@ void handle_firmware_upload()
                     JSON_ADD_INT("uploadPercent", uploadPercent);
                     JSON_END();
                     JSON_REMOVE_NL(json);
-                    snprintf_P(writeBuffer, sizeof(writeBuffer), PSTR("event: uploadStatus\ndata: %s\n\n"), json);
+                    snprintf_P(loopTaskScratchBuf512, sizeof(loopTaskScratchBuf512), PSTR("event: uploadStatus\ndata: %s\n\n"), json);
                     // v28: stamp lastActivity on success — matches the
                     // SSEBroadcastState pattern. Prevents the orphan
                     // sweep from reaping the slot mid-update if a slow
@@ -3669,7 +3688,7 @@ void handle_firmware_upload()
                     // v47: also reset/increment consecutiveBufferFull for sweep 5d.
                     // (OTA slot is exempted from the sweep 5d reap, but the
                     // counter is still tracked for visibility / consistency.)
-                    SseWriteResult r = clientWriteEx(firmwareUpdateSub->client, writeBuffer);
+                    SseWriteResult r = clientWriteEx(firmwareUpdateSub->client, loopTaskScratchBuf512);
                     if (r == SseWriteResult::OK)
                     {
                         firmwareUpdateSub->lastActivity = (uint32_t)_millis();

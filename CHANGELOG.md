@@ -10,6 +10,10 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.68 (2026-05-07) — W43 writeBuffer rename + invariant comment
+
+Hygiene rename: the file-scope `writeBuffer[512]` in `web.cpp` is renamed to `loopTaskScratchBuf512` so every call site advertises the loopTask-only invariant up front. A comment block at the declaration documents (a) the ESP32 invariant — only written from loopTask context (Arduino WebServer dispatch, OTA upload, web_loop status path); (b) the ESP8266 carve-out — `SSEBroadcastState` reuses this global on the 8266 because the ~4 KB main-task stack can't absorb +512 B per call. Per-caller stack buffers were rejected during planning for that reason. Zero behavior change.
+
 ### v3.4.4-forceclose.67 (2026-05-07) — log-audit-002 hkConsecutiveHealthyTicks always-on
 
 Cosmetic / observability fix. The `hkConsecutiveHealthyTicks` counter (reported in the periodic `diag-hk` log line) was nested inside the `else if (hkRecoverAttempts > 0)` branch of the HomeKit watchdog, so with auto-recover disabled (default — `hkAutoRecover=false`) the counter never moved. Field syslog showed `hkHealthyTicks=0` on 110 consecutive diag lines over ~5 h despite `controllers=4 paired=yes wifi=connected` and observed iOS reads — falsely suggesting an unhealthy HomeKit when everything was fine.
