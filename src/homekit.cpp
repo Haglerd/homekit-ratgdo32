@@ -545,7 +545,12 @@ static uint8_t     hkLastHintLevel       = 0;     // 0=none, 1=QUIET, 2=STALE, 3
 // before clearing hkRecoverAttempts. At the 180s tick cadence, N=3 is
 // ≥9 min of sustained healthy reads — past typical hub flap intervals.
 constexpr uint8_t  HK_HEALTHY_TICKS_TO_RESET = 3;
-static uint8_t     hkConsecutiveHealthyTicks = 0;
+// log-audit-002: bumped from uint8_t to uint32_t. The counter is now
+// always-on (incremented every healthy tick regardless of whether
+// auto-recover is enabled or whether a recovery attempt is pending),
+// so it can climb above 255 on long healthy uptimes — wrap-to-zero
+// would falsely look like "back to unhealthy" in the diag-hk line.
+static uint32_t    hkConsecutiveHealthyTicks = 0;
 
 // Cached watchdog config. Refreshed at boot in setup_homekit and on
 // settings save via homekit_refresh_watchdog_config(). Read in the
@@ -789,6 +794,25 @@ static void homekit_health_log()
         }
     }
 
+    // log-audit-002: track consecutive healthy ticks UNCONDITIONALLY
+    // (independent of hkAutoRecover and of any active recovery state).
+    // Pre-fix the increment was nested inside `else if (hkRecoverAttempts > 0)`
+    // — with auto-recover disabled (default), `hkRecoverAttempts` stays 0
+    // forever, so the counter never moved and the diag-hk line falsely
+    // reported `hkHealthyTicks=0` even when HomeKit was clearly working.
+    // The recover-counter clear logic still gates on `hkRecoverAttempts > 0`
+    // (no-op when there's nothing to clear), but the streak is always
+    // observable in diag-hk now.
+    const bool healthyTick = (lastReadAgo > 0 && lastReadAgo < (int32_t)hkQuietSecs);
+    if (healthyTick)
+    {
+        hkConsecutiveHealthyTicks++;
+    }
+    else
+    {
+        hkConsecutiveHealthyTicks = 0;
+    }
+
     // Auto-recover ACTIONS — only run if explicitly enabled. Defaults
     // ship disabled; the hints above run unconditionally so the user
     // can decide whether to enable based on real-world data.
@@ -822,30 +846,18 @@ static void homekit_health_log()
             ESP_LOGW(TAG, "HomeKit auto-recover: still no HAP read after %d attempts; giving up (user reboot may be required)", hkRecoverAttempts);
         }
     }
-    else if (hkRecoverAttempts > 0)
+    else if (hkRecoverAttempts > 0 && hkConsecutiveHealthyTicks >= HK_HEALTHY_TICKS_TO_RESET)
     {
         // v31: require N consecutive healthy ticks before clearing the
         // recovery counter. A single sporadic read inside the trailing
         // window of one tick (pre-v31 logic) is not enough — a flapping
-        // hub could re-arm the watchdog indefinitely. Healthy = lastReadAgo
-        // is positive (we've seen at least one read) AND below quietSecs
-        // (the user-configured "iOS extended idle" threshold).
-        if (lastReadAgo > 0 && lastReadAgo < (int32_t)hkQuietSecs)
-        {
-            hkConsecutiveHealthyTicks++;
-            if (hkConsecutiveHealthyTicks >= HK_HEALTHY_TICKS_TO_RESET)
-            {
-                ESP_LOGI(TAG, "HomeKit auto-recover: %u consecutive healthy ticks (last_hap_read_ago=%ds), clearing recovery counter",
-                         (unsigned)hkConsecutiveHealthyTicks, lastReadAgo);
-                hkRecoverAttempts         = 0;
-                hkConsecutiveHealthyTicks = 0;
-            }
-        }
-        else
-        {
-            // Any non-healthy tick resets the consecutive count.
-            hkConsecutiveHealthyTicks = 0;
-        }
+        // hub could re-arm the watchdog indefinitely.
+        // log-audit-002: streak is now tracked above, independent of this
+        // branch. Don't reset the streak counter on clear — it keeps
+        // representing "consecutive healthy ticks" for diag visibility.
+        ESP_LOGI(TAG, "HomeKit auto-recover: %u consecutive healthy ticks (last_hap_read_ago=%ds), clearing recovery counter",
+                 (unsigned)hkConsecutiveHealthyTicks, lastReadAgo);
+        hkRecoverAttempts = 0;
     }
 }
 
