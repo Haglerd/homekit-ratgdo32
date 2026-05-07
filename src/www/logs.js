@@ -164,98 +164,107 @@ async function loadLogs() {
 }
 
 async function loadLogPages() {
-    // Load the pages in background
-    Promise.allSettled([
+    // log-audit-002: sequentialize the diagnostics-page fetches.
+    // Previously, this used Promise.allSettled to fan out four
+    // fetches in parallel (showlog + status.json + showrebootlog +
+    // crashlog). Together with the browser-driven /site.webmanifest
+    // and the SSE long-poll on /rest/events/N, that produced a 5-6
+    // socket burst at page load. lwIP on ESP32 ran out of FDs
+    // (errno 11, "No more processes"), and one or more of the
+    // fetches failed — observed at 2026-05-06T16:38:05 with a
+    // "Not enough memory to allocate buffer" co-incident with a
+    // GDO init timeout. Chaining via await serializes the JS-issued
+    // fetches so each socket is closed before the next is opened.
+    // SSE is intentionally NOT chained here — it's set up elsewhere
+    // and is long-lived (not part of the load burst).
+    //
+    // ~200-400ms added latency on LAN is acceptable; the spinner
+    // already covers the transition.
+    try {
+        // 1) /showlog — primary log buffer; seeds both tabs.
+        try {
+            const response = await fetch("showlog");
+            if (!response.ok || response.status !== 200) {
+                throw new Error(`Error requesting logs, RC: ${response.status}`);
+            }
+            let text = await response.text();
+            sysLogLoaded = true;
+            // reduce newlines down to single \n
+            text = text.replaceAll('\r\n', '\n');
+            let line;
+            while ((line = tmpLogMsgs.pop())) {
+                console.log(`Remove dup: ${line}`);
+                text = text.replace(line + '\n', '');
+            }
+            // v22: split the buffered showlog into HomeKit lines vs
+            // system lines and seed each tab with ONLY its own
+            // content. Mirror behaviour of the live SSE handler so
+            // homekit lines never appear in the system log.
+            const lines = text.split('\n');
+            const hkLines = lines.filter(isHomeKitLine);
+            const sysLines = lines.filter(l => !isHomeKitLine(l));
+            document.getElementById("showlog").insertAdjacentText('afterbegin', sysLines.join('\n'));
+            let divElem = document.getElementById("logTab");
+            divElem.scrollTop = divElem.scrollHeight;
+            if (hkLines.length > 0) {
+                document.getElementById("homekitlog").insertAdjacentText('afterbegin', hkLines.join('\n') + '\n');
+                let hkPane = document.getElementById("homekitTab");
+                hkPane.scrollTop = hkPane.scrollHeight;
+            }
+        } catch (error) {
+            console.warn(error);
+        }
 
-        fetch("showlog")
-            .then((response) => {
-                if (!response.ok || response.status !== 200) {
-                    throw new Error(`Error requesting logs, RC: ${response.status}`);
-                } else {
-                    return response.text();
-                }
-            })
-            .then((text) => {
-                sysLogLoaded = true;
-                // reduce newlines down to single \n
-                text = text.replaceAll('\r\n', '\n');
-                let line;
-                while ((line = tmpLogMsgs.pop())) {
-                    console.log(`Remove dup: ${line}`);
-                    text = text.replace(line + '\n', '');
-                }
-                // v22: split the buffered showlog into HomeKit lines vs
-                // system lines and seed each tab with ONLY its own
-                // content. Mirror behaviour of the live SSE handler so
-                // homekit lines never appear in the system log.
-                const lines = text.split('\n');
-                const hkLines = lines.filter(isHomeKitLine);
-                const sysLines = lines.filter(l => !isHomeKitLine(l));
-                document.getElementById("showlog").insertAdjacentText('afterbegin', sysLines.join('\n'));
-                let divElem = document.getElementById("logTab");
-                divElem.scrollTop = divElem.scrollHeight;
-                if (hkLines.length > 0) {
-                    document.getElementById("homekitlog").insertAdjacentText('afterbegin', hkLines.join('\n') + '\n');
-                    let hkPane = document.getElementById("homekitTab");
-                    hkPane.scrollTop = hkPane.scrollHeight;
-                }
-            })
-            .catch(error => console.warn(error)),
+        // 2) /status.json — device name + raw status pane.
+        try {
+            const response = await fetch("status.json");
+            if (!response.ok || response.status !== 200) {
+                throw new Error(`Error requesting status.json, RC: ${response.status}`);
+            }
+            const text = await response.text();
+            msgJson = JSON.parse(text);
+            document.getElementById("deviceName").innerHTML = msgJson.deviceName;
+            document.title = msgJson.deviceName;
+            document.getElementById("statusjson").innerText = text;
+        } catch (error) {
+            console.warn(error);
+        }
 
-        fetch("status.json")
-            .then((response) => {
-                if (!response.ok || response.status !== 200) {
-                    throw new Error(`Error requesting status.json, RC: ${response.status}`);
-                } else {
-                    return response.text();
-                }
-            })
-            .then((text) => {
-                msgJson = JSON.parse(text);
-                document.getElementById("deviceName").innerHTML = msgJson.deviceName;
-                document.title = msgJson.deviceName;
-                document.getElementById("statusjson").innerText = text;
-            })
-            .catch(error => console.warn(error)),
+        // 3) /showrebootlog — last reboot reason / boot log.
+        try {
+            const response = await fetch("showrebootlog");
+            if (!response.ok || response.status !== 200) {
+                throw new Error(`Error requesting reboot logs, RC: ${response.status}`);
+            }
+            const text = await response.text();
+            document.getElementById("rebootlog").innerText = text;
+        } catch (error) {
+            console.warn(error);
+        }
 
-        fetch("showrebootlog")
-            .then((response) => {
-                if (!response.ok || response.status !== 200) {
-                    throw new Error(`Error requesting reboot logs, RC: ${response.status}`);
-                } else {
-                    return response.text();
-                }
-            })
-            .then((text) => {
-                document.getElementById("rebootlog").innerText = text;
-            })
-            .catch(error => console.warn(error)),
-
-        fetch("crashlog")
-            .then((response) => {
-                if (!response.ok || response.status !== 200) {
-                    throw new Error(`Error requesting crash logs, RC: ${response.status}`);
-                } else {
-                    return response.text();
-                }
-            })
-            .then((text) => {
-                document.getElementById("crashlog").innerText = text;
-            })
-            .catch(error => console.warn(error)),
-    ])
-        .then((results) => {
-            // Once all loaded reset the progress indicator
-            loaderElem.style.visibility = "hidden";
-            console.log("All logs loaded");
-            //console.log(results);
-            // v51: kick off the /showlog polling fallback after the
-            // initial buffer is loaded. If SSE is delivering events
-            // live, this is mostly idempotent (lastShowlogContent
-            // already covers the SSE-appended lines). If SSE is
-            // wedged, this is what makes the page feel live.
-            startShowlogPoller();
-        });
+        // 4) /crashlog — saved crash dump (if any).
+        try {
+            const response = await fetch("crashlog");
+            if (!response.ok || response.status !== 200) {
+                throw new Error(`Error requesting crash logs, RC: ${response.status}`);
+            }
+            const text = await response.text();
+            document.getElementById("crashlog").innerText = text;
+        } catch (error) {
+            console.warn(error);
+        }
+    } finally {
+        // All four fetches resolved (or failed) — clear the spinner
+        // and start the /showlog polling fallback.
+        loaderElem.style.visibility = "hidden";
+        console.log("All logs loaded");
+        // v51: kick off the /showlog polling fallback after the
+        // initial buffer is loaded. If SSE is delivering events
+        // live, this is mostly idempotent (lastShowlogContent
+        // already covers the SSE-appended lines). If SSE is
+        // wedged, this is what makes the page feel live.
+        startShowlogPoller();
+    }
 }
 
 // v51: poll /showlog every SHOWLOG_POLL_INTERVAL_MS and append any
