@@ -66,11 +66,13 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Notes:** P2 — 24/24 reproducibility over 24 different boots. Functional impact nil (reconciler clamps), but counter=`SSE_MAX_CHANNELS` exact match suggests a deterministic init-path bump or BSS issue. **needs-human-planning** (investigation-shaped, root cause unknown).
 
 ### [P2] log-audit-20260506-002 — Socket fd exhaustion (errno 11) under browser concurrent-fetch burst
-**Status:** queued
+**Status:** queued — **DIRECTION CHOSEN: option (b) sequentialize browser fetches client-side** (auto-fixable)
 **Source:** log-audit 2026-05-06 (Pi syslog)
 **Issue:** Haglerd/homekit-ratgdo32#70
 **Acceptance:** zero `errno 11 No more processes` over 5 diagnostics-page loads; 3 reboots with browser open and no GDO init timeout.
-**Notes:** P2 — 14× errno 11 events + 1× `Not enough memory to allocate buffer` co-incident with a `Garage door is not responding to initialization sequence (3000ms)` at 2026-05-06T16:38:05. Browser at 10.112.60.248 fans out 4-5 concurrent fetches (`/showlog`, `/showrebootlog`, `/crashlog`, `/site.webmanifest`, SSE) and exhausts the lwIP socket pool. **needs-human-planning** — three viable mitigations (raise CONFIG_LWIP_MAX_SOCKETS, sequentialize browser fetches, or 503-with-retry-after); user picks direction.
+**Notes:** P2 — 14× errno 11 events + 1× `Not enough memory to allocate buffer` co-incident with a `Garage door is not responding to initialization sequence (3000ms)` at 2026-05-06T16:38:05. Browser at 10.112.60.248 fans out 4-5 concurrent fetches (`/showlog`, `/showrebootlog`, `/crashlog`, `/site.webmanifest`, SSE) and exhausts the lwIP socket pool.
+
+**User decision (2026-05-06):** option (b) — sequentialize fetches in `src/www/*`. Chosen for zero firmware RAM cost (ESP8266 heap tight; +6 sockets ≈ +1–2 KB BSS permanent). UI latency cost imperceptible (~200–400ms on LAN). Web UI redeploy only — no firmware release needed for this fix.
 
 ### [P2] log-audit-20260506-003 — SSE wedged-on-flow-control reaper churn, same UUIDs reaped 28+ times
 **Status:** queued
