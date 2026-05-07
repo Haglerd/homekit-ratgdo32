@@ -50,19 +50,10 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 **Notes:** `homekit.cpp:835` increments `hkConsecutiveHealthyTicks` only inside `else if (hkRecoverAttempts > 0)` branch. With `hkAutoRecover=false` (user's config; default), `hkRecoverAttempts` stays 0 forever, so counter never increments and diag-hk reporting is misleading — it falsely suggests HomeKit is unhealthy. Observed on 110 consecutive diag-hk lines over ~5h: every line shows `hkHealthyTicks=0` despite `controllers=4 paired=yes wifi=connected` and observed iOS reads (`last_hap_read_ago=44s` at times). Fix: hoist the increment+reset logic to run independently of recoverAttempts. Cosmetic/observability only — does not affect actual HomeKit recovery. Force-close FSM untouched. Single function in single file.
 
 ### [P2] log-audit-20260507-004 — `errno 11 "No more processes"` recurrence beyond browser fan-out (post log-audit-002 fix)
-**Status:** in-progress — investigation underway on `queue/log-audit-004-errno11-recurrence`
+**Status:** done — PR https://github.com/Haglerd/homekit-ratgdo32/pull/94 (merged 2026-05-07)
 **Source:** log-audit 2026-05-07 (Pi syslog) — user-surfaced, multi-boot pattern
-**Acceptance:** root cause identified for the non-browser-fanout occurrences; either second client-side mitigation OR firmware-side socket-pool / cleanup fix lands; 24 h soak with <2 errno 11 events per 6 h window.
-**Notes:** log-audit-002 (PR #77, sequentialize browser fetches) handled the diagnostics-page concurrent-fetch pattern. errno 11 still recurring on .64+ across multiple boots:
-- 2026-05-07 02:17:41 fd 52 — uptime 02:24h, no co-incident SSE / browser activity in surrounding lines
-- 2026-05-07 05:20:12 fd 51 — uptime 00:01m, 22 s after `Initialization complete` (post-boot mDNS / HomeSpan race?)
-- 2026-05-07 05:31:18 fd 52 — 35 s after force-close test (`FORCE CLOSE attempt 1` → close at :30:43 → errno at :31:18, no obvious bridge)
-- 2026-05-07 05:56:48 / 05:58:39 / 06:06:12 / 06:16:09 / 06:17:18 fd 51 — five events on a single boot
-- **05:58:39 is co-incident with SSE-wedge-reaper firing**: `05:58:34 SSE wedged-on-flow-control reap (UUID 73e0640b...)` → `05:58:36 SSE 429 dampener (ageMs=1936)` → `05:58:39 errno 11 fd 51` (3 s after dampener). Strong correlation suggests the reap-then-dampener path is itself opening a transient socket that hits the cap.
-
-Hypothesis (planner picks): (a) reap-path leaks a socket fd before close; (b) HomeKit pairing burst at boot consumes lwIP sockets that don't return to the pool in time; (c) lwIP MEMP_NUM_TCP_PCB / MEMP_NUM_NETCONN tuned too low for HomeSpan + SSE + mDNS + browser concurrency; (d) Cloudflare-keepalive-style long-lived idle connections occupy slots.
-
-Force-close FSM untouched. Pre-req for serious autonomous fix: log-audit-20260507-003 (`esp_reset_reason` syslog) is shipped (#88) so future tiT crashes correlated with this surface attribution. NOT auto-fixable — needs-investigation gate first to identify which hypothesis matches.
+**Acceptance:** root cause identified — NOT fd-exhaustion; fd 51/52 are long-lived SSE TCP sockets (LWIP_SOCKET_OFFSET=50). errno 11 = EAGAIN. Two underlying bugs fixed: (1) `clientWriteEx` fast-path used `client.availableForWrite()` which is `Print::availableForWrite()`'s default 0 on Arduino-ESP32 (no override in `NetworkClient`) → returned BUFFER_FULL on every call without writing; (2) Oversized broadcasts hit framework's `NetworkClient::write` retry loop which logs `ESP_LOGE` on every benign EAGAIN, up to 10 lines per write. ESP32-only rewrite: direct `lwip_send(MSG_DONTWAIT)` in clientWriteEx + heap-buffered clientWriteEx for oversized payloads. ESP8266 unchanged. Soak verification deferred to next 24 h on-device.
+**Notes:** PR #77 (browser-fanout) was a misdiagnosis treating a symptom. fd 51/52 stay across reboots because they're the 1st/2nd lwIP socket allocated post-boot. Force-close FSM untouched.
 
 ---
 
@@ -105,5 +96,6 @@ The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are a
 
 _(roll commits in here as W4x/Rx items land — keep last 10)_
 
+- **log-audit-20260507-004** — SSE clientWriteEx direct lwip_send rewrite (ESP32-only). Eliminates `errno 11 fail on fd N` syslog noise + fixes silent-broadcast bug from broken `availableForWrite` fast-path. PR https://github.com/Haglerd/homekit-ratgdo32/pull/94 (merged 2026-05-07). 24 h soak verification pending on-device after release.66.
 - **BOOT-OOM-MDNS** — defer ratgdo mDNS service registration until heap >= 50 KB (option a from QUEUE candidates). ESP32-only; ESP8266 path unchanged. PR https://github.com/Haglerd/homekit-ratgdo32/pull/89 (merged 2026-05-07). Validates via post-flash syslog: expect `ratgdo mDNS deferred:` then `floor cleared` within 30 s; absence of `mdns_networking: Cannot allocate memory` and tiT IllegalInstruction. >=5 OTA cycle smoke + 24 h soak still pending on-device.
 - **log-audit-20260507-003** — `esp_reset_reason()` re-emit after syslog bound — PR https://github.com/Haglerd/homekit-ratgdo32/pull/88 (merged 2026-05-07). Pre-req for BOOT-OOM-MDNS unblocked.
