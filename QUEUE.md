@@ -25,10 +25,10 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Notes:** v1 (`a6368d5`) broke force-close (preempted itself). v2 (`bd358db`) added `preempt_force_close=true` param to `delayFnCall`; only force-close-internal caller at `:2825` opts out via `false`. v3 (`78657d8`) fixed CRASH_DEBUG dup-default. Code-review walked the 8-step 2-attempt sequence and verified force-close intact.
 
 ### [P3] W41 — Move `extern volatile uint32_t` declarations to header
-**Status:** queued
+**Status:** queued — **DIRECTION: option (b) — all 7 declarations including `syslogDrops`** (currently same-TU-only in log.cpp; audit recommends preemptive add)
 **Source:** audit, v45 plan
-**Acceptance:** new `src/instrumentation.h` (flat src/ layout, no src/include/) holds 7 declarations; `git grep "extern volatile uint32_t"` returns zero hits in `src/*.cpp`.
-**Notes:** zero behavior change.
+**Acceptance:** new `src/instrumentation.h` (flat src/ layout, no src/include/) holds all 7 declarations (`logMtxMaxWaitMs`, `sseSlowWrites`, `sseBufferFullSkips`, `sseSlotsAlloc`, `sseOrphansReaped`, `statusJsonPeakLen`, `syslogDrops`); `git grep "extern volatile uint32_t"` returns zero hits in `src/*.cpp`.
+**Notes:** zero behavior change. Zero RAM impact — `extern` declarations are name-binding only; definitions stay in their current `.cpp` files.
 
 ### [P3] W43 — `writeBuffer` rename + invariant comment
 **Status:** queued
@@ -36,11 +36,11 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Acceptance:** rename to `loopTaskScratchBuf512` (or similar); add comment block documenting loopTask-only invariant; ESP8266 alias preserved.
 **Notes:** zero behavior change. Option-A (per-caller stack buffers) rejected for ESP8266 stack pressure.
 
-### [P2] W42 — Add mutex to `userSettings::get()` + `getDetail()`
-**Status:** queued
+### [P2] W42 — Add mutex to `userSettings::get()` + `getDetail()` + `contains()`
+**Status:** queued — **DIRECTION: option (b) — mutex on all three reads** (get, getDetail, contains) for completeness
 **Source:** audit, v45 plan
-**Acceptance:** mutex-wrapped reads; cache pattern preserved as fast path; smoke-tested via config toggle + homekit_health_log read.
-**Notes:** ESP8266 `TAKE_MUTEX/GIVE_MUTEX` are no-ops (cooperative scheduling) — ESP32 only sees runtime cost. Race exposure raised by fork's Ticker-context readers.
+**Acceptance:** mutex-wrapped reads on all three accessor methods; cache pattern preserved as fast path; smoke-tested via config toggle + homekit_health_log read.
+**Notes:** ESP8266 `TAKE_MUTEX/GIVE_MUTEX` are no-ops (cooperative scheduling) — zero RAM/runtime cost. ESP32 sees ~1µs uncontended per read. Race exposure raised by fork's Ticker-context readers. Mutex itself already exists from `set()` use — no new BSS.
 
 ### [P3] W44 — DST spring-forward edge case in auto-close schedule
 **Status:** queued — verification gate first
@@ -59,11 +59,15 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 ## Active — log-audit findings (2026-05-06)
 
 ### [P2] log-audit-20260506-001 — SSE subscriptionCount=8 on every boot, reconciler hides root cause
-**Status:** queued
+**Status:** queued — **DIRECTION: option (a) — deep investigation, fix root cause** (not symptom-suppression)
 **Source:** log-audit 2026-05-06 (Pi syslog, 7979 lines, 42h window)
 **Issue:** Haglerd/homekit-ratgdo32#69
-**Acceptance:** root cause identified; post-fix soak shows zero `counter=8 actual=0` warnings within 10s of `Initialization complete` across 5 consecutive reboots.
-**Notes:** P2 — 24/24 reproducibility over 24 different boots. Functional impact nil (reconciler clamps), but counter=`SSE_MAX_CHANNELS` exact match suggests a deterministic init-path bump or BSS issue. **needs-human-planning** (investigation-shaped, root cause unknown).
+**Acceptance:** root cause identified and fixed; post-fix soak shows zero `counter=8 actual=0` warnings within 10s of `Initialization complete` across 5 consecutive reboots.
+**Notes:** P2 — 24/24 reproducibility over 24 different boots. Functional impact nil (reconciler clamps), but counter=`SSE_MAX_CHANNELS` exact match suggests a deterministic init-path bump or BSS issue.
+
+**User decision (2026-05-06):** option (a) — find and fix the root cause. NOT symptom-suppression (don't just silence the warning).
+
+**Constraint (user 2026-05-06):** no buffer/heap impact. If the root-cause fix requires adding tracking state / BSS / heap to detect the path, halt and surface to user before adding RAM. ESP8266 heap is tight; an architectural fix with RAM cost needs explicit approval.
 
 ### [P2] log-audit-20260506-002 — Socket fd exhaustion (errno 11) under browser concurrent-fetch burst
 **Status:** queued — **DIRECTION CHOSEN: option (b) sequentialize browser fetches client-side** (auto-fixable)
