@@ -80,7 +80,9 @@ static volatile bool isPaired = false;
 #endif // ESP8266
 
 #ifdef CRASH_DEBUG
-extern void delayFnCall(uint32_t ms, void (*callback)());
+// Default arg comes from comms.h (already included above) — repeating it
+// here is ill-formed C++ [dcl.fct.default].
+extern void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close);
 void testDelayFn(const char *buf)
 {
     delayFnCall(5000, (void (*)())NULL);
@@ -1586,6 +1588,9 @@ void setup_homekit()
 
     // Start periodic HomeKit health logging — see homekit_health_log()
     // above. v22 bumped to 180s.
+    // detach homekitHealthTicker: defensive kill before re-arming the
+    // health-log periodic ticker at boot. Distinct from TTCtimer; no
+    // force-close interaction.
     homekitHealthTicker.detach();
     homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_MS, homekit_health_log);
 
