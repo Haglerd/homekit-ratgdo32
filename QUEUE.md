@@ -25,7 +25,29 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — log-audit findings (2026-05-07)
 
-### [P2] log-audit-20260507-004 — `errno 11 "No more processes"` recurrence beyond browser fan-out (post log-audit-002 fix)
+### [P0] log-audit-20260507-005 — BOOT-OOM-MDNS recurring on .65 (PR #89 fix INCOMPLETE — wrong code path)
+**Status:** queued — needs-human-planning
+**Source:** user-pulled `/crashlog` from device 2026-05-07 08:19 CDT after observing post-OTA panic
+**Acceptance:** mdns_networking 176-byte allocation no longer fails; zero `Cannot allocate memory (receive(176))` events across 5 consecutive OTA cycles + 24h soak; no tiT IllegalInstruction crashes.
+**Notes:** **Fresh crash trace from .65 firmware (the BOOT-OOM-MDNS fix release):**
+- Boot: 07-May-2026 07:28:42 CDT
+- Crash: 07-May-2026 08:04:14 CDT (uptime 35:32)
+- Reason: IllegalInstruction in task `tiT`
+- Last log: `E (00:07:23.483) mdns_networking: Cannot allocate memory (receive(176), free heap: ...)`
+- Stack: `0x4008EBBC 0x4008EB81 0x400955E9 0x401E6B8B 0x4010BC9F 0x4010BF29 0x4010BFEA 0x40095331 0x40171FD2 0x4014551D 0x40148AF3 0x4014DBFE 0x4013CC1E 0x4008FB41`
+- Compare to original yesterday's trace on .61: `0x4008EBBC 0x4008EB81 0x400955E9 0x401E5D9F 0x4010B3D3 0x4010B65D 0x4010B71E 0x40095331 0x401711E6 0x40144771 0x40147D47 0x4014CE52 0x4013BE72 0x4008FB41` — first 3 + last identical, same call shape, ASLR/relocation-shifted middle.
+
+**Why PR #89 didn't fix it:** the fix deferred mDNS *service registration* until heap >= 50 KB. But the crash is in mDNS *receive()* — the 176-byte allocation happens whenever a query arrives on port 5353, regardless of whether services are registered. Receive runs as soon as `mdns_init()` is called, which still happens at boot. Three diagnostic candidates:
+
+- **(a)** lwIP/mdns receive buffer pool exhaustion ≠ general heap exhaustion. The 50KB free-heap check looked at the wrong thing. mDNS receive uses lwIP `MEMP_PBUF` / `MEMP_NETBUF` pools sized in sdkconfig.
+- **(b)** `mdns_init()` itself should be deferred, not just `mdns_service_add` calls. Without `mdns_init`, the receive path doesn't run.
+- **(c)** Cap mDNS service-record TXT length so the announce burst doesn't peak-alloc the receive buffer at the same time.
+
+**Pre-req:** `addr2line` analysis on the new stack trace using the .65 ELF (already in the GitHub release) to confirm the failing function. Without function names, planner picks among (a)/(b)/(c) speculatively.
+
+**Hard constraint:** force-close FSM untouched. NOT auto-fixable. P0 because the device crashes on a real recurring bug that the previous "fix" didn't address.
+
+### [P2] ~~log-audit-20260507-004~~ — `errno 11 "No more processes"` recurrence beyond browser fan-out (post log-audit-002 fix)
 **Status:** done — PR https://github.com/Haglerd/homekit-ratgdo32/pull/94 (merged 2026-05-07)
 **Source:** log-audit 2026-05-07 (Pi syslog) — user-surfaced, multi-boot pattern
 **Acceptance:** root cause identified — NOT fd-exhaustion; fd 51/52 are long-lived SSE TCP sockets (LWIP_SOCKET_OFFSET=50). errno 11 = EAGAIN. Two underlying bugs fixed: (1) `clientWriteEx` fast-path used `client.availableForWrite()` which is `Print::availableForWrite()`'s default 0 on Arduino-ESP32 (no override in `NetworkClient`) → returned BUFFER_FULL on every call without writing; (2) Oversized broadcasts hit framework's `NetworkClient::write` retry loop which logs `ESP_LOGE` on every benign EAGAIN, up to 10 lines per write. ESP32-only rewrite: direct `lwip_send(MSG_DONTWAIT)` in clientWriteEx + heap-buffered clientWriteEx for oversized payloads. ESP8266 unchanged. Soak verification deferred to next 24 h on-device.
