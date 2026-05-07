@@ -413,6 +413,18 @@ bool helperForceCloseSingleHold(const std::string &key, const char *value, confi
     comms_refresh_force_close_single_hold();
     return true;
 }
+
+// HK-FC: forceCloseHoldMsSingle (single-hold mechanic's total hold duration).
+// Distinct from forceCloseHoldMs (2-attempt per-press hold) so flipping the
+// mechanic checkbox doesn't invalidate the user's per-mechanic timing.
+// Reuses comms_refresh_force_close_hold_ms — same cache (single source of
+// truth in comms.cpp picks the active value based on cached single-hold flag).
+bool helperForceCloseHoldMsSingle(const std::string &key, const char *value, configSetting *action)
+{
+    userConfig->set(key, value);
+    comms_refresh_force_close_hold_ms();
+    return true;
+}
 #endif // ESP32
 
 /****************************************************************************
@@ -540,10 +552,14 @@ userSettings::userSettings()
         // (single tile; primary close button calls force-close path).
         // Backward compat: pre-tri-state firmware stored bool; existing
         // `true` deserializes as int 1 (companion) automatically.
-        {cfg_forceCloseHomeKit,   {false, false, (int)0, helperForceCloseHomeKit}},
-        {cfg_forceCloseHoldMs,    {false, false, 3500,  helperForceCloseHoldMs}},
+        {cfg_forceCloseHomeKit,       {false, false, (int)0, helperForceCloseHomeKit}},
+        // 2-attempt per-press hold; total = 2× this + 1500 ms gap.
+        {cfg_forceCloseHoldMs,        {false, false, 3500,   helperForceCloseHoldMs}},
         // HK-FC press mechanic: false=legacy 2-attempt, true=single hold.
-        {cfg_forceCloseSingleHold,{false, false, false, helperForceCloseSingleHold}},
+        {cfg_forceCloseSingleHold,    {false, false, false,  helperForceCloseSingleHold}},
+        // Single-hold total continuous hold duration. Different default
+        // from 2-attempt because the mechanics need different timings.
+        {cfg_forceCloseHoldMsSingle,  {false, false, 7000,   helperForceCloseHoldMsSingle}},
 #endif
     };
     IRAM_END(TAG);

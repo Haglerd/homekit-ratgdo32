@@ -2833,16 +2833,24 @@ static void send_force_close_release_then_maybe_retry()
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release retry");
     }
     send_get_status();
-    ESP_LOGI(TAG, "FORCE CLOSE: attempt %d release sent", forceCloseAttempt);
+    if (forceCloseSingleHoldCached)
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: release sent (single-hold mechanic)");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: release sent (2-attempt mechanic, attempt %d/2)", forceCloseAttempt);
+    }
 
     // If the first press alone got the door moving toward Closed, override
     // wasn't needed (photo-eye wasn't actually blocking). Skip second press
     // to avoid toggling the now-closing door back to Open.
+    // (Applies to 2-attempt only — single-hold has no second press.)
     if (forceCloseAttempt >= 1 &&
         (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING ||
          garage_door.current_state == GarageDoorCurrentState::CURR_CLOSED))
     {
-        ESP_LOGI(TAG, "FORCE CLOSE: door already closing/closed — skipping second press");
+        ESP_LOGI(TAG, "FORCE CLOSE: door already closing/closed — sequence complete");
         request_force_close_clear("door already closing/closed after attempt 1");
         return;
     }
@@ -2854,14 +2862,14 @@ static void send_force_close_release_then_maybe_retry()
     // sequence below is reserved for the legacy mechanic.
     if (forceCloseSingleHoldCached)
     {
-        ESP_LOGI(TAG, "FORCE CLOSE: single-hold mode — sequence complete after attempt 1");
+        ESP_LOGI(TAG, "FORCE CLOSE: single-hold sequence complete");
         request_force_close_clear("single-hold mode complete");
         return;
     }
 
     if (forceCloseAttempt < 2)
     {
-        ESP_LOGI(TAG, "FORCE CLOSE: scheduling attempt %d after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
+        ESP_LOGI(TAG, "FORCE CLOSE: scheduling attempt %d/2 after %lums idle gap", forceCloseAttempt + 1, FORCE_CLOSE_GAP_MS);
         // v38 (audit W2): release-store from esp_timer-task producer
         // (this function runs via TTCtimer/delayFnCall). Pairs with
         // acquire-load in force_close_drain_pending_arm on loopTask.
@@ -2877,7 +2885,14 @@ static void send_force_close_release_then_maybe_retry()
 static void send_force_close_press()
 {
     forceCloseAttempt++;
-    ESP_LOGI(TAG, "FORCE CLOSE: attempt %d/2 press hold=%lums", forceCloseAttempt, forceCloseHoldMsCached);
+    if (forceCloseSingleHoldCached)
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: press fired, holding for %lums (single-hold mechanic)", forceCloseHoldMsCached);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: press fired, attempt %d/2 holding for %lums", forceCloseAttempt, forceCloseHoldMsCached);
+    }
 
     PacketData data;
     data.type = PacketDataType::DoorAction;
@@ -2910,29 +2925,35 @@ static void send_force_close_press()
 // HK-FC (fork addition): refresh the cached force-close press-hold
 // duration after a /setgdo settings save. The cache is also written
 // directly by door_command_force_close itself (after clamping the
-// caller-supplied hold_ms), so this just keeps the cache aligned with
-// userConfig for any read path that needs the persisted value before
-// a force-close request arrives — e.g. status reporting or the next
-// HK-FC tile-tap, which reads userConfig->getForceCloseHoldMs() and
-// passes it into door_command_force_close where the cache is rewritten.
+// caller-supplied hold_ms).
 //
-// Clamps to [1000, 10000] to match door_command_force_close's bounds
-// (single source of truth at :2880-2881 below). RELAXED store is fine:
-// the only racing reader is door_command_force_close, which immediately
-// overwrites the cache after its own clamp pass — there is no stale-
-// observer window with safety implications.
+// Picks the active hold-ms field based on the SingleHold mechanic flag:
+//   2-attempt mechanic → cfg_forceCloseHoldMs       (default 3500, max 10000)
+//   single-hold mode   → cfg_forceCloseHoldMsSingle (default 7000, max 15000)
+// Both fields persist independently so flipping the checkbox doesn't
+// destroy either timing. Clamp range is the union (1000-15000) so the
+// cache can hold either field's max value.
 //
-// ESP32-only body: getForceCloseHoldMs() is only declared on the ESP32
-// path of userSettings (config.h #ifndef ESP8266 block). The ESP8266
-// build short-circuits to a no-op so the link symbol still exists.
+// RELAXED store is fine: the only racing reader is door_command_force_close,
+// which immediately overwrites the cache after its own clamp pass — there
+// is no stale-observer window with safety implications.
+//
+// ESP32-only body: getForceCloseHoldMs() / getForceCloseHoldMsSingle() are
+// only declared on the ESP32 path of userSettings (config.h #ifndef ESP8266
+// block). The ESP8266 build short-circuits to a no-op so the link symbol
+// still exists.
 void comms_refresh_force_close_hold_ms()
 {
 #ifndef ESP8266
-    uint32_t hold = userConfig->getForceCloseHoldMs();
-    if (hold < 1000) hold = 3500;
-    if (hold > 10000) hold = 10000;
+    const bool single = userConfig->getForceCloseSingleHold();
+    uint32_t hold = single ? userConfig->getForceCloseHoldMsSingle()
+                           : userConfig->getForceCloseHoldMs();
+    const uint32_t fallback = single ? 7000u : 3500u;
+    if (hold < 1000)  hold = fallback;
+    if (hold > 15000) hold = 15000;
     __atomic_store_n(&forceCloseHoldMsCached, hold, __ATOMIC_RELAXED);
-    ESP_LOGD(TAG, "FORCE CLOSE: cached hold-ms refreshed to %lu", (unsigned long)hold);
+    ESP_LOGD(TAG, "FORCE CLOSE: cached hold-ms refreshed to %lums (%s mechanic)",
+             (unsigned long)hold, single ? "single-hold" : "2-attempt");
 #endif
 }
 
@@ -2942,6 +2963,10 @@ void comms_refresh_force_close_hold_ms()
 // once per release callback. Worst case observation: a single press
 // runs under the prior mechanic before the cache flip is visible. No
 // safety implications either way.
+//
+// Also chains to comms_refresh_force_close_hold_ms because the active
+// hold-ms field depends on this flag — flipping the mechanic must
+// re-pick which user-saved duration is loaded into the cache.
 void comms_refresh_force_close_single_hold()
 {
 #ifndef ESP8266
@@ -2949,6 +2974,8 @@ void comms_refresh_force_close_single_hold()
     __atomic_store_n(&forceCloseSingleHoldCached, single, __ATOMIC_RELAXED);
     ESP_LOGD(TAG, "FORCE CLOSE: cached single-hold mode refreshed to %s",
              single ? "true (single press)" : "false (2-attempt)");
+    // Mechanic flip → re-pick which hold-ms field feeds the cache.
+    comms_refresh_force_close_hold_ms();
 #endif
 }
 
@@ -2981,8 +3008,13 @@ void door_command_force_close(uint32_t hold_ms)
     }
     // We now own the busy flag (TAS atomically set it).
 
-    if (hold_ms < 1000) hold_ms = 3500;
-    if (hold_ms > 10000) hold_ms = 10000;
+    // Clamp range covers BOTH mechanics — 2-attempt's traditional
+    // 1000-10000 ms per-press AND single-hold's wider 1000-15000 ms
+    // total continuous hold. The caller has already picked the
+    // correct field (forceCloseHoldMs vs forceCloseHoldMsSingle) based
+    // on the active mechanic; this just enforces the union upper bound.
+    if (hold_ms < 1000)  hold_ms = 3500;
+    if (hold_ms > 15000) hold_ms = 15000;
     forceCloseHoldMsCached = hold_ms;
     forceCloseAttempt = 0;
     // forceCloseInProgress = true is implicit — TAS above already set it.

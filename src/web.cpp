@@ -1874,9 +1874,10 @@ void build_status_json(char *json)
     // HK-FC tri-state: 0=off, 1=companion tile, 2=replace primary close.
     // Explicit (int32_t) cast disambiguates the JSON add_int overloads
     // (int matches both int32_t and uint32_t signatures otherwise).
-    JSON_ADD_INT(cfg_forceCloseHomeKit, (int32_t)userConfig->getForceCloseHomeKit());
-    JSON_ADD_INT(cfg_forceCloseHoldMs,  userConfig->getForceCloseHoldMs());
-    JSON_ADD_BOOL(cfg_forceCloseSingleHold, userConfig->getForceCloseSingleHold());
+    JSON_ADD_INT(cfg_forceCloseHomeKit,       (int32_t)userConfig->getForceCloseHomeKit());
+    JSON_ADD_INT(cfg_forceCloseHoldMs,        userConfig->getForceCloseHoldMs());
+    JSON_ADD_BOOL(cfg_forceCloseSingleHold,   userConfig->getForceCloseSingleHold());
+    JSON_ADD_INT(cfg_forceCloseHoldMsSingle,  userConfig->getForceCloseHoldMsSingle());
 #endif
     JSON_ADD_INT("webRequests", request_count);
     JSON_ADD_INT("webMaxResponseTime", max_response_time);

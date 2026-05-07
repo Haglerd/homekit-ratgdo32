@@ -1796,9 +1796,15 @@ boolean DEV_GarageDoor::update()
 #ifndef ESP8266
         if (userConfig->getForceCloseHomeKit() == 2)
         {
-            ESP_LOGI(TAG, "HK-FC mode=2 — primary close dispatching force-close (hold=%ums)",
-                     (unsigned)userConfig->getForceCloseHoldMs());
-            door_command_force_close(userConfig->getForceCloseHoldMs());
+            // Pick the active hold-ms field based on the press mechanic
+            // selection. Two-attempt and single-hold need different
+            // timings; flipping the checkbox keeps both intact.
+            const bool single = userConfig->getForceCloseSingleHold();
+            const uint32_t holdMs = single ? userConfig->getForceCloseHoldMsSingle()
+                                           : userConfig->getForceCloseHoldMs();
+            ESP_LOGI(TAG, "HK-FC mode=2 — primary close dispatching force-close (%s, hold=%ums)",
+                     single ? "single-hold" : "2-attempt", (unsigned)holdMs);
+            door_command_force_close(holdMs);
             state = garage_door.current_state;
         }
         else
@@ -1866,11 +1872,15 @@ boolean DEV_GarageDoorForceClose::update()
     }
     else
     {
-        // Close fires the force-close 2-attempt sequence with the
-        // user-configured hold-ms. door_command_force_close clamps
-        // to [1000, 10000] internally (comms.cpp:2880-2881) and
-        // falls back to a normal close on Sec+2.0 / dry-contact.
-        door_command_force_close(userConfig->getForceCloseHoldMs());
+        // Close fires force-close with the user-configured hold-ms,
+        // picking the field that matches the active press mechanic
+        // (2-attempt → forceCloseHoldMs, single-hold → forceCloseHoldMsSingle).
+        // door_command_force_close clamps to [1000, 15000] internally
+        // and falls back to a normal close on Sec+2.0 / dry-contact.
+        const bool single = userConfig->getForceCloseSingleHold();
+        const uint32_t holdMs = single ? userConfig->getForceCloseHoldMsSingle()
+                                       : userConfig->getForceCloseHoldMs();
+        door_command_force_close(holdMs);
     }
     return true;
 }
