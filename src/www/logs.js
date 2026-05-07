@@ -105,7 +105,7 @@ function openTab(evt, tabName) {
         fetch("status.json")
             .then((response) => {
                 if (!response.ok || response.status !== 200) {
-                    reject(`Error requsting status.json, RC: ${response.status}`);
+                    throw new Error(`Error requesting status.json, RC: ${response.status}`);
                 } else {
                     return response.text();
                 }
@@ -170,7 +170,7 @@ async function loadLogPages() {
         fetch("showlog")
             .then((response) => {
                 if (!response.ok || response.status !== 200) {
-                    reject(`Error requesting logs, RC: ${response.status}`);
+                    throw new Error(`Error requesting logs, RC: ${response.status}`);
                 } else {
                     return response.text();
                 }
@@ -179,7 +179,8 @@ async function loadLogPages() {
                 sysLogLoaded = true;
                 // reduce newlines down to single \n
                 text = text.replaceAll('\r\n', '\n');
-                while (line = tmpLogMsgs.pop()) {
+                let line;
+                while ((line = tmpLogMsgs.pop())) {
                     console.log(`Remove dup: ${line}`);
                     text = text.replace(line + '\n', '');
                 }
@@ -204,7 +205,7 @@ async function loadLogPages() {
         fetch("status.json")
             .then((response) => {
                 if (!response.ok || response.status !== 200) {
-                    reject(`Error requesting status.json, RC: ${response.status}`);
+                    throw new Error(`Error requesting status.json, RC: ${response.status}`);
                 } else {
                     return response.text();
                 }
@@ -220,7 +221,7 @@ async function loadLogPages() {
         fetch("showrebootlog")
             .then((response) => {
                 if (!response.ok || response.status !== 200) {
-                    reject(`Error requesting reboot logs, RC: ${response.status}`);
+                    throw new Error(`Error requesting reboot logs, RC: ${response.status}`);
                 } else {
                     return response.text();
                 }
@@ -233,7 +234,7 @@ async function loadLogPages() {
         fetch("crashlog")
             .then((response) => {
                 if (!response.ok || response.status !== 200) {
-                    reject(`Error requesting crash logs, RC: ${response.status}`);
+                    throw new Error(`Error requesting crash logs, RC: ${response.status}`);
                 } else {
                     return response.text();
                 }

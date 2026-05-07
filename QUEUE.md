@@ -12,8 +12,8 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Acceptance:** clean `pio run -e ratgdo_esp32dev` with `-Wshadow=local` permanently in build_flags. Triage results appended to audit doc.
 **Notes:** library-header shadows (arduino-esp32, HomeSpan) are accepted noise per user direction; only fix shadows in fork code. `-Werror=shadow` reverts after triage.
 
-### [P2] W46 — Add eslint over `src/www/` + GitHub Actions CI lint
-**Status:** queued
+### [P2] ~~W46~~ — Add eslint over `src/www/` + GitHub Actions CI lint
+**Status:** DONE — branch `w46-eslint-lint` (PR pending)
 **Source:** audit, v45 plan
 **Acceptance:** `npx eslint src/www/` exits 0; `.github/workflows/lint.yml` runs on push + PR. Vendored `marked.umd.js` + `qrcode.js` excluded.
 **Notes:** include CI integration in same commit per user direction (don't defer).
