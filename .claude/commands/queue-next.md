@@ -92,8 +92,11 @@ Code-bug failures (build fails on real syntax error, tests fail on logic) are NO
 This list is **EXHAUSTIVE.** No other reason halts a drain. In particular:
 
 - ❌ "context is getting heavy" / "checkpoint here" → **NOT a halt reason.** The user has stated 3+ times: autonomous execution, no self-imposed pauses. If you feel context-bound, finish the current item, pick the smallest remaining queued item, and keep going. Only the listed hard-stops halt. If a halt happens for any other reason it is treated as an autonomy violation.
+- ❌ "only P3 items remain — let the user review the P1/P2 work first" → **NOT a halt reason.** It's a `/queue-next` (drain), not a `/queue-p1-only`. Priority orders WHICH item runs first; it does NOT define a stop boundary. P3 items are queued the same as P1/P2 — they ship the same way. Continue until cap, queue-empty, or another listed hard-stop. If you find yourself thinking "the high-value work is done, time to wrap up," that's the autonomy-violation pattern this rule blocks.
 - ❌ "want to confirm with the user before continuing" → not a halt; the user pre-authorized the whole drain by invoking `/queue-next`.
 - ❌ "this PR introduced something risky, let me pause" → still not a halt; if code-review caught something real, that's the planner-revision-iteration loop (see below). Otherwise file the PR and continue.
+
+**Cap accounting:** the drain cap (default 10) counts FEATURE items, not release-bump PRs that wrap them. If item N ships a firmware change, the manifest-bump release PR that follows is part of N's wrap, not a separate item. Same for QUEUE.md done-mark PRs. Don't burn the cap on housekeeping PRs.
 
 **Valid hard-stops (these and only these):**
 
