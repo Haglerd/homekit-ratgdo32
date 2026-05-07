@@ -268,8 +268,48 @@ struct SSESubscription
     // multi-writer fanout. Same pattern as sseSlowWrites/sseBufferFullSkips
     // global counters.
     volatile uint32_t consecutiveBufferFull;
+    // log-audit-003: timestamp of the first BUFFER_FULL of the current
+    // streak (i.e. the BUFFER_FULL that took consecutiveBufferFull from
+    // 0 -> 1). Reset to 0 alongside consecutiveBufferFull on OK / slot
+    // free / subscribe. Used by the wedged-reap log line to report
+    // wedgedFor=Xms — how long the connection sat unable to drain
+    // before the reap fired. Same multi-writer fanout as the counter;
+    // 32-bit aligned writes are atomic on Xtensa, single-reader (sweep)
+    // observes a stale value at most one tick (recoverable).
+    volatile uint32_t firstBufferFullAt;
 };
 SSESubscription subscription[SSE_MAX_CHANNELS];
+
+// log-audit-003: per-UUID rapid-recurrence dampener for sweep-class-5d
+// reaps. iOS Safari background-tab SSE silencing produces a tight
+// reap-recover loop where the same browser-side UUID re-subscribes
+// within seconds of being reaped, immediately re-wedges, and gets reaped
+// again. One device session was observed reaping the same UUID 28 times
+// over 42h. Each reap functioning correctly; root cause is the client
+// re-subscribe behavior we can't fix server-side.
+//
+// Mitigation: when a slot is reaped via class-5d (wedged on flow
+// control), stamp its UUID + reap time into recentReaps[]. handle_subscribe
+// scans this table on every incoming subscribe; if the same UUID was
+// reaped within the last 60s, return 429 instead of allocating a slot.
+// The misbehaving client gets backed off; well-behaved clients with
+// transient wedge events (a single reap then a clean reconnect after
+// >60s) are unaffected.
+//
+// Heap budget: SSE_MAX_CHANNELS (8) slots * 40 bytes = 320 bytes BSS.
+// Zero heap allocation — uuid is fixed char[40] (UUID = 36 chars + null +
+// slack), not String. Acceptable on ESP8266.
+//
+// Threading: handle_subscribe and the orphan sweep both run on
+// loopTask (single-threaded webserver / Ticker-deferred-sweep model
+// in use here); no mutex needed.
+struct RecentReap
+{
+    char uuid[40];      // 36-char UUID + null + slack; uuid[0] == '\0' = empty
+    uint32_t reapedAt;  // millis() stamp; 0 = empty
+};
+static RecentReap recentReaps[SSE_MAX_CHANNELS];
+constexpr uint32_t SSE_DAMPENER_WINDOW_MS = 60000;
 // During firmware update note which subscribed client is updating.
 // v38 (audit W5): `volatile` qualifier added. Pointer is written by
 // handle_firmware_upload (loopTask) and read by the HK watchdog Ticker
@@ -780,6 +820,7 @@ void setup_web()
         subscription[i].subscribedAt = 0;
         subscription[i].lastActivity = 0;
         subscription[i].consecutiveBufferFull = 0;  // v47
+        subscription[i].firstBufferFullAt = 0;      // log-audit-003
     }
     // Now safe to start accepting HTTP connections.
     server.begin();
@@ -2198,6 +2239,7 @@ void removeSSEsubscription(SSESubscription *s)
     s->subscribedAt = 0;
     s->lastActivity = 0;
     s->consecutiveBufferFull = 0;  // v47
+    s->firstBufferFullAt = 0;      // log-audit-003
 }
 
 // v22: drain SSESubscription entries flagged pendingRemove during a
@@ -2309,10 +2351,52 @@ void sweep_sse_orphans()
             uint32_t cbf = __atomic_load_n(&s.consecutiveBufferFull, __ATOMIC_RELAXED);
             if (cbf >= SSE_MAX_CONSECUTIVE_BUFFER_FULL)
             {
-                ESP_LOGW(TAG, "SSE orphan (wedged on flow-control) channel=%u uuid=%s ip=%s consecutive=%u — reaping",
+                // log-audit-003: report how long the connection sat wedged
+                // (delta since the first BUFFER_FULL of the streak). Lets
+                // future regressions in the v47 wedged-detection — e.g.
+                // BUFFER_FULL streaks completing in <1s indicating a
+                // misclassified flow-control event — be observable from
+                // logs alone.
+                uint32_t fbfa = __atomic_load_n(&s.firstBufferFullAt, __ATOMIC_RELAXED);
+                uint32_t wedgedFor = (fbfa != 0) ? (now - fbfa) : 0;  // unsigned-safe across rollover
+                ESP_LOGW(TAG, "SSE orphan (wedged on flow-control) channel=%u uuid=%s ip=%s consecutive=%u wedgedFor=%ums — reaping",
                          (unsigned)i, s.clientUUID.c_str(),
                          s.clientIP.toString().c_str(),
-                         (unsigned)cbf);
+                         (unsigned)cbf,
+                         (unsigned)wedgedFor);
+
+                // log-audit-003: stamp this UUID into the recent-reap
+                // dampener. handle_subscribe will reject re-subscribes of
+                // the same UUID for SSE_DAMPENER_WINDOW_MS. Find an empty
+                // slot first; if all 8 are full, overwrite the oldest
+                // (which by construction will already be near the 60s
+                // boundary — the dampener-window aging in handle_subscribe
+                // doesn't run from here).
+                if (s.clientUUID.length() > 0)
+                {
+                    int target = -1;
+                    uint32_t oldestAge = 0;
+                    for (int r = 0; r < SSE_MAX_CHANNELS; r++)
+                    {
+                        if (recentReaps[r].reapedAt == 0 || recentReaps[r].uuid[0] == '\0')
+                        {
+                            target = r;
+                            break;
+                        }
+                        uint32_t age = now - recentReaps[r].reapedAt;  // unsigned-safe
+                        if (age >= oldestAge)
+                        {
+                            oldestAge = age;
+                            target = r;
+                        }
+                    }
+                    if (target >= 0)
+                    {
+                        strlcpy(recentReaps[target].uuid, s.clientUUID.c_str(), sizeof(recentReaps[target].uuid));
+                        recentReaps[target].reapedAt = now;
+                    }
+                }
+
                 s.pendingRemove = true;
                 __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
                 reapedThisTick++;
@@ -2445,11 +2529,21 @@ void SSEheartbeat(SSESubscription *s)
         {
             s->lastActivity = (uint32_t)_millis();
             __atomic_store_n(&s->consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
+            __atomic_store_n(&s->firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
         }
         else if (r == SseWriteResult::BUFFER_FULL)
         {
             s->lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
-            __atomic_fetch_add(&s->consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+            // log-audit-003: stamp streak-start on the 0->1 transition.
+            // fetch_add returns the previous value; if 0 we just started a
+            // streak. Multi-writer: a racing writer may overwrite our stamp
+            // with a slightly later one — acceptable, the log line is
+            // diagnostic-quality and the delta is at most one tick.
+            uint32_t prev = __atomic_fetch_add(&s->consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+            if (prev == 0)
+            {
+                __atomic_store_n(&s->firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
+            }
         }
         // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
         YIELD();
@@ -2628,7 +2722,7 @@ void handle_subscribe()
     }
 
     // 3. parse argument indices (no slot state mutated)
-    int id = 0;
+    int id = -1;
     bool logViewer = false;
     int heartbeatIntervalArgIdx = -1;
     for (int i = 0; i < server.args(); i++)
@@ -2711,6 +2805,51 @@ void handle_subscribe()
         return;
     }
 
+    // 6a. log-audit-003: rapid-recurrence dampener. Age out stale entries
+    // first (cheap, prevents the table from accumulating expired stamps
+    // and silently aging into garbage), then check whether the incoming
+    // UUID was reaped within SSE_DAMPENER_WINDOW_MS. If so, return 429
+    // and bail without touching slot state. Misbehaving clients (e.g.
+    // iOS Safari background-tab SSE that re-subscribes immediately after
+    // every reap) get backed off; well-behaved clients with a single
+    // transient wedge are unaffected.
+    //
+    // id == -1 means the request had no `id=` argument; skip the dampener
+    // entirely rather than matching against server.arg(-1) (undefined).
+    if (id != -1)
+    {
+        uint32_t nowSub = (uint32_t)_millis();
+        for (auto &r : recentReaps)
+        {
+            if (r.reapedAt != 0 && (nowSub - r.reapedAt) >= SSE_DAMPENER_WINDOW_MS)
+            {
+                r.uuid[0] = '\0';
+                r.reapedAt = 0;
+            }
+        }
+        // Bind the String temp to a local so .c_str() doesn't dangle across
+        // the strcmp loop (server.arg returns by value).
+        String incomingUUIDStr = server.arg(id);
+        const char *incomingUUID = incomingUUIDStr.c_str();
+        if (incomingUUID[0] != '\0')
+        {
+            for (auto &r : recentReaps)
+            {
+                if (r.reapedAt != 0 &&
+                    r.uuid[0] != '\0' &&
+                    strcmp(r.uuid, incomingUUID) == 0 &&
+                    (nowSub - r.reapedAt) < SSE_DAMPENER_WINDOW_MS)
+                {
+                    uint32_t ageMs = nowSub - r.reapedAt;
+                    ESP_LOGW(TAG, "SSE 429 dampener uuid=%s ip=%s ageMs=%u — recently reaped (wedged on flow-control); backing off client",
+                             r.uuid, clientIP.toString().c_str(), (unsigned)ageMs);
+                    server.send(429, type_txt, "Recently reaped — try again in 60s\n");
+                    return;
+                }
+            }
+        }
+    }
+
     // 7. find existing UUID. removeSSEsubscription decrements
     //    subscriptionCount; we don't pre-increment here so re-subscribing
     //    is a clean wash.
@@ -2786,6 +2925,7 @@ void handle_subscribe()
     subscription[channel].subscribedAt = (uint32_t)_millis();
     subscription[channel].lastActivity = (uint32_t)_millis();
     subscription[channel].consecutiveBufferFull = 0;  // v47
+    subscription[channel].firstBufferFullAt = 0;      // log-audit-003
 
     // 11. counter bumped only AFTER all rejection paths exhausted.
     if (!foundExisting)
@@ -3004,11 +3144,17 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                             {
                                 subscription[i].lastActivity = (uint32_t)_millis();
                                 __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
+                                __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
                             }
                             else if (r == SseWriteResult::BUFFER_FULL)
                             {
                                 subscription[i].lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
-                                __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                                // log-audit-003: stamp streak-start on 0->1 transition (see SSEheartbeat for rationale).
+                                uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                                if (prev == 0)
+                                {
+                                    __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
+                                }
                             }
                             // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
                         }
@@ -3040,11 +3186,17 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                         {
                             subscription[i].lastActivity = (uint32_t)_millis(); // v27
                             __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
+                            __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
                         }
                         else if (r == SseWriteResult::BUFFER_FULL)
                         {
                             subscription[i].lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
-                            __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                            // log-audit-003: stamp streak-start on 0->1 transition (see SSEheartbeat for rationale).
+                            uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                            if (prev == 0)
+                            {
+                                __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
+                            }
                         }
                         // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
                     }
@@ -3250,11 +3402,17 @@ void handle_firmware_upload()
                     {
                         firmwareUpdateSub->lastActivity = (uint32_t)_millis();
                         __atomic_store_n(&firmwareUpdateSub->consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
+                        __atomic_store_n(&firmwareUpdateSub->firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
                     }
                     else if (r == SseWriteResult::BUFFER_FULL)
                     {
                         firmwareUpdateSub->lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
-                        __atomic_fetch_add(&firmwareUpdateSub->consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                        // log-audit-003: stamp streak-start on 0->1 transition (see SSEheartbeat for rationale).
+                        uint32_t prev = __atomic_fetch_add(&firmwareUpdateSub->consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+                        if (prev == 0)
+                        {
+                            __atomic_store_n(&firmwareUpdateSub->firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
+                        }
                     }
                     // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
                     GIVE_MUTEX();
