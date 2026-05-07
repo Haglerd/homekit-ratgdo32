@@ -57,7 +57,7 @@ extern void force_close_drain_pending_clear();
 #if defined(ESP8266) || !defined(USE_GDOLIB)
 extern GarageDoorCurrentState toggle_door(bool bypass_ttc = false);
 #endif
-extern void delayFnCall(uint32_t ms, void (*callback)());
+extern void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close = true);
 #ifndef USE_GDOLIB
 extern void send_get_status();
 extern void send_get_openings();

@@ -80,7 +80,7 @@ static volatile bool isPaired = false;
 #endif // ESP8266
 
 #ifdef CRASH_DEBUG
-extern void delayFnCall(uint32_t ms, void (*callback)());
+extern void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close = true);
 void testDelayFn(const char *buf)
 {
     delayFnCall(5000, (void (*)())NULL);

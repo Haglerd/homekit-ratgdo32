@@ -2822,7 +2822,13 @@ static void send_force_close_press()
     // Schedule release via delayFnCall — which also runs the TTC warning
     // sequence (light-press flashes during the delay). The TTC warning is
     // UL-mandated and the motor's override gate requires it.
-    delayFnCall(forceCloseHoldMsCached, send_force_close_release_then_maybe_retry);
+    //
+    // preempt_force_close=false: this call IS scheduling the force-close press
+    // release; we MUST NOT clear force-close state here (would tear down the
+    // 2-attempt sequence by resetting forceCloseAttempt before the release
+    // callback fires). Only external callers of delayFnCall preempt
+    // force-close.
+    delayFnCall(forceCloseHoldMsCached, send_force_close_release_then_maybe_retry, /*preempt_force_close=*/false);
 }
 
 void door_command_force_close(uint32_t hold_ms)
@@ -3357,18 +3363,32 @@ void TTCtimerFn(void (*callback)(), bool light)
 }
 
 // Call function after ms milliseconds during which we flash and beep
-void delayFnCall(uint32_t ms, void (*callback)())
+//
+// preempt_force_close (default true): if an in-flight force-close was using
+// TTCtimer for its press hold, the .detach() below would orphan
+// forceCloseInProgress (the release callback that would clear it never fires).
+// External callers (door_command_close TTC delay, recovery sync_and_restart,
+// homekit testDelayFn, serialCLI) take the default — TTC arm-fresh preempts
+// in-flight force-close per user direction (QUEUE.md W47 acceptance). The
+// force-close press path itself (send_force_close_press at :2825) calls
+// delayFnCall to schedule its own release; that caller MUST opt out
+// (preempt_force_close=false) or it would tear down its own 2-attempt sequence
+// (forceCloseAttempt resets to 0 before the release callback fires, dropping
+// press 2 silently). Gated under #ifndef USE_GDOLIB because
+// request_force_close_clear is itself USE_GDOLIB-gated; under USE_GDOLIB the
+// force-close path doesn't run, so the parameter is a no-op.
+void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close)
 {
     bool light = userConfig->getTTClight(); // Whether to flash light during delay
 
     // detach TTCtimer: arm-fresh — clobber any prior TTC delay before re-arming.
-    // v45/W47: if an in-flight force-close was using TTCtimer for its press
-    // hold, killing the timer here orphans forceCloseInProgress (the release
-    // callback that would clear it never fires). Per user direction (QUEUE.md
-    // W47 acceptance), TTC arm-fresh preempts in-flight force-close — issue
-    // the deferred clear so the new TTC sequence starts cleanly.
     TTCtimer.detach();                 // Terminate existing timer if any
-    request_force_close_clear("delayFnCall arm-fresh during force-close window");
+#ifndef USE_GDOLIB
+    if (preempt_force_close)
+    {
+        request_force_close_clear("delayFnCall arm-fresh during force-close window");
+    }
+#endif
     TTCiterations = ms / TTCinterval;  // Number of times to go through loop
     TTCwasLightOn = garage_door.light; // Current state of light
     ESP_LOGI(TAG, "Start function delay timer for %lums (%d iterations)", ms, TTCiterations);
