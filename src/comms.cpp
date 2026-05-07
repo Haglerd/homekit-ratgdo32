@@ -2964,8 +2964,24 @@ static bool autoCloseInWindow(uint32_t *outNowMOD)
 
 // Compute seconds from NOW until the next window-start edge. Used by
 // the one-shot scheduler to sleep through the inactive period instead
-// of waking every 60s. Caps at 24h - 1s to avoid Ticker overflow on
-// long sleeps. Assumes NTP is synced (caller checks).
+// of waking every 60s. Assumes NTP is synced (caller checks).
+//
+// W44 (DST spring-forward / fall-back edge case):
+// `autoCloseInWindow` and the start-of-day computation here both run
+// against `localtime_r`, so they SEE DST. SNTP's `time_is_set`
+// callback fires only when the wallclock is initially set or stepped
+// — not on DST transitions, which are a localtime-view event, not a
+// clock event. So if we sleep ~22 hours waiting for next window-start,
+// a DST shift in the middle of that sleep silently moves the actual
+// fire-time by ±1 h relative to local-time intent.
+//
+// Mitigation (option-A): cap the long-sleep horizon at 30 minutes so
+// we re-evaluate the window cadence at most 30 min after any DST
+// transition. The scheduler chains: each time the 30-min cap fires,
+// update_auto_close_schedule re-runs, calls localtime_r afresh
+// (which DOES respect DST), and either schedules another 30-min cap
+// or transitions to the 60s in-window tick. Worst-case DST drift is
+// then bounded to 30 min instead of "until next 23h cap fires."
 static uint32_t autoCloseSecsUntilNextStart()
 {
     time_t now = time(NULL);
@@ -2989,7 +3005,12 @@ static uint32_t autoCloseSecsUntilNextStart()
         delta = (24U * 3600U) - nowSecOfDay + startSecOfDay;
     }
     if (delta < 30U) delta = 30U;          // never sleep less than 30s
-    if (delta > 23U * 3600U) delta = 23U * 3600U; // cap at <24h
+    // W44: cap at 30 min so DST transitions can't silently shift the
+    // fire-time by ±1 h. update_auto_close_schedule re-evaluates on
+    // each wake-up — the "real" next-window-start computation below
+    // still picks the correct edge after DST.
+    constexpr uint32_t W44_DST_MAX_SLEEP_SECS = 30U * 60U;
+    if (delta > W44_DST_MAX_SLEEP_SECS) delta = W44_DST_MAX_SLEEP_SECS;
     return delta;
 }
 
@@ -3048,7 +3069,10 @@ void update_auto_close_schedule()
         // scheduler runs from service_timer_loop on the main task,
         // single-threaded, where detach+attach is safe.
         autoCloseTicker.once_ms((uint32_t)(secs * 1000U), request_auto_close_reschedule);
-        ESP_LOGD(TAG, "AUTO-CLOSE: outside window (now=%02u:%02u) — sleeping %us until window-start",
+        // W44: sleep is capped at 30 min so DST transitions can't shift
+        // the actual fire-time relative to localtime by ±1 h. Will
+        // chain re-schedule until inside the window.
+        ESP_LOGD(TAG, "AUTO-CLOSE: outside window (now=%02u:%02u) — sleeping %us (W44-capped, will re-evaluate)",
                  nowMOD / 60, nowMOD % 60, secs);
     }
 }
