@@ -10,6 +10,14 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.69 (2026-05-07) — W48 _C field consistency audit (doc-only)
+
+Documentation-only audit. `_C` change-tracked vs raw `JSON_ADD_*` field consistency in `web_loop`'s SSE delta-broadcaster. Inventoried 27 fields, classified by variant + change frequency + cache mechanism. **Conclusion A**: existing split is deliberate — `_C` for per-tick polled fields with a per-field cache slot, raw for fields gated by single-shot event flags (the flag IS the cache). Doc comment block added above the SSE broadcaster articulating the rule + sibling-path warning that `build_status_json` (polled snapshot) uses RAW for ALL fields by design (full-snapshot consumer contract).
+
+**Knock-on for W40**: W40 closes as non-finding. The 11 fork-added fields W40 cited are in `build_status_json` where NO field uses `_C` — not just the fork-added ones. W40's premise (drift from a `_C`-elsewhere convention) doesn't hold up. Reopening would require redesigning the `/status.json` contract entirely (out of scope for fork audit).
+
+Zero behavior change. No firmware code touched — comment only.
+
 ### v3.4.4-forceclose.68 (2026-05-07) — W43 writeBuffer rename + invariant comment
 
 Hygiene rename: the file-scope `writeBuffer[512]` in `web.cpp` is renamed to `loopTaskScratchBuf512` so every call site advertises the loopTask-only invariant up front. A comment block at the declaration documents (a) the ESP32 invariant — only written from loopTask context (Arduino WebServer dispatch, OTA upload, web_loop status path); (b) the ESP8266 carve-out — `SSEBroadcastState` reuses this global on the 8266 because the ~4 KB main-task stack can't absorb +512 B per call. Per-caller stack buffers were rejected during planning for that reason. Zero behavior change.
