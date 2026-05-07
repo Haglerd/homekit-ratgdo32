@@ -1715,6 +1715,10 @@ void build_status_json(char *json)
     JSON_ADD_BOOL(cfg_homespanCLI, userConfig->getEnableHomeSpanCLI());
     JSON_ADD_BOOL(cfg_lightHomeKit, userConfig->getLightHomeKit());
     JSON_ADD_BOOL(cfg_motionHomeKit, userConfig->getMotionHomeKit());
+    // HK-FC: surface the new toggle + hold-ms so the web UI can render
+    // the row state and current value.
+    JSON_ADD_BOOL(cfg_forceCloseHomeKit, userConfig->getForceCloseHomeKit());
+    JSON_ADD_INT(cfg_forceCloseHoldMs,  userConfig->getForceCloseHoldMs());
 #endif
     JSON_ADD_INT("webRequests", request_count);
     JSON_ADD_INT("webMaxResponseTime", max_response_time);
@@ -2098,6 +2102,19 @@ void handle_setgdo()
             long n = strtol(value.c_str(), nullptr, 10);
             if (n < (long)HK_WATCHDOG_MIN_SECS) n = (long)HK_WATCHDOG_MIN_SECS;
             if (n > (long)HK_WATCHDOG_MAX_SECS) n = (long)HK_WATCHDOG_MAX_SECS;
+            value = std::to_string(n);
+        }
+        // HK-FC: clamp force-close press-hold to [1000, 10000] to match
+        // door_command_force_close's bounds (comms.cpp:2880-2881 single
+        // source of truth). Same defensive pattern as the auto-close /
+        // watchdog clamps above — a hand-crafted POST forceCloseHoldMs=99999
+        // would otherwise hold the relay way longer than the motor's
+        // override window expects.
+        if (key == "forceCloseHoldMs")
+        {
+            long n = strtol(value.c_str(), nullptr, 10);
+            if (n < 1000)  n = 1000;
+            if (n > 10000) n = 10000;
             value = std::to_string(n);
         }
 

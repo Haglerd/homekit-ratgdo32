@@ -49,6 +49,9 @@ extern void auto_close_drain_pending_reschedule();
 // Called at boot (after userConfig is loaded) and from the
 // /setgdo settings-save path. Single-threaded — loopTask only.
 extern void comms_refresh_auto_close_config();
+// HK-FC: refresh forceCloseHoldMsCached after a /setgdo settings save.
+// Loop-task only — same call discipline as comms_refresh_auto_close_config.
+extern void comms_refresh_force_close_hold_ms();
 // Drains for the force-close deferred-arm and deferred-clear flags.
 // Both run on loopTask via service_timer_loop and serialize all
 // Ticker manipulation onto a single task. Audit findings #3, A, G.

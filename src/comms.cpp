@@ -2848,6 +2848,35 @@ static void send_force_close_press()
     delayFnCall(forceCloseHoldMsCached, send_force_close_release_then_maybe_retry, /*preempt_force_close=*/false);
 }
 
+// HK-FC (fork addition): refresh the cached force-close press-hold
+// duration after a /setgdo settings save. The cache is also written
+// directly by door_command_force_close itself (after clamping the
+// caller-supplied hold_ms), so this just keeps the cache aligned with
+// userConfig for any read path that needs the persisted value before
+// a force-close request arrives — e.g. status reporting or the next
+// HK-FC tile-tap, which reads userConfig->getForceCloseHoldMs() and
+// passes it into door_command_force_close where the cache is rewritten.
+//
+// Clamps to [1000, 10000] to match door_command_force_close's bounds
+// (single source of truth at :2880-2881 below). RELAXED store is fine:
+// the only racing reader is door_command_force_close, which immediately
+// overwrites the cache after its own clamp pass — there is no stale-
+// observer window with safety implications.
+//
+// ESP32-only body: getForceCloseHoldMs() is only declared on the ESP32
+// path of userSettings (config.h #ifndef ESP8266 block). The ESP8266
+// build short-circuits to a no-op so the link symbol still exists.
+void comms_refresh_force_close_hold_ms()
+{
+#ifndef ESP8266
+    uint32_t hold = userConfig->getForceCloseHoldMs();
+    if (hold < 1000) hold = 3500;
+    if (hold > 10000) hold = 10000;
+    __atomic_store_n(&forceCloseHoldMsCached, hold, __ATOMIC_RELAXED);
+    ESP_LOGD(TAG, "FORCE CLOSE: cached hold-ms refreshed to %lu", (unsigned long)hold);
+#endif
+}
+
 void door_command_force_close(uint32_t hold_ms)
 {
     if (doorControlType != 1)
@@ -3144,6 +3173,9 @@ void auto_close_drain_pending_reschedule() {}
 void door_command_force_close(uint32_t /*hold_ms*/) {}
 void force_close_drain_pending_arm()     {}
 void force_close_drain_pending_clear()   {}
+// HK-FC: same-shape stub for the gdolib path. cache lives only in the
+// non-gdolib branch alongside door_command_force_close itself.
+void comms_refresh_force_close_hold_ms() {}
 
 #endif // not USE_GDOLIB
 
