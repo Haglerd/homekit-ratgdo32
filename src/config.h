@@ -308,7 +308,8 @@ public:
     bool getLightHomeKit() { return std::get<bool>(get(cfg_lightHomeKit)); };
     bool getMotionHomeKit() { return std::get<bool>(get(cfg_motionHomeKit)); };
     // HK-FC (fork addition, ESP32-only).
-    bool     getForceCloseHomeKit() { return std::get<bool>(get(cfg_forceCloseHomeKit)); };
+    // HK-FC tri-state mode: 0=off, 1=companion tile, 2=replace primary close.
+    int      getForceCloseHomeKit() { return std::get<int>(get(cfg_forceCloseHomeKit)); };
     uint32_t getForceCloseHoldMs()  { return std::get<int>(get(cfg_forceCloseHoldMs)); };
 #endif
 };

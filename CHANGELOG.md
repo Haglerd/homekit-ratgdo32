@@ -10,6 +10,23 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.73 (2026-05-07) — HK-FC tri-state mode (off / companion / replace)
+
+User feature. The HomeKit force-close toggle was binary (off / companion-tile). Adds a third mode for users whose GDO **always** needs the long-press hold to close — skips the wasted normal-close-then-fall-back-to-force-close cascade.
+
+**Modes** (`forceCloseHomeKit` in settings):
+- **0 = Off** (default): primary tile close uses normal toggle press. No second tile.
+- **1 = Companion**: primary tile uses normal close; a separate "Force Close Door" tile fires the force-close hold. Migrated automatically from the previous boolean `true`.
+- **2 = Replace**: single tile (no companion). The primary close button calls `door_command_force_close(holdMs)` directly — saves the cascade for setups whose GDO always needs the long-press.
+
+**Migration**: existing devices with `forceCloseHomeKit=true` deserialize to mode 1 (companion) — no behavior change. Mode 2 is opt-in.
+
+**Web UI**: `Force-Close Tile:` checkbox replaced by `Force-Close Mode:` 3-option select. Hold-ms input unchanged (1000-10000 range).
+
+**Implementation**: `cfg_forceCloseHomeKit` becomes `int` (was `bool`), `enable_service_homekit_force_close()` takes `int mode` (was `bool enable`). Boot-time second-accessory creation gated on `mode == 1`. `DEV_GarageDoor::update()` close path checks `mode == 2` and dispatches `door_command_force_close()` instead of `close_door()`. Sec+2.0 / dry-contact users on mode 2: `door_command_force_close` falls back transparently to a normal close (`comms.cpp:2880-2881`).
+
+**Known follow-up** (not in this PR): the force-close 2-attempt sequence currently does press-release-press, so when the door reverses partway it lets the door come fully back up before re-pressing. Mechanically a continuous hold (mimicking the wall button) would be more efficient but requires hardware-side analysis of relay duty cycle limits + a way to release on door-state-changed-to-Closed. Filed as a future item.
+
 ### v3.4.4-forceclose.72 (2026-05-07) — SEC1 TX-fail log rate-limit (obstruction noise)
 
 Hygiene fix surfaced from .71 soak. When a SEC1 (Sears/Genie) wall-panel send fails repeatedly — typically because the door is **physically obstructed** during a close, so the GDO is busy reversing and not ACKing — the wall-panel emulator queues the next packet → that one also exhausts retries → another `ESP_LOGE`. A single obstructed-close event from `comms.cpp:1665` produces ~45 identical `SEC1 TX send failed, exceeded max retry` lines over ~12 seconds, dominating the 16 KB on-device ring buffer and wrapping out the surrounding user-action context (door state transitions, light toggles, motion clears) before `/showlog` can be fetched.
