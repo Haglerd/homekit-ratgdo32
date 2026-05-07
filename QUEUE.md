@@ -43,29 +43,6 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — log-audit findings (2026-05-07)
 
-### [P1] BOOT-OOM-MDNS — Boot-time heap exhaustion → `tiT` mDNS-OOM crash (CONFIRMED root cause)
-**Status:** queued — needs-human-planning (pre-req log-audit-20260507-003 landed via PR #88)
-**Source:** v37 preserved crash log + log-audit-20260507-001 + user-provided fresh crash trace 2026-05-07 (consolidates these into one finding — they are the same bug)
-**Acceptance:** boot-time heap profile shows mdns_networking receive() allocations have headroom across the 9-second 194212→108B descent; reproduce-and-recover smoke covering >=5 OTA cycles with no second-boot crash; 24h post-OTA soak with no IllegalInstruction in tiT.
-**Notes:** **Root cause confirmed from fresh crash 2026-05-06 23:53:12 CDT (uptime 89s, firmware v3.4.4-forceclose.61):**
-- Reset reason: **IllegalInstruction** in task `tiT` (lwIP TCP/IP task)
-- Last log line: `E (00:01:33.672) mdns_networking: Cannot allocate memory (receive(176), free heap: 220 bytes)`
-- Stack trace: `0x4008EBBC 0x4008EB81 0x400955E9 0x401E5D9F 0x4010B3D3 0x4010B65D 0x4010B71E 0x40095331 0x401711E6 0x40144771 0x40147D47 0x4014CE52 0x4013BE72 0x4008FB41`
-- Pattern: post-OTA boot completes init successfully, ~89s later mdns_networking receive() can't allocate 176 B (only 220 B free), tiT task hits illegal instruction (likely null-deref on the failed allocation return).
-
-**This is the SAME bug as the previously-deferred V37 mDNS-OOM item** — the 194212→80672→108 B boot-heap descent leaves no margin for the post-OTA mDNS service announcement / receive burst. Recurrence: >=3 occurrences over 7 days (May 5 03:00:11→03:00:29 silent boot pair; May 6 23:51:43→23:53:12 confirmed crash with trace; plus historical V37 sample).
-
-**Fix candidates** (planner picks one with rationale, validates heap delta):
-- (a) Defer mDNS service registration until heap recovers above N KB threshold (e.g. 50 KB)
-- (b) Cap mDNS service-record string length (TXT records can be 200-500 B per service)
-- (c) Stagger HomeSpan + mDNS bring-up so both don't peak-alloc simultaneously
-- (d) Pre-allocate lwIP/mDNS receive buffer pool at boot before anything else uses heap
-- (e) Reduce `CONFIG_LWIP_TCP_RCVMBOX_SIZE` / mDNS-related sdkconfig knobs
-
-**Pre-req:** log-audit-20260507-003 (`esp_reset_reason()` logging fix) lands FIRST so future occurrences self-attribute via syslog. Without that, we debug blind for the next sample.
-
-Force-close FSM untouched. NOT auto-fixable — needs planner + heap budget review + on-device soak.
-
 ### [P2] log-audit-20260507-002 — `hkConsecutiveHealthyTicks` always reports 0 when auto-recover disabled
 **Status:** queued — auto-fixable
 **Source:** log-audit 2026-05-07 (Pi syslog)
@@ -113,4 +90,5 @@ The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are a
 
 _(roll commits in here as W4x/Rx items land — keep last 10)_
 
+- **BOOT-OOM-MDNS** — defer ratgdo mDNS service registration until heap >= 50 KB (option a from QUEUE candidates). ESP32-only; ESP8266 path unchanged. PR https://github.com/Haglerd/homekit-ratgdo32/pull/89 (merged 2026-05-07). Validates via post-flash syslog: expect `ratgdo mDNS deferred:` then `floor cleared` within 30 s; absence of `mdns_networking: Cannot allocate memory` and tiT IllegalInstruction. >=5 OTA cycle smoke + 24 h soak still pending on-device.
 - **log-audit-20260507-003** — `esp_reset_reason()` re-emit after syslog bound — PR https://github.com/Haglerd/homekit-ratgdo32/pull/88 (merged 2026-05-07). Pre-req for BOOT-OOM-MDNS unblocked.
