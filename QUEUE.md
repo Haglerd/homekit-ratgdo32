@@ -49,6 +49,21 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 **Acceptance:** counter increments on every healthy tick regardless of `hkAutoRecover` setting; diag-hk log line shows non-zero values during normal HomeKit activity.
 **Notes:** `homekit.cpp:835` increments `hkConsecutiveHealthyTicks` only inside `else if (hkRecoverAttempts > 0)` branch. With `hkAutoRecover=false` (user's config; default), `hkRecoverAttempts` stays 0 forever, so counter never increments and diag-hk reporting is misleading — it falsely suggests HomeKit is unhealthy. Observed on 110 consecutive diag-hk lines over ~5h: every line shows `hkHealthyTicks=0` despite `controllers=4 paired=yes wifi=connected` and observed iOS reads (`last_hap_read_ago=44s` at times). Fix: hoist the increment+reset logic to run independently of recoverAttempts. Cosmetic/observability only — does not affect actual HomeKit recovery. Force-close FSM untouched. Single function in single file.
 
+### [P2] log-audit-20260507-004 — `errno 11 "No more processes"` recurrence beyond browser fan-out (post log-audit-002 fix)
+**Status:** queued — needs-investigation
+**Source:** log-audit 2026-05-07 (Pi syslog) — user-surfaced, multi-boot pattern
+**Acceptance:** root cause identified for the non-browser-fanout occurrences; either second client-side mitigation OR firmware-side socket-pool / cleanup fix lands; 24 h soak with <2 errno 11 events per 6 h window.
+**Notes:** log-audit-002 (PR #77, sequentialize browser fetches) handled the diagnostics-page concurrent-fetch pattern. errno 11 still recurring on .64+ across multiple boots:
+- 2026-05-07 02:17:41 fd 52 — uptime 02:24h, no co-incident SSE / browser activity in surrounding lines
+- 2026-05-07 05:20:12 fd 51 — uptime 00:01m, 22 s after `Initialization complete` (post-boot mDNS / HomeSpan race?)
+- 2026-05-07 05:31:18 fd 52 — 35 s after force-close test (`FORCE CLOSE attempt 1` → close at :30:43 → errno at :31:18, no obvious bridge)
+- 2026-05-07 05:56:48 / 05:58:39 / 06:06:12 / 06:16:09 / 06:17:18 fd 51 — five events on a single boot
+- **05:58:39 is co-incident with SSE-wedge-reaper firing**: `05:58:34 SSE wedged-on-flow-control reap (UUID 73e0640b...)` → `05:58:36 SSE 429 dampener (ageMs=1936)` → `05:58:39 errno 11 fd 51` (3 s after dampener). Strong correlation suggests the reap-then-dampener path is itself opening a transient socket that hits the cap.
+
+Hypothesis (planner picks): (a) reap-path leaks a socket fd before close; (b) HomeKit pairing burst at boot consumes lwIP sockets that don't return to the pool in time; (c) lwIP MEMP_NUM_TCP_PCB / MEMP_NUM_NETCONN tuned too low for HomeSpan + SSE + mDNS + browser concurrency; (d) Cloudflare-keepalive-style long-lived idle connections occupy slots.
+
+Force-close FSM untouched. Pre-req for serious autonomous fix: log-audit-20260507-003 (`esp_reset_reason` syslog) is shipped (#88) so future tiT crashes correlated with this surface attribution. NOT auto-fixable — needs-investigation gate first to identify which hypothesis matches.
+
 ---
 
 ## Deferred — need measurement / soak data first
