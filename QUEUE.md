@@ -12,11 +12,11 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Acceptance:** clean `pio run -e ratgdo_esp32dev` with `-Wshadow=local` permanently in build_flags. Triage results appended to audit doc.
 **Notes:** library-header shadows (arduino-esp32, HomeSpan) are accepted noise per user direction; only fix shadows in fork code. `-Werror=shadow` reverts after triage.
 
-### [P2] W46 — Add eslint over `src/www/` + GitHub Actions CI lint
-**Status:** queued
+### [P2] ~~W46~~ — Add eslint over `src/www/` + GitHub Actions CI lint
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/73 (branch `w46-eslint-lint`)
 **Source:** audit, v45 plan
 **Acceptance:** `npx eslint src/www/` exits 0; `.github/workflows/lint.yml` runs on push + PR. Vendored `marked.umd.js` + `qrcode.js` excluded.
-**Notes:** include CI integration in same commit per user direction (don't defer).
+**Notes:** Lint surfaced 9 real bugs (5× dead `reject()` ReferenceErrors in `logs.js`, 4× implicit-global hazards in `functions.js`/`logs.js`). 119 warnings deferred (HTML-event-handler unused-vars; `eqeqeq` mass-flip risk).
 
 ### [P2] W47 — `Ticker.detach()` audit sweep with provenance comments
 **Status:** queued — fourth same-shape leak candidate identified at `comms.cpp:3318`
