@@ -688,17 +688,26 @@ void userSettings::load()
 
 bool userSettings::contains(const std::string &key)
 {
-    return (settings.count(key) > 0);
+    TAKE_MUTEX();
+    bool rc = (settings.count(key) > 0);
+    GIVE_MUTEX();
+    return rc;
 }
 
 std::variant<bool, int, configStr> userSettings::get(const std::string &key)
 {
-    return settings[key].value;
+    TAKE_MUTEX();
+    auto v = settings[key].value;
+    GIVE_MUTEX();
+    return v;
 }
 
 configSetting userSettings::getDetail(const std::string &key)
 {
-    return settings[key];
+    TAKE_MUTEX();
+    configSetting d = settings[key];
+    GIVE_MUTEX();
+    return d;
 }
 
 bool userSettings::set(const std::string &key, const bool value)
