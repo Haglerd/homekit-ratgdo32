@@ -10,6 +10,23 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.74 (2026-05-07) — HK-FC single-hold press mechanic (opt-in)
+
+User feature, complements `.73`'s tri-state mode. Adds an opt-in flag `forceCloseSingleHold` controlling the **press mechanic** of `door_command_force_close`:
+
+- **Default OFF (legacy 2-attempt)**: existing behavior — `DoorButtonPress` → wait `forceCloseHoldMs` → `DoorButtonRelease` → 1.5 s gap → `DoorButtonPress` → `DoorButtonRelease`. From the GDO's perspective, two distinct button presses with a gap.
+- **ON (single hold)**: one continuous press — `DoorButtonPress` → wait `forceCloseHoldMs` → `DoorButtonRelease`. Done. From the GDO's perspective, one long button-down — same wire-protocol shape as a human holding the wall button continuously, which is the canonical Sec+1.0 photo-eye-override pattern.
+
+Recommended for setups whose GDO needs the continuous-hold override to bypass safety on close (e.g. door reverses partway in legacy 2-attempt; the press-release-press sequence breaks the override window). Set `forceCloseHoldMs` to ~6000-8000 ms when single-hold is enabled to mimic a sustained human button press.
+
+**Web UI**: new `Single continuous hold (no retry)` checkbox alongside the existing hold-ms input under the Force-Close section. Hold-ms range unchanged at 1000-10000 ms.
+
+**Cache plumbing**: `comms_refresh_force_close_single_hold()` mirrors the existing `comms_refresh_force_close_hold_ms()` pattern — settings save calls the helper, which writes the cache via `__atomic_store_n` (RELAXED). Both caches now also seeded at boot in `setup_comms` (was a pre-existing latent bug — `forceCloseHoldMsCached` only picked up its saved value after the first post-reboot settings save).
+
+**No behavior change for existing users**: default OFF preserves the legacy 2-attempt sequence. ESP8266 path unchanged (force-close infrastructure is ESP32-only).
+
+Heap delta: +5 B BSS (one bool config + cache + refresh function), ~140 B flash.
+
 ### v3.4.4-forceclose.73 (2026-05-07) — HK-FC tri-state mode (off / companion / replace)
 
 User feature. The HomeKit force-close toggle was binary (off / companion-tile). Adds a third mode for users whose GDO **always** needs the long-press hold to close — skips the wasted normal-close-then-fall-back-to-force-close cascade.

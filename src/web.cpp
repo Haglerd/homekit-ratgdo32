@@ -1876,6 +1876,7 @@ void build_status_json(char *json)
     // (int matches both int32_t and uint32_t signatures otherwise).
     JSON_ADD_INT(cfg_forceCloseHomeKit, (int32_t)userConfig->getForceCloseHomeKit());
     JSON_ADD_INT(cfg_forceCloseHoldMs,  userConfig->getForceCloseHoldMs());
+    JSON_ADD_BOOL(cfg_forceCloseSingleHold, userConfig->getForceCloseSingleHold());
 #endif
     JSON_ADD_INT("webRequests", request_count);
     JSON_ADD_INT("webMaxResponseTime", max_response_time);
