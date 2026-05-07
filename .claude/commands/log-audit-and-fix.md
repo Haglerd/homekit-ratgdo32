@@ -35,6 +35,8 @@ If multiple items pass, sort by priority (P0 first, then P1) and earliest recurr
 
 ## Hard stops (last resort)
 
+This list is **EXHAUSTIVE.** "Context getting heavy" / "checkpoint here" / "let me pause to confirm" are NOT halts — they are autonomy violations. Finish the current item and continue until one of the listed conditions actually fires.
+
 - Cap reached (5/run)
 - Queue empty
 - 3 planner-revision iterations on same item didn't converge
