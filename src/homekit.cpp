@@ -36,6 +36,7 @@
 #include "softAP.h"
 #include "led.h"
 #include "provision.h"
+#include "instrumentation.h"
 
 #ifdef RATGDO32_DISCO
 #include "vehicle.h"
@@ -654,18 +655,18 @@ static void homekit_health_log()
     int32_t tickDriftMs = 0;
     if (lastTickMs) tickDriftMs = (int32_t)(((uint32_t)_millis() - (uint32_t)lastTickMs) - HOMEKIT_HEALTH_INTERVAL_MS);
     lastTickMs = _millis();
-    extern volatile uint32_t logMtxMaxWaitMs;
-    extern volatile uint32_t sseSlowWrites;
-    // sseBufferFullSkips: cumulative lwIP-send-buffer-full skips since
-    // boot (flow-control diagnostic; trend matters more than absolute).
-    extern volatile uint32_t sseBufferFullSkips;
-    // sseSlotsAlloc: live count refreshed by sweep_sse_orphans.
-    // sseOrphansReaped: per-window counter, atomic-exchange-zeroed below.
-    extern volatile uint32_t sseSlotsAlloc;
-    extern volatile uint32_t sseOrphansReaped;
-    // MH6 instrumentation: peak JSON length this window. Inform future
-    // STATUS_JSON_BUFFER_SIZE retune decision in v34.
-    extern volatile uint32_t statusJsonPeakLen;
+    // Instrumentation counters (W41: declarations in src/instrumentation.h):
+    //   logMtxMaxWaitMs      : max log mutex wait, see log.cpp
+    //   sseSlowWrites        : SSE writes > CLIENT_SLOW_WRITE_MS since boot
+    //   sseBufferFullSkips   : cumulative lwIP-send-buffer-full skips since
+    //                          boot (flow-control diagnostic; trend matters
+    //                          more than absolute).
+    //   sseSlotsAlloc        : live count refreshed by sweep_sse_orphans.
+    //   sseOrphansReaped     : per-window counter, atomic-exchange-zeroed
+    //                          below.
+    //   statusJsonPeakLen    : MH6 — peak JSON length this window. Inform
+    //                          future STATUS_JSON_BUFFER_SIZE retune
+    //                          decision in v34.
     uint32_t mtxWait     = __atomic_exchange_n(&logMtxMaxWaitMs,    0u, __ATOMIC_RELAXED);
     uint32_t sseReaped   = __atomic_exchange_n(&sseOrphansReaped,   0u, __ATOMIC_RELAXED);
     uint32_t jsonPeak    = __atomic_exchange_n(&statusJsonPeakLen,  0u, __ATOMIC_RELAXED);
