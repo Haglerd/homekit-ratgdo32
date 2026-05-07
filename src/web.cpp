@@ -2233,6 +2233,14 @@ bool helperFactoryReset(const std::string &key, const char *value, configSetting
     ESP_LOGI(TAG, "Factory reset at: %s", timeString());
     erase_door_data();
     reset_door();
+    // R-?-fork: HomeSpan's `processSerialCommand("F")` erases all NVS
+    // partitions and calls reboot() internally — the autoPoll-task race
+    // window (pollMutex held by pollTask) collapses to the few ms before
+    // reboot() resets the chip. Same imminent-reboot justification as
+    // homekit_unpair (see v43/W29 comment at handle_reset call site).
+    // No `homeSpan.getMutex()` lock taken here for the same reason as
+    // homekit_dump_state: pollTask iterations can take seconds, waiting
+    // on the mutex from loopTask could trip the watchdog.
     homeSpan.processSerialCommand("F");
 #endif
     return true;

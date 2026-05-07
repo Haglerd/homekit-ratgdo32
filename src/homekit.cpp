@@ -916,6 +916,19 @@ void homekit_refresh_mdns(const char *reason)
 // requiring a USB serial cable. Only read-only commands ('s' status,
 // 'i' accessory database, 'd' diagnostics) — no 'P' (pairing data is
 // sensitive), no state-changing commands.
+//
+// R-?-fork: these three commands are READ-ONLY in HomeSpan's
+// processSerialCommand switch (they LOG0 internal state without
+// mutating it). HomeSpan's pollTask holds `pollMutex` (a
+// std::shared_mutex) for the entire iteration body and could in
+// principle update the state we read here mid-iteration, producing
+// a torn read in the LOG0 output. Cosmetic only — no functional
+// impact, no crash risk. We deliberately do NOT take
+// `homeSpan.getMutex()` around these calls: pollTask iterations can
+// take seconds (HAP transactions, mDNS queries), and waiting on the
+// mutex from loopTask context could trip the loop watchdog.
+// Caller is `homekit_drain_pending_state_dump` (loopTask, deferred
+// via flag from web/Ticker contexts).
 void homekit_dump_state(const char *reason)
 {
     ESP_LOGW(TAG, "HomeSpan state dump requested (%s) — running CLI commands s, i, d", reason ? reason : "unspecified");
