@@ -36,11 +36,11 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Acceptance:** rename to `loopTaskScratchBuf512` (or similar); add comment block documenting loopTask-only invariant; ESP8266 alias preserved.
 **Notes:** zero behavior change. Option-A (per-caller stack buffers) rejected for ESP8266 stack pressure.
 
-### [P2] W42 — Add mutex to `userSettings::get()` + `getDetail()` + `contains()`
-**Status:** queued — **DIRECTION: option (b) — mutex on all three reads** (get, getDetail, contains) for completeness
+### [P2] ~~W42~~ — Add mutex to `userSettings::get()` + `getDetail()` + `contains()`
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/75 (branch `w42-userconfig-read-mutex`)
 **Source:** audit, v45 plan
 **Acceptance:** mutex-wrapped reads on all three accessor methods; cache pattern preserved as fast path; smoke-tested via config toggle + homekit_health_log read.
-**Notes:** ESP8266 `TAKE_MUTEX/GIVE_MUTEX` are no-ops (cooperative scheduling) — zero RAM/runtime cost. ESP32 sees ~1µs uncontended per read. Race exposure raised by fork's Ticker-context readers. Mutex itself already exists from `set()` use — no new BSS.
+**Notes:** Three accessor bodies wrapped in `TAKE_MUTEX/GIVE_MUTEX` matching existing `set()` pattern in `src/config.cpp:689-707`. ESP8266 macros no-op; ESP32 ~1µs uncontended. Code-review noted non-blocking follow-up: comment on `comms.cpp:3388` `delayFnCall` site documenting loopTask-only invariant for `getTTClight()` callers. Out-of-scope (deferred): `configStr.str` pointer aliasing in `get()` return — separate lifetime ticket.
 
 ### [P3] W44 — DST spring-forward edge case in auto-close schedule
 **Status:** queued — verification gate first
