@@ -43,11 +43,28 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — log-audit findings (2026-05-07)
 
-### [P1] log-audit-20260507-001 — Silent post-OTA reboot ~90s after firmware update finalization
-**Status:** queued — needs-human-planning (root cause unclear; investigation-shaped)
-**Source:** log-audit 2026-05-07 (Pi syslog)
-**Acceptance:** reset cause attribution surfaced (either via ratgdo.cpp:189 ESP_RESET_REASON capture deferred until syslog is up, or via NVS-persisted reason read on next boot); soak window of >=3 consecutive OTA cycles with no orphan-second-boot.
-**Notes:** **Recurrence: 2nd occurrence in 2 days.** May 6 23:51:43 (post-OTA boot completed init at 23:52:17) → silent reset at ~23:53:13 (no "Reboot requested at" log, no "Save message log buffer", no panic, 64s of total log silence then fresh boot). Earlier May 5 03:00:11 → 03:00:29 boot pair (18s silent gap, also post-OTA-pattern). Both followed user OTA flashes. Possible causes: OTA-finalize background task leaves dangling SSE/HomeKit ref → fault on first GC, brownout during flash settle, unhandled `esp_reset_reason()` path that doesn't log to syslog (logs fire pre-syslog-bring-up so pi never sees them). Heap is healthy (80104B current/194212B peak at boot). NOT auto-fix — needs `esp_reset_reason()` reporting fix landed FIRST so next OTA event is attributable. Force-close FSM untouched.
+### [P1] BOOT-OOM-MDNS — Boot-time heap exhaustion → `tiT` mDNS-OOM crash (CONFIRMED root cause)
+**Status:** queued — needs-human-planning
+**Source:** v37 preserved crash log + log-audit-20260507-001 + user-provided fresh crash trace 2026-05-07 (consolidates these into one finding — they are the same bug)
+**Acceptance:** boot-time heap profile shows mdns_networking receive() allocations have headroom across the 9-second 194212→108B descent; reproduce-and-recover smoke covering >=5 OTA cycles with no second-boot crash; 24h post-OTA soak with no IllegalInstruction in tiT.
+**Notes:** **Root cause confirmed from fresh crash 2026-05-06 23:53:12 CDT (uptime 89s, firmware v3.4.4-forceclose.61):**
+- Reset reason: **IllegalInstruction** in task `tiT` (lwIP TCP/IP task)
+- Last log line: `E (00:01:33.672) mdns_networking: Cannot allocate memory (receive(176), free heap: 220 bytes)`
+- Stack trace: `0x4008EBBC 0x4008EB81 0x400955E9 0x401E5D9F 0x4010B3D3 0x4010B65D 0x4010B71E 0x40095331 0x401711E6 0x40144771 0x40147D47 0x4014CE52 0x4013BE72 0x4008FB41`
+- Pattern: post-OTA boot completes init successfully, ~89s later mdns_networking receive() can't allocate 176 B (only 220 B free), tiT task hits illegal instruction (likely null-deref on the failed allocation return).
+
+**This is the SAME bug as the previously-deferred V37 mDNS-OOM item** — the 194212→80672→108 B boot-heap descent leaves no margin for the post-OTA mDNS service announcement / receive burst. Recurrence: >=3 occurrences over 7 days (May 5 03:00:11→03:00:29 silent boot pair; May 6 23:51:43→23:53:12 confirmed crash with trace; plus historical V37 sample).
+
+**Fix candidates** (planner picks one with rationale, validates heap delta):
+- (a) Defer mDNS service registration until heap recovers above N KB threshold (e.g. 50 KB)
+- (b) Cap mDNS service-record string length (TXT records can be 200-500 B per service)
+- (c) Stagger HomeSpan + mDNS bring-up so both don't peak-alloc simultaneously
+- (d) Pre-allocate lwIP/mDNS receive buffer pool at boot before anything else uses heap
+- (e) Reduce `CONFIG_LWIP_TCP_RCVMBOX_SIZE` / mDNS-related sdkconfig knobs
+
+**Pre-req:** log-audit-20260507-003 (`esp_reset_reason()` logging fix) lands FIRST so future occurrences self-attribute via syslog. Without that, we debug blind for the next sample.
+
+Force-close FSM untouched. NOT auto-fixable — needs planner + heap budget review + on-device soak.
 
 ### [P2] log-audit-20260507-002 — `hkConsecutiveHealthyTicks` always reports 0 when auto-recover disabled
 **Status:** queued — auto-fixable
@@ -64,12 +81,6 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 ---
 
 ## Deferred — need measurement / soak data first
-
-### [P3] Boot-time heap exhaustion → `tiT` mDNS-OOM crash
-**Status:** deferred (architectural)
-**Source:** v37 follow-up — preserved crash log
-**Acceptance:** boot-time heap allocator profile produced; one fix candidate validated (stagger mDNS-vs-HomeSpan, cap mDNS service-record size, defer SSE pool, etc.).
-**Notes:** different code path from V4's logger-OOM fix. Heap goes 194212 → 80672 → 108 bytes in 9 seconds at boot. NOT in v45 scope.
 
 ### [P3] W25 — `web_loop()` 10/sec rate limit on `server.handleClient()`
 **Status:** deferred (needs soak data)
