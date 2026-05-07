@@ -70,7 +70,7 @@ var tzFormat = undefined; // Use default format in the browser locale
 
 // very simple, work for above
 function tzToArray(str) {
-    ar = str.split('\n');
+    let ar = str.split('\n');
     ar.forEach((element, index) => {
         // strip the double quotes and replace comma separator with a semicolon.
         ar[index] = element.slice(1, -1).replace('","', ';');
@@ -826,7 +826,7 @@ function setElementsFromStatus(status) {
                     document.getElementById(key).style.display = "none";
                     // We have to use global serverStatus rather than local status, as local one only contains values
                     // to be updated... which may not include garageDoorState
-                    state = capitalizeFirstLetter(serverStatus.garageDoorState ? serverStatus.garageDoorState : "Closing");
+                    const state = capitalizeFirstLetter(serverStatus.garageDoorState ? serverStatus.garageDoorState : "Closing");
                     document.getElementById("garageDoorState").innerHTML = state;
                     document.getElementById("doorButton").value = (state == "Closed" || state == "Closing") ? "Open Door" : "Close Door";
                 }
@@ -1368,7 +1368,7 @@ async function unpairRATGDO() {
 }
 
 async function checkAuth(loader = true) {
-    auth = false;
+    let auth = false;
     if (loader) loaderElem.style.visibility = "visible";
     var response = await fetch("auth", {
         method: "GET",
