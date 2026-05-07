@@ -31,6 +31,25 @@ Pick the top actionable item from `QUEUE.md`, route it through the agent pipelin
 12. **On hook fire**: apply auto-recovery, retry up to 3 times on same hook+item.
 13. **On success**: loop back to step 0 unless cap reached or hard stop fires.
 
+## End-of-batch release: manifest bump
+
+After the drain finishes (cap reached, queue empty, or last eligible item shipped), evaluate whether to cut a release:
+
+1. **Compute what merged this drain** — `gh pr list --search "merged:>=<drain-start-time>" --repo Haglerd/homekit-ratgdo32 --state merged --json files,mergedAt`
+2. **Check if any merged PR touched firmware code** — files matching `src/*.cpp`, `src/*.h`, `src/*.hpp`, `platformio.ini`, `partitions.csv`, `sdkconfig.defaults`. Web UI changes (`src/www/*`) also count if you ship them with firmware.
+3. **If yes**: bump the patch version of `docs/manifest.json`'s `version` field AND every URL inside `builds[].parts[].path` that includes the version string. Pattern: `v3.4.4-forceclose.<N>` → `v3.4.4-forceclose.<N+1>`. Commit on `main` with message: `release: bump manifest to v3.4.4-forceclose.<N+1>`. Push. **`auto-release.yml` will fire on the push** → firmware build + GitHub Release.
+4. **If no firmware files merged**: skip the bump. Doc-only / lint / .claude-only PRs don't need a release.
+
+This is the LAST step of the drain — runs once per drain, regardless of how many PRs merged.
+
+Manifest paths to update in lockstep with `version`:
+- `version`: top-level
+- `builds[0].parts[].path` (ESP32) — every URL contains the version
+- `builds[1].parts[].path` (ESP8266 if present) — every URL contains the version
+- `manifests` array entries if present
+
+If the manifest has a script (`tools/bump-manifest.sh` or similar) — use it. Otherwise edit the JSON directly with `jq` or sed.
+
 ## Drain summary report
 
 After drain (or stop):

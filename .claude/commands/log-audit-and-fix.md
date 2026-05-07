@@ -51,6 +51,17 @@ Each halt files a comment on the linked issue with everything tried.
 - QUEUE.md item marked `done <pr-url>`, moved to "Recently completed"
 - Checkpoint state file updated
 
+## End-of-batch release (last step of the run)
+
+After all eligible items in this run have been processed (cap reached or queue empty), if ANY merged PR in this batch touched firmware code (`src/*.cpp|h|hpp`, `platformio.ini`, `partitions.csv`, `sdkconfig.defaults`):
+
+1. Bump `docs/manifest.json` patch version (e.g., `v3.4.4-forceclose.57` → `.58`)
+2. Update every URL inside `builds[].parts[].path` to match the new version
+3. Commit on main: `release: bump manifest to v3.4.4-forceclose.<N+1>`
+4. Push → `auto-release.yml` fires → firmware build + GitHub Release
+
+If no firmware files merged this batch (e.g., only doc/comment changes), skip the bump.
+
 ## Don't
 - Don't run more than 5 fixes per scheduled invocation (current cap; adjust here if it proves too aggressive or too slow).
 - Don't auto-pick force-close / auto-close state-machine items. The fork's own rule says these need state diagrams and planner review. The planner can produce them, but an autonomous chain can drift; better to wait for a human-in-loop session.
