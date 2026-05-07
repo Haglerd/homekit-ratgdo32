@@ -437,6 +437,59 @@ void LOG::logToBuffer(const char *fmt, va_list args)
 
     TaskHandle_t curTask = xTaskGetCurrentTaskHandle();
 
+    // log-audit-005 (BOOT-OOM-MDNS recurrence): some FreeRTOS tasks
+    // own the lwIP socket layer themselves, so any code path that
+    // re-enters lwIP from inside their context (e.g. `socket()`,
+    // `sendto()`, `connect()`) self-deadlocks or asserts. The lwIP
+    // socket API forwards every call as a tcpip-message to
+    // `tcpip_thread` and waits for a reply; if the caller IS
+    // `tcpip_thread`, the wait is for itself.
+    //
+    // Reproduction (.65 device, 35 min uptime): mDNS's
+    // `mdns_mem_calloc` fails to allocate a 176 B inbound packet
+    // buffer. mDNS calls `ESP_LOGE("mdns_networking", "Cannot
+    // allocate memory ...")` from inside its UDP receive callback
+    // dispatched on `tiT`. Our esp_log_vprintf hook catches it and
+    // calls `logToSyslog(outLine)` → `WiFiUDP::beginPacket` →
+    // `socket(AF_INET, SOCK_DGRAM, 0)` from inside `tcpip_thread` →
+    // panic with `IllegalInstruction` in `tiT`.
+    //
+    // Fix: cache the handles for the lwIP / WiFi / system-event
+    // tasks once and skip the SSE broadcast + syslog calls when
+    // the originating task is one of them. The line still gets
+    // captured into the on-device message buffer above, just
+    // doesn't fan out via TCP/UDP. This is mandatory: ESP-IDF can
+    // emit ESP_LOGx from any of these tasks (DHCP, IGMP, IPv6 ND,
+    // lwIP TCP retransmit warnings, WiFi state machine), all of
+    // which are equally lethal under the v0 hook.
+    static TaskHandle_t lwipTaskHandle    = nullptr;
+    static TaskHandle_t wifiTaskHandle    = nullptr;
+    static TaskHandle_t sysEvtTaskHandle  = nullptr;
+    static volatile bool networkTasksResolved = false;
+    if (!__atomic_load_n(&networkTasksResolved, __ATOMIC_ACQUIRE))
+    {
+        // Resolve once; handles are stable for the lifetime of the
+        // task. Multiple tasks may race here on first hit — each
+        // store is independent and idempotent (xTaskGetHandle
+        // returns the same value for everyone).
+        lwipTaskHandle   = xTaskGetHandle("tiT");
+        wifiTaskHandle   = xTaskGetHandle("wifi");
+        sysEvtTaskHandle = xTaskGetHandle("sys_evt");
+        __atomic_store_n(&networkTasksResolved, true, __ATOMIC_RELEASE);
+    }
+    const bool fromNetworkTask = (curTask == lwipTaskHandle && lwipTaskHandle != nullptr) ||
+                                 (curTask == wifiTaskHandle && wifiTaskHandle != nullptr) ||
+                                 (curTask == sysEvtTaskHandle && sysEvtTaskHandle != nullptr);
+    // Belt-and-suspenders: ESP-IDF can route ISR-deferred logs through
+    // us as well. Skip broadcast + syslog on those too.
+    if (fromNetworkTask || xPortInIsrContext())
+    {
+        // Drop just the network fan-out; the line is already in the
+        // on-device ring buffer (Serial + msgBuffer above) so we
+        // keep observability without re-entering lwIP.
+        return;
+    }
+
     // Pass 1: full-table recursion check. Must complete before any
     // claim — see v31.3 comment above.
     for (size_t i = 0; i < LOG_RECURSION_SLOTS; i++)
