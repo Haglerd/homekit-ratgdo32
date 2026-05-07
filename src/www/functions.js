@@ -600,6 +600,16 @@ function setElementsFromStatus(status) {
                 document.getElementById(key).checked = value;
                 document.getElementById("homekitMotionRow").style.display = "table-row";
                 break;
+            // HK-FC: surface the optional force-close tile row + value.
+            // The row reveals on first /status.json so users notice the
+            // toggle exists; the persisted value drives the checkbox state.
+            case "forceCloseHomeKit":
+                document.getElementById(key).checked = value;
+                document.getElementById("homekitForceCloseRow").style.display = "table-row";
+                break;
+            case "forceCloseHoldMs":
+                document.getElementById(key).value = value;
+                break;
             case "vehicleHomeKit":
                 document.getElementById(key).checked = value;
                 setVehicleSensorOptionState(value);
@@ -1657,6 +1667,14 @@ async function saveSettings() {
     const homespanCLI = (document.getElementById("homespanCLI").checked) ? '1' : '0';
     const lightHomeKit = (document.getElementById("lightHomeKit").checked) ? '1' : '0';
     const motionHomeKit = (document.getElementById("motionHomeKit").checked) ? '1' : '0';
+    // HK-FC: collect the new toggle + clamp the hold-ms to [1000, 10000]
+    // here too — server-side clamp is the safety net (web.cpp /setgdo)
+    // but clamping in the form keeps the round-trip honest if the user
+    // hand-edits the input.
+    const forceCloseHomeKit = (document.getElementById("forceCloseHomeKit").checked) ? '1' : '0';
+    let forceCloseHoldMs = parseInt(document.getElementById("forceCloseHoldMs").value, 10);
+    if (isNaN(forceCloseHoldMs)) forceCloseHoldMs = 3500;
+    forceCloseHoldMs = Math.max(1000, Math.min(10000, forceCloseHoldMs));
 
     // check IP addresses valid
     const regexIPv4 = /^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$/i;
@@ -1721,6 +1739,8 @@ async function saveSettings() {
         "homespanCLI", homespanCLI,
         "lightHomeKit", lightHomeKit,
         "motionHomeKit", motionHomeKit,
+        "forceCloseHomeKit", forceCloseHomeKit,
+        "forceCloseHoldMs", forceCloseHoldMs,
     );
     if (reboot) {
         countdown(rebootSeconds, "Settings saved, RATGDO device rebooting...&nbsp;");

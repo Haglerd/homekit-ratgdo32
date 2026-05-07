@@ -358,6 +358,10 @@ bool helperHomeSpanCLI(const std::string &key, const char *value, configSetting 
 // Forward declarations for HomeKit accessory enable/disable functions
 extern bool enable_service_homekit_light(bool enable);
 extern bool enable_service_homekit_motion_sensor(bool enable);
+// HK-FC (fork addition): runtime add/remove of the force-close
+// GarageDoorOpener accessory + cache-refresh for forceCloseHoldMs.
+extern bool enable_service_homekit_force_close(bool enable);
+extern void comms_refresh_force_close_hold_ms();
 
 bool helperLightHomeKit(const std::string &key, const char *value, configSetting *action)
 {
@@ -370,6 +374,31 @@ bool helperMotionHomeKit(const std::string &key, const char *value, configSettin
 {
     userConfig->set(key, value);
     enable_service_homekit_motion_sensor(userConfig->getMotionHomeKit());
+    return true;
+}
+
+// HK-FC: toggle helper persists the new value, then runs the runtime
+// add/remove of the second GarageDoorOpener accessory (mirrors
+// helperLightHomeKit). Sec+1.0 only is enforced inside
+// door_command_force_close itself; we expose the toggle on all
+// security types and let close_door fall back transparently for
+// Sec+2.0 / dry-contact (per QUEUE.md Sec2-FC notes).
+bool helperForceCloseHomeKit(const std::string &key, const char *value, configSetting *action)
+{
+    userConfig->set(key, value);
+    enable_service_homekit_force_close(userConfig->getForceCloseHomeKit());
+    return true;
+}
+
+// HK-FC: forceCloseHoldMs change persists then refreshes the comms
+// cache so the next force-close press uses the new hold duration
+// without a reboot. Mirrors the auto-close cache-refresh pattern
+// (v22 / v31), but writes a single scalar so it stays a single
+// __atomic_store_n.
+bool helperForceCloseHoldMs(const std::string &key, const char *value, configSetting *action)
+{
+    userConfig->set(key, value);
+    comms_refresh_force_close_hold_ms();
     return true;
 }
 #endif // ESP32
@@ -491,6 +520,11 @@ userSettings::userSettings()
         {cfg_homespanCLI, {false, false, false, helperHomeSpanCLI}},    // call fn to enable/disable HomeSpan CLI and Improv
         {cfg_lightHomeKit, {false, false, true, helperLightHomeKit}},   // call fn to enable/disable HomeKit light accessory (default: enabled)
         {cfg_motionHomeKit, {false, false, true, helperMotionHomeKit}}, // call fn to enable/disable HomeKit motion accessory (default: enabled)
+        // HK-FC (fork addition): default OFF — users see no behaviour
+        // change until they enable the second tile. Default hold-ms
+        // matches comms.cpp's force-close fallback (3500ms).
+        {cfg_forceCloseHomeKit, {false, false, false, helperForceCloseHomeKit}},
+        {cfg_forceCloseHoldMs,  {false, false, 3500,  helperForceCloseHoldMs}},
 #endif
     };
     IRAM_END(TAG);

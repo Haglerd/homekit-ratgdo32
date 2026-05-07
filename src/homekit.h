@@ -47,6 +47,9 @@ void homekit_loop();
 #define HOMEKIT_AID_VEHICLE 7
 #define HOMEKIT_AID_LASER 8
 #define HOMEKIT_AID_ROOM_OCCUPANCY 9
+// HK-FC (fork addition): optional second GarageDoorOpener accessory.
+// Created only when cfg_forceCloseHomeKit is enabled (default OFF).
+#define HOMEKIT_AID_FORCE_CLOSE_DOOR 10
 
 enum Light_t : uint8_t
 {
@@ -64,6 +67,10 @@ extern bool enable_service_homekit_room_occupancy(bool enable);
 extern void notify_homekit_room_occupancy(bool occupied);
 extern bool enable_service_homekit_light(bool enable);
 extern bool enable_service_homekit_motion_sensor(bool enable);
+// HK-FC: runtime add/remove of the second GarageDoorOpener accessory.
+// Returns true on a successful state change, false if the requested
+// state already matches current state.
+extern bool enable_service_homekit_force_close(bool enable);
 
 extern void homekit_unpair();
 extern bool homekit_is_paired();
@@ -132,6 +139,23 @@ struct DEV_GarageDoor : Service::GarageDoorOpener
     QueueHandle_t event_q;
 
     DEV_GarageDoor();
+    boolean update();
+    void loop();
+};
+
+// HK-FC: second GarageDoorOpener accessory whose Open mirrors normal
+// open and whose Close fires door_command_force_close. State mirrors
+// the primary tile in lockstep; no LockMechanism characteristics
+// (lock control is not a force-close concern).
+struct DEV_GarageDoorForceClose : Service::GarageDoorOpener
+{
+    Characteristic::CurrentDoorState *current;
+    Characteristic::TargetDoorState *target;
+    Characteristic::ObstructionDetected *obstruction;
+
+    QueueHandle_t event_q;
+
+    DEV_GarageDoorForceClose();
     boolean update();
     void loop();
 };

@@ -341,6 +341,10 @@ void light_state_set(const homekit_value_t value)
 
 // Declare the HomeKit accessories
 static DEV_GarageDoor *door;
+// HK-FC: optional second GarageDoorOpener accessory. nullptr when the
+// toggle is OFF (default) — costs only this 4-byte BSS pointer plus the
+// vtable + member layout overhead in .rodata.
+static DEV_GarageDoorForceClose *forceCloseDoor;
 static DEV_Light *light;
 static DEV_Motion *motion;
 static DEV_Motion *arriving;
@@ -1443,6 +1447,46 @@ bool enable_service_homekit_motion_sensor(bool enable)
     return false;
 }
 
+// HK-FC: runtime add/remove of the second GarageDoorOpener accessory.
+// Mirrors enable_service_homekit_light's lifecycle pattern. iOS Home
+// surfaces a one-shot "Configuration Updated" dialog when the bridge
+// HAP config number bumps; existing pairings remain valid.
+//
+// Sec+1.0 only is enforced inside door_command_force_close itself.
+// The toggle is exposed regardless of GDOSecurityType so users on
+// Sec+2.0 / dry-contact still get the visual second tile (close
+// path falls through to a normal close — see comms.cpp:2853-2858).
+bool enable_service_homekit_force_close(bool enable)
+{
+    if (enable)
+    {
+        if (!forceCloseDoor)
+        {
+            ESP_LOGI(TAG, "Creating HomeKit Force-Close Garage Door Service");
+            new SpanAccessory(HOMEKIT_AID_FORCE_CLOSE_DOOR);
+            new DEV_Info("Force Close Door");
+            new Characteristic::Manufacturer("Ratcloud llc");
+            new Characteristic::SerialNumber(Network.macAddress().c_str());
+            new Characteristic::Model("ratgdo-ESP32-fc");
+            new Characteristic::FirmwareRevision(AUTO_VERSION);
+            forceCloseDoor = new DEV_GarageDoorForceClose();
+            homeSpan.updateDatabase();
+            return true;
+        }
+    }
+    else if (forceCloseDoor)
+    {
+        ESP_LOGI(TAG, "Deleting HomeKit Force-Close Garage Door Service");
+        if (homeSpan.deleteAccessory(HOMEKIT_AID_FORCE_CLOSE_DOOR))
+        {
+            forceCloseDoor = nullptr;
+            homeSpan.updateDatabase();
+            return true;
+        }
+    }
+    return false;
+}
+
 /****************************************************************************
  * Setup HomeKit, HomeSpan version.
  */
@@ -1542,6 +1586,26 @@ void setup_homekit()
     else
     {
         ESP_LOGI(TAG, "Dry contact mode. Disabling light switch service");
+    }
+
+    // HK-FC: optionally create the second GarageDoorOpener accessory at boot.
+    // Default OFF — users see no extra tile in iOS Home unless they tick the
+    // setting. Runtime toggle handled via enable_service_homekit_force_close
+    // so users don't need to reboot to add/remove the tile.
+    if (userConfig->getForceCloseHomeKit())
+    {
+        ESP_LOGI(TAG, "Creating HomeKit Force-Close Garage Door Service");
+        new SpanAccessory(HOMEKIT_AID_FORCE_CLOSE_DOOR);
+        new DEV_Info("Force Close Door");
+        new Characteristic::Manufacturer("Ratcloud llc");
+        new Characteristic::SerialNumber(Network.macAddress().c_str());
+        new Characteristic::Model("ratgdo-ESP32-fc");
+        new Characteristic::FirmwareRevision(AUTO_VERSION);
+        forceCloseDoor = new DEV_GarageDoorForceClose();
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Force-close HomeKit accessory disabled in settings");
     }
 
     // only create motion if we know we have motion sensor(s) AND it's enabled in settings
@@ -1703,6 +1767,59 @@ void DEV_GarageDoor::loop()
             ESP_LOGD(TAG, "Set target lock state: %s", LOCK_STATE(e.value.u));
         else
             ESP_LOGD(TAG, "Set Unknown: %d", e.value.u);
+        e.c->setVal(e.value.u);
+    }
+}
+
+/****************************************************************************
+ * HK-FC: Force-Close Garage Door Service Handler
+ * Open mirrors normal open_door; Close fires door_command_force_close
+ * with the user-configured hold-ms. State mirrors the primary tile via
+ * the notify_homekit_*_door_state_change paths below.
+ */
+DEV_GarageDoorForceClose::DEV_GarageDoorForceClose() : Service::GarageDoorOpener()
+{
+    ESP_LOGI(TAG, "Configuring HomeKit Force-Close Garage Door Service");
+    event_q     = xQueueCreate(10, sizeof(GDOEvent));
+    current     = new Characteristic::CurrentDoorState(current->CLOSED);
+    target      = new Characteristic::TargetDoorState(target->CLOSED);
+    obstruction = new Characteristic::ObstructionDetected(obstruction->NOT_DETECTED);
+}
+
+boolean DEV_GarageDoorForceClose::update()
+{
+    const uint8_t tgt = target->getNewVal();
+    ESP_LOGI(TAG, "Force-close tile target: %s", DOOR_STATE(tgt));
+    if (tgt == target->OPEN)
+    {
+        // Open mirrors a normal open — no hold-override needed.
+        open_door();
+    }
+    else
+    {
+        // Close fires the force-close 2-attempt sequence with the
+        // user-configured hold-ms. door_command_force_close clamps
+        // to [1000, 10000] internally (comms.cpp:2880-2881) and
+        // falls back to a normal close on Sec+2.0 / dry-contact.
+        door_command_force_close(userConfig->getForceCloseHoldMs());
+    }
+    return true;
+}
+
+void DEV_GarageDoorForceClose::loop()
+{
+    if (uxQueueMessagesWaiting(event_q) > 0)
+    {
+        GDOEvent e;
+        xQueueReceive(event_q, &e, 0);
+        if (e.c == current)
+            ESP_LOGD(TAG, "Set force-close current door state: %s", DOOR_STATE(e.value.u));
+        else if (e.c == target)
+            ESP_LOGD(TAG, "Set force-close target door state: %s", DOOR_STATE(e.value.u));
+        else if (e.c == obstruction)
+            ESP_LOGD(TAG, "Set force-close obstruction: %s", e.value.u ? "Obstructed" : "Clear");
+        else
+            ESP_LOGD(TAG, "Set force-close Unknown: %d", e.value.u);
         e.c->setVal(e.value.u);
     }
 }
@@ -1889,6 +2006,14 @@ void notify_homekit_target_door_state_change(GarageDoorTargetState state)
     e.c = door->target;
     e.value.u = (uint8_t)garage_door.target_state;
     queueSendHelper(door->event_q, e, "target door");
+    // HK-FC: mirror to the second tile so animation stays in lockstep.
+    if (forceCloseDoor)
+    {
+        GDOEvent fc;
+        fc.c = forceCloseDoor->target;
+        fc.value.u = (uint8_t)garage_door.target_state;
+        queueSendHelper(forceCloseDoor->event_q, fc, "force-close target door");
+    }
 #else
     if (!arduino_homekit_get_running_server())
         return;
@@ -1911,6 +2036,14 @@ void notify_homekit_current_door_state_change(GarageDoorCurrentState state)
     e.c = door->current;
     e.value.u = (uint8_t)garage_door.current_state;
     queueSendHelper(door->event_q, e, "current door");
+    // HK-FC: mirror to the second tile so animation stays in lockstep.
+    if (forceCloseDoor)
+    {
+        GDOEvent fc;
+        fc.c = forceCloseDoor->current;
+        fc.value.u = (uint8_t)garage_door.current_state;
+        queueSendHelper(forceCloseDoor->event_q, fc, "force-close current door");
+    }
 
 #ifdef RATGDO32_DISCO
     // Notify the vehicle presence code that door state is changing
@@ -1982,6 +2115,15 @@ void notify_homekit_obstruction(bool state)
     e.c = door->obstruction;
     e.value.b = garage_door.obstructed;
     queueSendHelper(door->event_q, e, "obstruction");
+    // HK-FC: mirror obstruction state to the second tile so both flag
+    // photo-eye breaks identically.
+    if (forceCloseDoor)
+    {
+        GDOEvent fc;
+        fc.c = forceCloseDoor->obstruction;
+        fc.value.b = garage_door.obstructed;
+        queueSendHelper(forceCloseDoor->event_q, fc, "force-close obstruction");
+    }
 #else
     if (!arduino_homekit_get_running_server())
         return;
