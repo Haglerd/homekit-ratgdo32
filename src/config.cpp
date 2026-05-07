@@ -401,6 +401,18 @@ bool helperForceCloseHoldMs(const std::string &key, const char *value, configSet
     comms_refresh_force_close_hold_ms();
     return true;
 }
+
+// HK-FC: forceCloseSingleHold change persists then refreshes the comms
+// cache. The cached flag is read by send_force_close_release_then_maybe_retry
+// to decide whether to fire attempt 2 (false → legacy 2-attempt) or
+// terminate after the first press's release (true → single continuous hold).
+extern void comms_refresh_force_close_single_hold();
+bool helperForceCloseSingleHold(const std::string &key, const char *value, configSetting *action)
+{
+    userConfig->set(key, value);
+    comms_refresh_force_close_single_hold();
+    return true;
+}
 #endif // ESP32
 
 /****************************************************************************
@@ -528,8 +540,10 @@ userSettings::userSettings()
         // (single tile; primary close button calls force-close path).
         // Backward compat: pre-tri-state firmware stored bool; existing
         // `true` deserializes as int 1 (companion) automatically.
-        {cfg_forceCloseHomeKit, {false, false, (int)0, helperForceCloseHomeKit}},
-        {cfg_forceCloseHoldMs,  {false, false, 3500,  helperForceCloseHoldMs}},
+        {cfg_forceCloseHomeKit,   {false, false, (int)0, helperForceCloseHomeKit}},
+        {cfg_forceCloseHoldMs,    {false, false, 3500,  helperForceCloseHoldMs}},
+        // HK-FC press mechanic: false=legacy 2-attempt, true=single hold.
+        {cfg_forceCloseSingleHold,{false, false, false, helperForceCloseSingleHold}},
 #endif
     };
     IRAM_END(TAG);
