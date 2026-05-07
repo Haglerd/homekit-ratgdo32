@@ -2171,6 +2171,11 @@ void removeSSEsubscription(SSESubscription *s)
 {
     if (subscriptionCount > 0)
         subscriptionCount--; // Prevent negative count
+    // detach heartbeatTimer: SSE subscription is being torn down — kill the
+    // per-subscription heartbeat ticker. Caller must NOT be running inside
+    // the heartbeatTimer callback itself (use pendingRemove flag for that
+    // path; see v22 self-detach crash note at line ~238). Distinct from
+    // TTCtimer; no force-close interaction.
     s->heartbeatTimer.detach();
     ESP_LOGD(TAG, "Remove SSE subscription. Total subscribed: %d", subscriptionCount);
     s->client.stop();

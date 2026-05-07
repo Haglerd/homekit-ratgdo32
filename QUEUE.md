@@ -18,11 +18,11 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Acceptance:** `npx eslint src/www/` exits 0; `.github/workflows/lint.yml` runs on push + PR. Vendored `marked.umd.js` + `qrcode.js` excluded.
 **Notes:** Lint surfaced 9 real bugs (5× dead `reject()` ReferenceErrors in `logs.js`, 4× implicit-global hazards in `functions.js`/`logs.js`). 119 warnings deferred (HTML-event-handler unused-vars; `eqeqeq` mass-flip risk).
 
-### [P2] W47 — `Ticker.detach()` audit sweep with provenance comments
-**Status:** queued — fourth same-shape leak candidate identified at `comms.cpp:3318`
+### [P2] ~~W47~~ — `Ticker.detach()` audit sweep with provenance comments
+**Status:** DONE — branch `w47-ticker-detach-sweep` (PR pending)
 **Source:** audit, v45 plan
 **Acceptance:** every `.detach()` line carries a one-line provenance comment; `:3318` site fixed inline with `request_force_close_clear` (per user direction — TTC arm-fresh preempts in-flight force-close).
-**Notes:** 24 production sites + 4 comment-only references inventoried in plan.
+**Notes:** 24 production sites + 4 comment-only references inventoried in plan. Fourth same-shape leak closed at `src/comms.cpp:3370` (line shifted from `:3318` due to comment additions earlier in file).
 
 ### [P3] W41 — Move `extern volatile uint32_t` declarations to header
 **Status:** queued
