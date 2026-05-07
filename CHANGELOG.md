@@ -10,6 +10,33 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.66 (2026-05-07) — log-audit-004 SSE write rewrite
+
+Fixes the recurring `errno 11 fail on fd 51/52 "No more processes"` syslog noise AND a previously-undiagnosed silent-broadcast bug. Previous attribution to "fd exhaustion / browser fan-out" (log-audit-002 / PR #77) was a misread — fd 51/52 are long-lived SSE TCP sockets whose `LWIP_SOCKET_OFFSET=50` puts them at the bottom of the fd range, not the top.
+
+**Two bugs in the SSE clientWriteEx path**
+
+1. **Silent-broadcast bug.** `clientWriteEx`'s v24 fast-path checked `client.availableForWrite() < len` to skip writes when the TCP send buffer was full. But Arduino-ESP32's `NetworkClient` does NOT override `Print::availableForWrite()` — the inherited default returns 0. So the fast-path returned `BUFFER_FULL` on every call without ever calling `client.write`. Normal-size status broadcasts (status JSON < 512 B) silently failed, and v47's wedge sweep eventually reaped the slot at the 30-consecutive-BUFFER_FULL threshold. The web UI's status panel was effectively running on heartbeat-only (the heartbeat path's small payload uses a different code path). ESP8266's WiFiClient DOES override `availableForWrite` (queries `tcp_sndbuf`), so the bug was ESP32-only.
+
+2. **Framework log_e flood.** Oversized broadcasts (LOG_MESSAGE > ~490 B, RATGDO_STATUS > ~490 B — `jsonPeak` measured at 2312 B in field syslog) bypass the writeBuffer and call `subscription[i].client.printf(...)`, which enters Arduino-ESP32's `NetworkClient::write` send-retry loop. That loop logs `ESP_LOGE("fail on fd %d, errno: %d, \"%s\"")` UNCONDITIONALLY when `lwip_send(MSG_DONTWAIT)` returns -1 with `EAGAIN` (TCP send buffer full — benign flow control on a slow peer), up to `WIFI_CLIENT_MAX_WRITE_RETRY=10` log lines per write. errno 11 = EAGAIN; "No more processes" is just newlib's strerror text for it.
+
+**Fix**
+
+ESP32-only rewrite of `clientWriteEx` and the two oversized-payload paths in `SSEBroadcastState`:
+
+- `clientWriteEx` now calls `lwip_send(client.fd(), data, len, MSG_DONTWAIT)` directly. EAGAIN at start → clean `BUFFER_FULL` (no log_e). EAGAIN mid-payload within the 200 ms slow-write budget → small `vTaskDelay(2ms)` + retry. EAGAIN mid-payload beyond budget → `client.stop()` + `FAILED` (cleaner than corrupting the SSE event stream). Other errno values → single `ESP_LOGW` + stop.
+- Oversized LOG_MESSAGE / RATGDO_STATUS broadcasts route through a heap-malloc'd buffer + `clientWriteEx` instead of `client.printf`, so they share the same direct-lwip_send code path.
+- ESP8266 paths unchanged.
+
+**Net effect**
+
+- `errno 11 fail on fd N` syslog noise eliminated on ESP32 (all SSE writes now bypass the framework's noisy retry loop). Real socket errors (ECONNRESET / EPIPE / ENOTCONN) still surface as a single `ESP_LOGW` per occurrence.
+- Status broadcasts that fit in the 512 B writeBuffer now actually reach subscribers; v47's wedge sweep no longer fires from the broken fast-path's deterministic BUFFER_FULL stream.
+
+**Heap budget**
+
+Oversized broadcasts now `malloc(needed+1)` (~2.4 KB at observed `jsonPeak`) per broadcast, used briefly then `free()`d. Allocations of this size are clean against typical post-boot heap (~50 KB+); short-lived nature minimizes fragmentation risk.
+
 ### v3.4.4-forceclose.57 (2026-05-06)
 
 Hotfix for v56 regression. v56 switched the repo from the auto-managed `pages-build-deployment` workflow to a custom `.github/workflows/pages.yml`. That worked for source-only commits (Pages correctly skipped them per the `paths: ['docs/**']` filter) but broke the actual release path: `release.yml`'s combined commit (which DOES touch `docs/`) didn't trigger Pages.
