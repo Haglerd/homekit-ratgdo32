@@ -10,6 +10,14 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.67 (2026-05-07) — log-audit-002 hkConsecutiveHealthyTicks always-on
+
+Cosmetic / observability fix. The `hkConsecutiveHealthyTicks` counter (reported in the periodic `diag-hk` log line) was nested inside the `else if (hkRecoverAttempts > 0)` branch of the HomeKit watchdog, so with auto-recover disabled (default — `hkAutoRecover=false`) the counter never moved. Field syslog showed `hkHealthyTicks=0` on 110 consecutive diag lines over ~5 h despite `controllers=4 paired=yes wifi=connected` and observed iOS reads — falsely suggesting an unhealthy HomeKit when everything was fine.
+
+**Fix**
+
+Hoist the increment+reset out of the recover-counter-clear branch — runs unconditionally on every tick now. Counter type bumped `uint8_t → uint32_t` to avoid wrap-to-zero on long healthy uptimes (uint8_t at 60s tick = 4.25 h overflow). The recover-counter clear logic still gates on `hkRecoverAttempts > 0`, but the streak is always observable. No behavior change for actual auto-recover semantics.
+
 ### v3.4.4-forceclose.66 (2026-05-07) — log-audit-004 SSE write rewrite
 
 Fixes the recurring `errno 11 fail on fd 51/52 "No more processes"` syslog noise AND a previously-undiagnosed silent-broadcast bug. Previous attribution to "fd exhaustion / browser fan-out" (log-audit-002 / PR #77) was a misread — fd 51/52 are long-lived SSE TCP sockets whose `LWIP_SOCKET_OFFSET=50` puts them at the bottom of the fd range, not the top.
