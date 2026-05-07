@@ -4,12 +4,12 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active — fork-internal feature work
 
-### [P2] HK-FC — Native HomeKit Force-Close GarageDoorOpener accessory
-**Status:** in-progress — full plan embedded in issue body
+### [P2] ~~HK-FC~~ — Native HomeKit Force-Close GarageDoorOpener accessory
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/82 (branch `homekit-force-close-accessory`)
 **Source:** user request 2026-05-06; planner produced full layered plan
-**Issue:** Haglerd/homekit-ratgdo32#79 (embedded plan — software-engineer goes direct, no planner re-invocation needed)
-**Acceptance:** new optional `forceCloseHomeKit` toggle (default OFF) registers a second `GarageDoorOpener` accessory; Open mirrors normal open; Close fires `door_command_force_close(<configured hold ms>)`; state mirrors primary in lockstep across Current/Target/Obstruction characteristics. Web UI checkbox + `forceCloseHoldMs` number input (clamped 1000-10000). No regression on existing primary tile. Heap budget verified: ~28 B BSS when OFF, ~1 KB heap when ON (within user-stated thresholds: ≤500 B disabled, ≤1.5 KB enabled).
-**Notes:** Enables eventual deprecation of the `homebridge-ratgdo-forceclose` npm plugin (sunset path documented in issue body, ~6-month horizon). ESP32-only (HomeSpan path); ESP8266 short-circuited via `#ifdef`. Sec+1.0 only — Sec+2.0 falls through to normal close per existing `comms.cpp:2842` gate (tracked separately under `Sec2-FC`). Fallback path (Option A: modify primary tile's Close to call force-close, zero heap delta but every-close relay-wear cost) baked into issue body if on-hardware heap measurement exceeds 1.2 KB. ~250-350 LoC across 8 files; medium complexity.
+**Issue:** Haglerd/homekit-ratgdo32#79 (closed via PR)
+**Acceptance:** New optional `forceCloseHomeKit` toggle (default OFF) registers a second `GarageDoorOpener` accessory; Open mirrors normal open; Close fires `door_command_force_close(<configured hold ms>)`; state mirrors primary in lockstep. Web UI checkbox + `forceCloseHoldMs` number input (clamped 1000-10000). 307 LoC across 10 files. **Build measured: BSS +8 B (toggle OFF) — well under 100 B halt threshold**; Flash 96.0% (~80 KB headroom). ESLint clean.
+**Notes:** Enables eventual deprecation of `homebridge-ratgdo-forceclose` npm plugin. ESP32-only; ESP8266 short-circuited via `#ifdef`. Force-close FSM untouched (only call site reused). User-driven smoke-test (10 steps in issue body) deferred to next device flash window — covers tile pair behavior, mirror correctness, primary-tile non-regression, OTA-from-default-OFF compatibility.
 
 ---
 
