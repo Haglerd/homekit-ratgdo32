@@ -26,6 +26,7 @@ Pick the top actionable item from `QUEUE.md`, route it through the agent pipelin
    - If green → `gh pr merge <#> --repo Haglerd/homekit-ratgdo32 --squash --delete-branch`
    - If red → leave open, surface failures, continue to next item
 9. **Update queue**: mark `done <pr-url>`, move to "Recently completed".
+9a. **Auto-unblock dependent items.** Scan QUEUE.md for items whose `**Status:**` line contains `blocked` AND whose `**Notes:**` / `**Pre-req:**` text references the just-completed item's id (e.g. `log-audit-20260507-003`, `BOOT-OOM-MDNS`, `W42`). Flip those items from `blocked` back to `queued` (preserve any other status modifiers like `needs-human-planning`). Commit + push the flip together with the "done" mark from step 9. **This is mandatory** — without it, dependent items linger as `blocked` forever and the agent skips them on every subsequent iteration.
 10. **On code-review architectural problem**: re-invoke planner with code-review findings as context. Loop up to 3 planner-revision iterations.
 11. **On unit-test failure**: engineer fixes → code-review → retest. Loop up to 3 iterations.
 12. **On hook fire**: apply auto-recovery, retry up to 3 times on same hook+item.
