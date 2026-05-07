@@ -1662,7 +1662,41 @@ bool process_send_queue()
             }
             else
             {
-                ESP_LOGE(TAG, "SEC%d TX send failed, exceeded max retry", doorControlType);
+                // Rate-limit the per-packet "exceeded max retry" log. During
+                // a normal obstructed-close event the wall-panel emulator
+                // can hammer the bus for 10+ seconds with no GDO ACKs,
+                // emitting ~45 identical ESP_LOGE lines that flood the
+                // device's 16 KB ring buffer and wrap out preceding
+                // user-action context (door state transitions, light
+                // toggles, motion clears) before /showlog can be fetched.
+                // Pattern matches the v46 SSE buffer-full rate-limit:
+                // log immediately on the first failure, suppress for 5 s,
+                // then emit one summary line per subsequent 5 s window
+                // with a count of the suppressed events. Same packet's
+                // delivery semantics unchanged — only the log cadence.
+                static uint32_t lastSec1FailLogMs = 0;
+                static uint32_t sec1FailSuppressed = 0;
+                const uint32_t nowMs = (uint32_t)_millis();
+                const uint32_t deltaMs = (lastSec1FailLogMs == 0) ? UINT32_MAX
+                                                                  : (nowMs - lastSec1FailLogMs);
+                if (deltaMs > 5000UL)
+                {
+                    if (sec1FailSuppressed > 0)
+                    {
+                        ESP_LOGE(TAG, "SEC%d TX send failed, exceeded max retry [+%u suppressed in last %ums — obstructed door / busy bus]",
+                                 doorControlType, (unsigned)sec1FailSuppressed, (unsigned)deltaMs);
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "SEC%d TX send failed, exceeded max retry", doorControlType);
+                    }
+                    lastSec1FailLogMs = nowMs;
+                    sec1FailSuppressed = 0;
+                }
+                else
+                {
+                    sec1FailSuppressed++;
+                }
                 retryCount = 0;
                 // Remove TX packet from the queue
                 txQueuePop(&pkt_ac);
