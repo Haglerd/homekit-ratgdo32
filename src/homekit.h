@@ -68,9 +68,11 @@ extern void notify_homekit_room_occupancy(bool occupied);
 extern bool enable_service_homekit_light(bool enable);
 extern bool enable_service_homekit_motion_sensor(bool enable);
 // HK-FC: runtime add/remove of the second GarageDoorOpener accessory.
+// Tri-state mode: 0=off, 1=companion tile, 2=replace primary close.
 // Returns true on a successful state change, false if the requested
-// state already matches current state.
-extern bool enable_service_homekit_force_close(bool enable);
+// state already matches current state. Mode 2's close-replacement
+// wires into DEV_GarageDoor::update(), not via a second accessory.
+extern bool enable_service_homekit_force_close(int mode);
 
 extern void homekit_unpair();
 extern bool homekit_is_paired();

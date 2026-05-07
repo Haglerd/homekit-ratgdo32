@@ -360,7 +360,7 @@ extern bool enable_service_homekit_light(bool enable);
 extern bool enable_service_homekit_motion_sensor(bool enable);
 // HK-FC (fork addition): runtime add/remove of the force-close
 // GarageDoorOpener accessory + cache-refresh for forceCloseHoldMs.
-extern bool enable_service_homekit_force_close(bool enable);
+extern bool enable_service_homekit_force_close(int mode);
 extern void comms_refresh_force_close_hold_ms();
 
 bool helperLightHomeKit(const std::string &key, const char *value, configSetting *action)
@@ -523,7 +523,12 @@ userSettings::userSettings()
         // HK-FC (fork addition): default OFF — users see no behaviour
         // change until they enable the second tile. Default hold-ms
         // matches comms.cpp's force-close fallback (3500ms).
-        {cfg_forceCloseHomeKit, {false, false, false, helperForceCloseHomeKit}},
+        // HK-FC tri-state mode: 0=off (no force-close tile), 1=companion
+        // (separate force-close tile alongside primary), 2=replace
+        // (single tile; primary close button calls force-close path).
+        // Backward compat: pre-tri-state firmware stored bool; existing
+        // `true` deserializes as int 1 (companion) automatically.
+        {cfg_forceCloseHomeKit, {false, false, (int)0, helperForceCloseHomeKit}},
         {cfg_forceCloseHoldMs,  {false, false, 3500,  helperForceCloseHoldMs}},
 #endif
     };

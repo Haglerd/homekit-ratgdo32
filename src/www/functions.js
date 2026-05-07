@@ -600,11 +600,15 @@ function setElementsFromStatus(status) {
                 document.getElementById(key).checked = value;
                 document.getElementById("homekitMotionRow").style.display = "table-row";
                 break;
-            // HK-FC: surface the optional force-close tile row + value.
+            // HK-FC: surface the optional force-close mode row + value.
             // The row reveals on first /status.json so users notice the
-            // toggle exists; the persisted value drives the checkbox state.
+            // option exists; the persisted value drives the select state.
+            // Tri-state mode: 0=off, 1=companion tile, 2=replace primary
+            // close. Backward compat: pre-tri-state firmware sent boolean
+            // true/false for this key, which JSON.stringify-ed as 1/0 on
+            // the wire — values still map cleanly to mode 0/1.
             case "forceCloseHomeKit":
-                document.getElementById(key).checked = value;
+                document.getElementById(key).value = String(value);
                 document.getElementById("homekitForceCloseRow").style.display = "table-row";
                 break;
             case "forceCloseHoldMs":
@@ -1667,11 +1671,13 @@ async function saveSettings() {
     const homespanCLI = (document.getElementById("homespanCLI").checked) ? '1' : '0';
     const lightHomeKit = (document.getElementById("lightHomeKit").checked) ? '1' : '0';
     const motionHomeKit = (document.getElementById("motionHomeKit").checked) ? '1' : '0';
-    // HK-FC: collect the new toggle + clamp the hold-ms to [1000, 10000]
-    // here too — server-side clamp is the safety net (web.cpp /setgdo)
-    // but clamping in the form keeps the round-trip honest if the user
-    // hand-edits the input.
-    const forceCloseHomeKit = (document.getElementById("forceCloseHomeKit").checked) ? '1' : '0';
+    // HK-FC: collect the tri-state mode (0/1/2) + clamp the hold-ms to
+    // [1000, 10000] here too — server-side clamp is the safety net
+    // (web.cpp /setgdo) but clamping in the form keeps the round-trip
+    // honest if the user hand-edits the input.
+    let forceCloseHomeKit = parseInt(document.getElementById("forceCloseHomeKit").value, 10);
+    if (isNaN(forceCloseHomeKit) || forceCloseHomeKit < 0 || forceCloseHomeKit > 2) forceCloseHomeKit = 0;
+    forceCloseHomeKit = String(forceCloseHomeKit);
     let forceCloseHoldMs = parseInt(document.getElementById("forceCloseHoldMs").value, 10);
     if (isNaN(forceCloseHoldMs)) forceCloseHoldMs = 3500;
     forceCloseHoldMs = Math.max(1000, Math.min(10000, forceCloseHoldMs));

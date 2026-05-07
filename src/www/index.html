@@ -488,10 +488,14 @@
                    the key. Sec+1.0 only — Sec+2.0 falls through to a normal
                    close transparently. -->
               <tr id="homekitForceCloseRow" style="display: none;">
-                <td class="label">Force-Close Tile:</td>
+                <td class="label">Force-Close Mode:</td>
                 <td>
-                  <input type="checkbox" id="forceCloseHomeKit" name="forceCloseHomeKit" value="no">
-                  <label for="forceCloseHomeKit">HomeKit Force-Close Accessory (Sec+1.0 only)</label>
+                  <select id="forceCloseHomeKit" name="forceCloseHomeKit">
+                    <option value="0">Off — primary close uses normal toggle</option>
+                    <option value="1">Companion tile — adds a separate force-close tile</option>
+                    <option value="2">Replace — primary close uses force-close hold</option>
+                  </select>
+                  <span style="font-size:0.85em;">&nbsp;Sec+1.0 only.</span>
                   <br>
                   <span style="font-size:0.85em;">Hold (ms):
                     <input type="number" id="forceCloseHoldMs" name="forceCloseHoldMs"
