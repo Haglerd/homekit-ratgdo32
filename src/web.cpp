@@ -37,10 +37,12 @@
 // v47: setsockopt(TCP_KEEPIDLE/INTVL/CNT) on SSE TCP sockets so kernel
 // detects silently-dropped peers within ~60s.
 // esp_timer_get_time for clientWrite slow-write instrumentation.
+// log-audit-004: direct lwip_send in clientWriteEx (errno + send()).
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/tcp.h>
 #include <esp_timer.h>
+#include <errno.h>
 #endif
 #endif
 
@@ -438,24 +440,15 @@ volatile uint32_t statusJsonPeakLen = 0;
 SseWriteResult clientWriteEx(WiFiClient client, const char *data)
 {
     size_t len = strlen(data);
-    size_t written = 0;
 #ifdef ESP8266
     client.flush(); // make sure previous data all sent.
-#endif
-    // v24 fast-path: if the TCP send buffer can't accept the full
-    // payload right now, the subscriber isn't draining and we'd block
-    // in client.write below. Skip + report; v29: this is BUFFER_FULL
-    // (flow control), NOT a wedge — caller still stamps lastActivity.
+    // ESP8266's WiFiClient::availableForWrite() actually queries lwIP's
+    // tcp_sndbuf (it's overridden, unlike Arduino-ESP32). The fast-path
+    // is meaningful here.
     int avail = client.availableForWrite();
     if (avail >= 0 && (size_t)avail < len)
     {
         sseBufferFullSkips++;
-        // v46: rate-limit the per-skip ESP_LOGD to once per 60 seconds.
-        // Pre-v46 this fired every 2-3s on a slow subscriber and dominated
-        // the 16KB log buffer, wrapping out short-lived user-action lines
-        // (like the force-close ESP_LOGI sequence) before /showlog could
-        // be fetched. The cumulative `sseBufferFullSkips` counter stays
-        // accurate; the log line just samples instead of streaming.
         static uint32_t lastSkipLogMs = 0;
         uint32_t nowMs = (uint32_t)_millis();
         if ((uint32_t)(nowMs - lastSkipLogMs) > 60000UL || lastSkipLogMs == 0)
@@ -466,17 +459,9 @@ SseWriteResult clientWriteEx(WiFiClient client, const char *data)
         }
         return SseWriteResult::BUFFER_FULL;
     }
-#ifndef ESP8266
-    uint32_t t0 = (uint32_t)(esp_timer_get_time() / 1000ULL);
-#else
     uint32_t t0 = millis();
-#endif
-    written = client.write(data, len);
-#ifndef ESP8266
-    uint32_t dt = (uint32_t)(esp_timer_get_time() / 1000ULL) - t0;
-#else
+    size_t written = client.write(data, len);
     uint32_t dt = millis() - t0;
-#endif
     if (dt > CLIENT_SLOW_WRITE_MS)
     {
         sseSlowWrites++;
@@ -490,6 +475,95 @@ SseWriteResult clientWriteEx(WiFiClient client, const char *data)
         return SseWriteResult::FAILED;
     }
     return SseWriteResult::OK;
+#else
+    // log-audit-004 (errno 11 recurrence): bypass NetworkClient::write
+    // and call lwip_send directly. Two reasons:
+    //
+    // 1) Arduino-ESP32's NetworkClient does NOT override
+    //    Print::availableForWrite() (which returns 0). The previous
+    //    fast-path `if (client.availableForWrite() < len) BUFFER_FULL`
+    //    therefore matched on every call, returning BUFFER_FULL without
+    //    ever calling client.write — normal-size status broadcasts
+    //    silently failed and v47's wedge sweep eventually reaped the
+    //    slot.
+    //
+    // 2) NetworkClient::write's send-retry loop logs ESP_LOGE
+    //    ("fail on fd %d, errno: %d, ...") UNCONDITIONALLY when
+    //    lwip_send returns -1 with EAGAIN (TCP send buffer full).
+    //    On a long-lived SSE socket against a slow peer that's normal
+    //    flow control, but the framework's log_e fires up to
+    //    WIFI_CLIENT_MAX_WRITE_RETRY=10 times per write — the visible
+    //    `errno 11 fail on fd 51/52 "No more processes"` syslog noise.
+    //
+    // Direct lwip_send(MSG_DONTWAIT) lets us treat EAGAIN as a clean
+    // BUFFER_FULL signal (no log_e), and still surface other errno
+    // values (ECONNRESET / EPIPE / ENOTCONN) as FAILED with a single
+    // ESP_LOGW so we can see real socket errors.
+    int fd = client.fd();
+    if (fd < 0)
+    {
+        return SseWriteResult::FAILED;
+    }
+    uint32_t t0 = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    size_t totalSent = 0;
+    while (totalSent < len)
+    {
+        ssize_t n = ::send(fd, data + totalSent, len - totalSent, MSG_DONTWAIT);
+        if (n > 0)
+        {
+            totalSent += (size_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            if (totalSent == 0)
+            {
+                // Clean buffer-full at the start of the payload — peer
+                // is alive but slow. v47 wedge sweep will reap if this
+                // persists for SSE_MAX_CONSECUTIVE_BUFFER_FULL=30 ticks.
+                sseBufferFullSkips++;
+                static uint32_t lastSkipLogMs = 0;
+                uint32_t nowMs = (uint32_t)_millis();
+                if ((uint32_t)(nowMs - lastSkipLogMs) > 60000UL || lastSkipLogMs == 0)
+                {
+                    ESP_LOGD(TAG, "SSE clientWrite skipped — lwip_send EAGAIN (need %u) [%lu total skips]",
+                             (unsigned)len, (unsigned long)sseBufferFullSkips);
+                    lastSkipLogMs = nowMs;
+                }
+                return SseWriteResult::BUFFER_FULL;
+            }
+            // Mid-payload buffer-full: a partial frame is on the wire.
+            // Bail within the slow-write budget; if we exceed it, stop
+            // the connection so the peer resubscribes from a clean
+            // SSE event boundary instead of mid-frame.
+            uint32_t dtNow = (uint32_t)(esp_timer_get_time() / 1000ULL) - t0;
+            if (dtNow > CLIENT_SLOW_WRITE_MS)
+            {
+                sseSlowWrites++;
+                ESP_LOGW(TAG, "SSE clientWrite mid-payload wedge (sent %u of %u in %ums) — stopping",
+                         (unsigned)totalSent, (unsigned)len, dtNow);
+                client.stop();
+                return SseWriteResult::FAILED;
+            }
+            // Brief yield so lwIP's TCPIP task can drain.
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+        // Real error: ECONNRESET / EPIPE / ENOTCONN / etc. One ESP_LOGW
+        // per occurrence (NOT the framework's per-retry log_e flood).
+        ESP_LOGW(TAG, "SSE clientWrite send error fd=%d errno=%d (%s) — stopping",
+                 fd, errno, strerror(errno));
+        client.stop();
+        return SseWriteResult::FAILED;
+    }
+    uint32_t dt = (uint32_t)(esp_timer_get_time() / 1000ULL) - t0;
+    if (dt > CLIENT_SLOW_WRITE_MS)
+    {
+        sseSlowWrites++;
+        ESP_LOGW(TAG, "SSE clientWrite slow: %ums for %u bytes (subscriber may be wedged)", dt, (unsigned)len);
+    }
+    return SseWriteResult::OK;
+#endif
 }
 
 // v29: thin bool wrapper for any callers we don't migrate to the tri-state.
@@ -3243,18 +3317,55 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                     {
                         if (snprintf_P(wb, wbSize, PSTR("event: logger\ndata: %s\n\n"), data) >= (int)wbSize)
                         {
-                            // Will not fit in our write buffer, let system printf handle
+                            // Will not fit in our write buffer.
 #ifdef ESP8266
                             subscription[i].client.flush(); // make sure previous data all sent.
-#endif
-                            // v28: capture printf return — only stamp on success.
-                            // Pre-v28 we stamped unconditionally, which could mask
-                            // a wedged subscriber whose oversized log writes were
-                            // failing silently (delayed orphan-sweep detection by
-                            // one cycle). Print returns size_t bytes written.
+                            // ESP8266 keeps the framework printf fallback — its
+                            // WiFiClient::availableForWrite() works (queries
+                            // tcp_sndbuf), so the framework's send loop doesn't
+                            // hit the log_e-on-EAGAIN noise pattern.
                             size_t pwrote = subscription[i].client.printf("event: logger\ndata: %s\n\n", data);
                             if (pwrote > 0)
                                 subscription[i].lastActivity = (uint32_t)_millis();
+#else
+                            // log-audit-004: route oversized log payloads through
+                            // clientWriteEx so they use the same direct lwip_send
+                            // path as in-buffer writes — avoids the framework
+                            // NetworkClient::write retry loop's `log_e fail on fd
+                            // %d, errno: %d` flood on benign EAGAIN flow control.
+                            // Heap allocation is fine here: this branch only fires
+                            // for log lines > ~490 B (rare), and ~3 KB allocations
+                            // are clean against typical post-boot heap (~50 KB+).
+                            int needed = snprintf_P(NULL, 0, PSTR("event: logger\ndata: %s\n\n"), data);
+                            if (needed > 0)
+                            {
+                                char *bigBuf = (char *)malloc((size_t)needed + 1);
+                                if (bigBuf)
+                                {
+                                    snprintf_P(bigBuf, (size_t)needed + 1, PSTR("event: logger\ndata: %s\n\n"), data);
+                                    SseWriteResult r = clientWriteEx(subscription[i].client, bigBuf);
+                                    free(bigBuf);
+                                    if (r == SseWriteResult::OK)
+                                    {
+                                        subscription[i].lastActivity = (uint32_t)_millis();
+                                        __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);
+                                        __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);
+                                    }
+                                    else if (r == SseWriteResult::BUFFER_FULL)
+                                    {
+                                        subscription[i].lastActivity = (uint32_t)_millis();
+                                        uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);
+                                        if (prev == 0)
+                                        {
+                                            __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
+                                        }
+                                    }
+                                }
+                                // malloc failure: drop the oversized log entry
+                                // silently — alternative is the noisy framework
+                                // path we're trying to escape.
+                            }
+#endif
                         }
                         else
                         {
@@ -3292,14 +3403,50 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                              subscription[i].clientUUID.c_str(), i, data);
                     if (snprintf_P(wb, wbSize, PSTR("event: message\ndata: %s\n\n"), data) >= (int)wbSize)
                     {
-                        // Will not fit in our write buffer, let system printf handle
+                        // Will not fit in our write buffer.
 #ifdef ESP8266
                         subscription[i].client.flush(); // make sure previous data all sent.
-#endif
-                        // v28: gate on printf return — see LOG_MESSAGE path above.
+                        // ESP8266 keeps the framework printf fallback (see
+                        // matching LOG_MESSAGE branch for rationale).
                         size_t pwrote = subscription[i].client.printf("event: message\ndata: %s\n\n", data);
                         if (pwrote > 0)
                             subscription[i].lastActivity = (uint32_t)_millis();
+#else
+                        // log-audit-004: route oversized status payloads through
+                        // clientWriteEx (direct lwip_send) instead of the framework's
+                        // log_e-on-EAGAIN-noisy NetworkClient::write retry loop.
+                        // jsonPeak observed at 2312 B — this is the dominant
+                        // oversize-broadcast path; killing the noise here is the
+                        // primary errno-11-recurrence fix.
+                        int needed = snprintf_P(NULL, 0, PSTR("event: message\ndata: %s\n\n"), data);
+                        if (needed > 0)
+                        {
+                            char *bigBuf = (char *)malloc((size_t)needed + 1);
+                            if (bigBuf)
+                            {
+                                snprintf_P(bigBuf, (size_t)needed + 1, PSTR("event: message\ndata: %s\n\n"), data);
+                                SseWriteResult r = clientWriteEx(subscription[i].client, bigBuf);
+                                free(bigBuf);
+                                if (r == SseWriteResult::OK)
+                                {
+                                    subscription[i].lastActivity = (uint32_t)_millis();
+                                    __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);
+                                    __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);
+                                }
+                                else if (r == SseWriteResult::BUFFER_FULL)
+                                {
+                                    subscription[i].lastActivity = (uint32_t)_millis();
+                                    uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);
+                                    if (prev == 0)
+                                    {
+                                        __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
+                                    }
+                                }
+                            }
+                            // malloc failure: skip this broadcast — silent drop
+                            // beats the framework noise path.
+                        }
+#endif
                     }
                     else
                     {
