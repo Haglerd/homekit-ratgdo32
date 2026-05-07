@@ -80,7 +80,9 @@ static volatile bool isPaired = false;
 #endif // ESP8266
 
 #ifdef CRASH_DEBUG
-extern void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close = true);
+// Default arg comes from comms.h (already included above) — repeating it
+// here is ill-formed C++ [dcl.fct.default].
+extern void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close);
 void testDelayFn(const char *buf)
 {
     delayFnCall(5000, (void (*)())NULL);
