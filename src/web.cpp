@@ -698,6 +698,30 @@ void web_loop()
         }
     }
 
+    // W48: SSE delta-broadcast — `_C` vs raw `JSON_ADD_*` variant rule
+    // (ESTABLISHED CONVENTION; do not drift):
+    //
+    //   - `JSON_ADD_*_C` (change-tracked) — used for fields the broadcaster
+    //     polls EVERY TICK where a per-field "last reported" cache slot
+    //     exists (typically in `last_reported_garage_door`, plus the
+    //     `last_reported_paired` / `last_reported_assist_laser` singletons).
+    //     The macro compares to the cache and only emits if the value
+    //     actually changed — this is the bandwidth-saving variant.
+    //   - Raw `JSON_ADD_INT/STR/BOOL` — used for fields gated by a
+    //     single-shot event flag (`vehicleStatusChange`, `new_ipv4_address`,
+    //     `new_ipv6_address`, the `lastDoorState != current_state`
+    //     outer guard for the door-update timestamps). The flag itself
+    //     IS the change detector, so a per-field cache is unnecessary.
+    //   - `upTime` is always-emit, but only inside the
+    //     `if (strlen(json) > 2)` guard below — it serves as the
+    //     timestamp when SOMETHING else changed.
+    //
+    // Sibling path: the polled `/status.json` snapshot in
+    // `build_status_json` (around line 1670+) intentionally uses RAW
+    // variants for ALL fields — full snapshot every poll, no cache,
+    // by design (consumers expect every field every time). Do NOT
+    // copy `_C` calls from this SSE path into `build_status_json` or
+    // vice versa; they have different consumer contracts.
     TAKE_MUTEX();
     JSON_START(json);
     if (garage_door.active && garage_door.current_state != lastDoorState)
