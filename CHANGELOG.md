@@ -10,6 +10,18 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.71 (2026-05-07) — log-audit-005 BOOT-OOM-MDNS panic real fix (`tiT` re-entry into lwIP)
+
+**P0 fix.** PR #89 (.65 release) was a misdiagnosis — it deferred ratgdo's `mdns_service_add` calls until heap recovered above 50 KB, but the actual crash had nothing to do with our service registration timing.
+
+**Real cause** (decoded from .65 stack trace via `addr2line`): mDNS's UDP receive callback runs on `tcpip_thread` (`tiT`). When the lwIP NETBUF pool can't satisfy a 176 B inbound packet allocation, mDNS calls `ESP_LOGE("mdns_networking", "Cannot allocate memory ...")` from inside `tiT`. Our `esp_log_vprintf` hook catches it and calls `logToSyslog(outLine)` → `WiFiUDP::beginPacket` → `socket(AF_INET, SOCK_DGRAM, 0)` from inside `tcpip_thread`. lwIP's socket API forwards every call as a tcpip-message to `tcpip_thread` and waits for a reply; if the caller IS `tcpip_thread`, the wait is for itself and lwIP's safety check fires `LWIP_ASSERT` → `_strerror_r` → panic in `tiT`. `IllegalInstruction`. The mDNS OOM is benign in isolation; it's our log fan-out that turned it lethal.
+
+**Fix**: cache the FreeRTOS task handles for `tiT` / `wifi` / `sys_evt` once on first hit; in `LOG::logToBuffer`, skip both `SSEBroadcastState` AND `logToSyslog` when the originating task is one of them (the line still captures into the on-device message buffer + Serial — no observability loss). Also gate `xPortInIsrContext()` belt-and-suspenders. This protects against any future ESP-IDF component (DHCP6, IPv6 ND, OpenThread, lwIP TCP retransmit) emitting `ESP_LOGx` from a network task — all share the same re-entry hazard.
+
+PR #89's heap-floor service-registration deferral is kept (orthogonal heap-pressure mitigation). ESP8266 path unchanged. Force-close FSM untouched.
+
+Heap delta: +12 B BSS (cached task handles), ~200-400 B flash. No dynamic allocation in the gate path.
+
 ### v3.4.4-forceclose.70 (2026-05-07) — R-?-fork HomeSpan processSerialCommand thread-safety doc
 
 Investigation-gate close. HomeSpan's `pollTask` holds `pollMutex` (a `std::shared_mutex`, exposed via `homeSpan.getMutex()`) for each iteration; state-mutating CLI commands ('F' factory reset, 'U' unpair) called from another task without taking that mutex would race with pollTask's accesses. Inspected the 4 fork call sites: `handle_reset` ('U' via `homekit_unpair`) and `helperFactoryReset` ('F') both reboot within ms-to-~500 ms, collapsing the race window; `homekit_dump_state` ('s'/'i'/'d') is read-only — torn-read cosmetic only. Mutex NOT added: pollTask iterations can take seconds, waiting on it from loopTask could trip the loop watchdog. **Closed as non-finding.** Doc comments added to `homekit_dump_state` and `helperFactoryReset` documenting the rationale (the unpair site already had the v43/W29 comment).
