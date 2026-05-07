@@ -6,11 +6,11 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution.md`. Recommended sequencing: tooling sweeps first (W45/W46/W47) so any new findings they surface fold into the same release.
 
-### [P2] W45 — Build with `-Wshadow=local -Werror=shadow`, triage shadow warnings
-**Status:** queued
+### [P2] ~~W45~~ — Build with `-Wshadow=local -Werror=shadow`, triage shadow warnings
+**Status:** DONE (branch `w45-wshadow-triage`)
 **Source:** audit, v45 plan
-**Acceptance:** clean `pio run -e ratgdo_esp32dev` with `-Wshadow=local` permanently in build_flags. Triage results appended to audit doc.
-**Notes:** library-header shadows (arduino-esp32, HomeSpan) are accepted noise per user direction; only fix shadows in fork code. `-Werror=shadow` reverts after triage.
+**Acceptance:** met — `pio run -e ratgdo_esp32dev` exits 0; `-Wshadow=local` permanent in `build_src_flags` (src-only scope); `-Werror=shadow` reverted. Two fork shadows fixed (`DEV_Light::DEV_Light`, `DEV_Motion::DEV_Motion` ctor params); four library include sites pragma-suppressed (`Arduino.h`, `HomeSpan.h`, `SoftwareSerial.h`, `HTTPClient.h`).
+**Notes:** Triage results in audit-notes "v45 W45 triage results" subsection; full status entry in Whats-Done file.
 
 ### [P2] W46 — Add eslint over `src/www/` + GitHub Actions CI lint
 **Status:** queued

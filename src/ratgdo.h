@@ -24,13 +24,27 @@
 #endif
 
 // Arduino includes
+// v45 W45: arduino-esp32's NetworkEvents.h ships parameter-vs-member
+// shadow warnings in NetworkEventCbList_t's ctor. We can't fix vendored
+// headers in this fork; suppress -Wshadow only across the include so
+// fork code retains -Wshadow=local enforcement (build_src_flags) while
+// not failing on library-header warnings.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
 #include <Arduino.h>
+#pragma GCC diagnostic pop
 
 // RATGDO project includes
 #ifdef ESP8266
 #include "homekit_decl.h"
 #else
+// v45 W45: HomeSpan transitively pulls Stepper_A3967.h, Blinker.h, TLV8.h
+// — all carry their own member-vs-param shadows we can't fix. Same
+// rationale as the Arduino.h suppression above.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
 #include "HomeSpan.h"
+#pragma GCC diagnostic pop
 #endif
 #include "utilities.h"
 #include "../lib/ratgdo/log.h"

@@ -24,7 +24,14 @@
 #include "LittleFS.h"
 #else
 #include <esp_sntp.h>
+// v45 W45: HTTPClient.h transitively pulls NetworkEvents.h (NetworkCbList_t
+// ctor with member-shadowing params). Vendored framework header — suppress
+// only across this include site so fork code keeps -Wshadow=local
+// enforcement (build_src_flags).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
 #include <HTTPClient.h>
+#pragma GCC diagnostic pop
 #endif
 
 // RATGDO project includes
