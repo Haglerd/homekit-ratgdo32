@@ -10,6 +10,14 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.69 (2026-05-07) — W44 auto-close DST spring-forward / fall-back mitigation
+
+**Verified applicable** at the gate: `autoCloseInWindow` and `autoCloseSecsUntilNextStart` both run against `localtime_r` (`comms.cpp:2935`/`2974`) → DST shifts move the comparison. SNTP's `time_is_set` callback fires only on initial sync / step, NOT on DST transitions (DST is a localtime view, not a clock event). So a one-shot `autoCloseTicker.once_ms(secs)` could sleep ~22 h waiting for next window-start; if a DST transition happens mid-sleep, the actual fire-time drifts by ±1 h relative to local-time intent.
+
+**Fix (option-A from v45 plan)**: cap the long-sleep horizon at 30 min in `autoCloseSecsUntilNextStart`. The scheduler now chains: each 30-min wake-up re-runs `update_auto_close_schedule` → fresh `localtime_r` → either another 30-min cap or transition to 60 s in-window tick. Worst-case DST drift bounded to 30 min instead of the previous ~23 h. Log line at the schedule call updated to `(W44-capped, will re-evaluate)` so the cap isn't surprising in syslog tails.
+
+Trade-off: ~46x more wake-ups during the inactive window (e.g. a 22:00→06:00 window with current time 12:00 used to sleep ~10 h once; now wakes 20 times at 30 min cadence). Each wake is a single `localtime_r` + cache read + log line — negligible CPU/battery impact. Worth it to cap DST drift.
+
 ### v3.4.4-forceclose.68 (2026-05-07) — W43 writeBuffer rename + W48 _C field audit (doc-only)
 
 **W43 — `writeBuffer` rename + invariant comment.** Hygiene rename: the file-scope `writeBuffer[512]` in `web.cpp` is renamed to `loopTaskScratchBuf512` so every call site advertises the loopTask-only invariant up front. A comment block at the declaration documents (a) the ESP32 invariant — only written from loopTask context (Arduino WebServer dispatch, OTA upload, web_loop status path); (b) the ESP8266 carve-out — `SSEBroadcastState` reuses this global on the 8266 because the ~4 KB main-task stack can't absorb +512 B per call. Per-caller stack buffers were rejected during planning for that reason.
