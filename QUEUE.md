@@ -78,11 +78,11 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 These are findings whose fork-side fix is partial or unverified. Fork work proceeds regardless of upstream applicability.
 
-### [P2] Sec2-FC — Force-close override is Sec+1.0-only; verify Sec+2.0 protocol path
-**Status:** queued — investigation gate
-**Source:** user observation 2026-05-06 — physical hold-button on Sec+ 2.0 wall panel closes obstructed door, but firmware's `door_command_force_close()` at `comms.cpp:2842` early-returns to a normal close on `doorControlType != 1`. User has a second device running Sec+ 2.0; current behavior on that device is "force-close button = normal close, photo eye still blocks."
-**Acceptance:** confirm or refute the inherited comment at `comms.cpp:2660` ("Sec+2.0 has no equivalent protocol message"). EITHER document why Sec+2.0 truly can't do the override and update the warning log to say so explicitly, OR implement the Sec+ 2.0 hold-button packet path. State machine (forceCloseInProgress / forceCloseAttempt / gap timer / preempt_force_close) is reused verbatim; only the per-press packet emission differs. No infrastructure rework.
-**Notes:** comment likely inherited from upstream and never validated for the fork. Sec+ 2.0 button-press packets carry button-state (press/release/held); wired wall panels emit the held variant when physically held, and the GDO honors it for the photo-eye override. If true, the firmware can emit the same packet sequence. Investigation: read `secplus2.h` packet definitions + check what a wired Sec+2.0 panel actually transmits during a hold (Pi syslog from a Sec+ 2.0 unit's RX-monitor mode would settle it).
+### [P2] ~~Sec2-FC~~ — Force-close override is Sec+1.0-only; verify Sec+2.0 protocol path
+**Status:** DONE — PR https://github.com/Haglerd/homekit-ratgdo32/pull/81 (branch `sec2fc-doc-warning-update`)
+**Source:** user observation 2026-05-06
+**Acceptance:** Outcome (a) — investigation confirmed the inherited comment is correct. `Packet.h:125` `DoorActionCommandData` has `pressed` bit only (no held variant); `Packet.h:797` `PacketCommand` enum has no force-close-override / hold-to-close / photo-eye-skip command. Sec+2.0 "hold" semantics live in physical button-down duration on the bus, not in a distinguishable packet payload firmware can replay.
+**Notes:** Doc-only PR — comment block at `comms.cpp:2660-2672` expanded with verified-2026-05-07 source citations; warning log at `comms.cpp:~2854` refined to say explicitly why force-close degrades to normal close on Sec+2.0 (`"FORCE CLOSE: Sec+2.0 protocol has no force-close-override packet (DoorAction carries press/release only); falling back to normal close — photo-eye obstruction will still block"`). Zero RAM impact, flash unchanged. No FSM transitions touched. **No release bump** (string-literal/comment change only).
 
 ### [P3] R-?-fork — Verify `homeSpan.processSerialCommand` thread-safety, fix if unsafe
 **Status:** queued — investigation gate
