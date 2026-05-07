@@ -2722,7 +2722,7 @@ void handle_subscribe()
     }
 
     // 3. parse argument indices (no slot state mutated)
-    int id = 0;
+    int id = -1;
     bool logViewer = false;
     int heartbeatIntervalArgIdx = -1;
     for (int i = 0; i < server.args(); i++)
@@ -2813,6 +2813,10 @@ void handle_subscribe()
     // iOS Safari background-tab SSE that re-subscribes immediately after
     // every reap) get backed off; well-behaved clients with a single
     // transient wedge are unaffected.
+    //
+    // id == -1 means the request had no `id=` argument; skip the dampener
+    // entirely rather than matching against server.arg(-1) (undefined).
+    if (id != -1)
     {
         uint32_t nowSub = (uint32_t)_millis();
         for (auto &r : recentReaps)
@@ -2823,8 +2827,11 @@ void handle_subscribe()
                 r.reapedAt = 0;
             }
         }
-        const char *incomingUUID = server.arg(id).c_str();
-        if (incomingUUID != NULL && incomingUUID[0] != '\0')
+        // Bind the String temp to a local so .c_str() doesn't dangle across
+        // the strcmp loop (server.arg returns by value).
+        String incomingUUIDStr = server.arg(id);
+        const char *incomingUUID = incomingUUIDStr.c_str();
+        if (incomingUUID[0] != '\0')
         {
             for (auto &r : recentReaps)
             {
