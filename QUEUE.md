@@ -18,11 +18,11 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Acceptance:** `npx eslint src/www/` exits 0; `.github/workflows/lint.yml` runs on push + PR. Vendored `marked.umd.js` + `qrcode.js` excluded.
 **Notes:** Lint surfaced 9 real bugs (5× dead `reject()` ReferenceErrors in `logs.js`, 4× implicit-global hazards in `functions.js`/`logs.js`). 119 warnings deferred (HTML-event-handler unused-vars; `eqeqeq` mass-flip risk).
 
-### [P2] W47 — `Ticker.detach()` audit sweep with provenance comments
-**Status:** in-progress — BLOCKED by code-review (commit `a6368d5` on branch `w47-ticker-detach-sweep`, NOT pushed; needs planner)
+### [P2] ~~W47~~ — `Ticker.detach()` audit sweep with provenance comments
+**Status:** DONE — branch `w47-ticker-detach-sweep` (PR pending)
 **Source:** audit, v45 plan
 **Acceptance:** every `.detach()` line carries a one-line provenance comment; `:3318` site fixed inline with `request_force_close_clear` (per user direction — TTC arm-fresh preempts in-flight force-close).
-**Notes:** 24 provenance comments are clean. Substantive `:3370` (was `:3318`) fix BREAKS force-close 2-attempt sequence: `send_force_close_press()` → `delayFnCall(forceCloseHoldMsCached, …)` → new `request_force_close_clear()` line fires immediately, loopTask drains it within ms, `forceCloseAttempt` is reset to 0 long before the press hold ends, press 2 silently dropped on every force-close. The `delayFnCall` level is the wrong abstraction — it caught force-close calling itself. Needs planner: either (a) move the clear out of `delayFnCall` to specific external-preemption sites (audit shows :3243/:3421/:3490 already paired by v40/W15 — may be no fourth external site exists), or (b) add a `preempt_force_close = true` parameter to `delayFnCall` and have force-close-internal callers pass `false`. Latent: also breaks `USE_GDOLIB` build (function gated `#ifndef USE_GDOLIB` while call site is outside the gate).
+**Notes:** v1 (`a6368d5`) broke force-close (preempted itself). v2 (`bd358db`) added `preempt_force_close=true` param to `delayFnCall`; only force-close-internal caller at `:2825` opts out via `false`. v3 (`78657d8`) fixed CRASH_DEBUG dup-default. Code-review walked the 8-step 2-attempt sequence and verified force-close intact.
 
 ### [P3] W41 — Move `extern volatile uint32_t` declarations to header
 **Status:** queued
@@ -66,11 +66,13 @@ Per the v45 cleanup plan in `audit-notes/2026-05-04-fork-vs-upstream-attribution
 **Notes:** P2 — 24/24 reproducibility over 24 different boots. Functional impact nil (reconciler clamps), but counter=`SSE_MAX_CHANNELS` exact match suggests a deterministic init-path bump or BSS issue. **needs-human-planning** (investigation-shaped, root cause unknown).
 
 ### [P2] log-audit-20260506-002 — Socket fd exhaustion (errno 11) under browser concurrent-fetch burst
-**Status:** queued
+**Status:** queued — **DIRECTION CHOSEN: option (b) sequentialize browser fetches client-side** (auto-fixable)
 **Source:** log-audit 2026-05-06 (Pi syslog)
 **Issue:** Haglerd/homekit-ratgdo32#70
 **Acceptance:** zero `errno 11 No more processes` over 5 diagnostics-page loads; 3 reboots with browser open and no GDO init timeout.
-**Notes:** P2 — 14× errno 11 events + 1× `Not enough memory to allocate buffer` co-incident with a `Garage door is not responding to initialization sequence (3000ms)` at 2026-05-06T16:38:05. Browser at 10.112.60.248 fans out 4-5 concurrent fetches (`/showlog`, `/showrebootlog`, `/crashlog`, `/site.webmanifest`, SSE) and exhausts the lwIP socket pool. **needs-human-planning** — three viable mitigations (raise CONFIG_LWIP_MAX_SOCKETS, sequentialize browser fetches, or 503-with-retry-after); user picks direction.
+**Notes:** P2 — 14× errno 11 events + 1× `Not enough memory to allocate buffer` co-incident with a `Garage door is not responding to initialization sequence (3000ms)` at 2026-05-06T16:38:05. Browser at 10.112.60.248 fans out 4-5 concurrent fetches (`/showlog`, `/showrebootlog`, `/crashlog`, `/site.webmanifest`, SSE) and exhausts the lwIP socket pool.
+
+**User decision (2026-05-06):** option (b) — sequentialize fetches in `src/www/*`. Chosen for zero firmware RAM cost (ESP8266 heap tight; +6 sockets ≈ +1–2 KB BSS permanent). UI latency cost imperceptible (~200–400ms on LAN). Web UI redeploy only — no firmware release needed for this fix.
 
 ### [P2] log-audit-20260506-003 — SSE wedged-on-flow-control reaper churn, same UUIDs reaped 28+ times
 **Status:** queued

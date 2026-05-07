@@ -237,6 +237,8 @@ void cancel_builtin_TTC_countdown()
     if (builtInTTCcountdown.active())
     {
         ESP_LOGI(TAG, "Ending automatic close countdown timer");
+        // detach builtInTTCcountdown: explicit cancel of the per-second built-in
+        // TTC ticker (not TTCtimer; does not alias the force-close press hold).
         builtInTTCcountdown.detach();
     }
     garage_door.builtInTTCremaining = 0;
@@ -1101,6 +1103,10 @@ void update_door_state(GarageDoorCurrentState current_state)
         if (TTCtimer.active())
         {
             ESP_LOGI(TAG, "Door closing, canceling TTC delay timer");
+            // detach TTCtimer: door reached CURR_CLOSING — TTC delay or
+            // force-close press 1 hold no longer needed. Force-close flag
+            // unwind is covered by W14 unconditional clear_force_close_state()
+            // call at the next statement (line ~1103).
             TTCtimer.detach();
             // This will force us to send current state to browser, so it reports correct state.
             last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
@@ -1112,6 +1118,8 @@ void update_door_state(GarageDoorCurrentState current_state)
         // Fall through to "opening"
     case GarageDoorCurrentState::CURR_OPENING:
         // Terminate the timer that confirms that a door open/close actually worked.
+        // detach checkDoorMoving: door reached commanded state (Opening/Closing) —
+        // moving-watchdog no longer needed. Distinct from TTCtimer.
         checkDoorMoving.detach();
         break;
 
@@ -1131,6 +1139,9 @@ void update_door_state(GarageDoorCurrentState current_state)
         // If timer that checks door completely opens/closes is active, cancel it.
         if (checkDoorCompleted.active())
         {
+            // detach checkDoorCompleted: door reached terminal state
+            // (OPEN/CLOSED/STOPPED) — completion-watchdog no longer needed.
+            // Distinct from TTCtimer.
             checkDoorCompleted.detach();
         }
         break;
@@ -1301,6 +1312,8 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
         {
             ESP_LOGD(TAG, "SEC1 RX 0x40 (door moving) value changed from 0x%02X to 0x%02X", previous, value);
             previous = value;
+            // detach delayReset: site below is inside the commented-out 398LM
+            // 0x37-panel block — not analysed (dead code).
             /* Removing this section as testing with 398LM (a 0x37 wall panel) was never successful.
             static Ticker delayReset = Ticker();
             if (bitRead(value, 7))
@@ -2165,6 +2178,9 @@ void comms_loop_sec2()
                 {
                     ESP_LOGI(TAG, "Start automatic close countdown timer");
                     // start a timer that will count down number of seconds remaining in built-in automatic close timer.
+                    // detach builtInTTCcountdown (inside lambda below): self-detach when
+                    // the countdown reaches zero. Distinct from TTCtimer; no force-close
+                    // interaction.
                     builtInTTCcountdown.attach_ms(1000, []()
                                                   { if (garage_door.builtInTTChold) return;
                                                     if (--garage_door.builtInTTCremaining == 0)builtInTTCcountdown.detach(); });
@@ -2675,6 +2691,9 @@ static void clear_force_close_state(const char *reason)
     if (!__atomic_load_n(&forceCloseInProgress, __ATOMIC_ACQUIRE)) return;
     ESP_LOGD(TAG, "FORCE CLOSE: clearing in-progress flag (%s)", reason);
     forceCloseAttempt = 0;
+    // detach forceCloseGapTimer: clearing in-flight force-close state — kill any
+    // pending gap-timer arm that would have fired the second press. Internal to
+    // the force-close module; loopTask-only.
     forceCloseGapTimer.detach();
     // v38 (audit W2): release-store. Pairs with the acquire-load in
     // force_close_drain_pending_arm. Fourth flag from the V3-pattern
@@ -2715,6 +2734,9 @@ void force_close_drain_pending_arm()
         ESP_LOGD(TAG, "FORCE CLOSE: gap-arm request dropped (sequence already cleared)");
         return;
     }
+    // detach forceCloseGapTimer: drain-arm path — clobber any prior gap-timer
+    // before re-arming with the requested ms. Internal force-close
+    // bookkeeping; loopTask-only.
     forceCloseGapTimer.detach();
     forceCloseGapTimer.once_ms(armMs, send_force_close_press);
 }
@@ -2806,7 +2828,13 @@ static void send_force_close_press()
     // Schedule release via delayFnCall — which also runs the TTC warning
     // sequence (light-press flashes during the delay). The TTC warning is
     // UL-mandated and the motor's override gate requires it.
-    delayFnCall(forceCloseHoldMsCached, send_force_close_release_then_maybe_retry);
+    //
+    // preempt_force_close=false: this call IS scheduling the force-close press
+    // release; we MUST NOT clear force-close state here (would tear down the
+    // 2-attempt sequence by resetting forceCloseAttempt before the release
+    // callback fires). Only external callers of delayFnCall preempt
+    // force-close.
+    delayFnCall(forceCloseHoldMsCached, send_force_close_release_then_maybe_retry, /*preempt_force_close=*/false);
 }
 
 void door_command_force_close(uint32_t hold_ms)
@@ -2843,6 +2871,9 @@ void door_command_force_close(uint32_t hold_ms)
     forceCloseHoldMsCached = hold_ms;
     forceCloseAttempt = 0;
     // forceCloseInProgress = true is implicit — TAS above already set it.
+    // detach forceCloseGapTimer: defensive kill before starting a fresh
+    // 2-attempt sequence — ensures no stale gap-timer from a prior aborted
+    // sequence can fire concurrently with the new press 1.
     forceCloseGapTimer.detach();
 
     ESP_LOGI(TAG, "FORCE CLOSE: starting 2-attempt sequence (hold=%lums, gap=%lums)", hold_ms, FORCE_CLOSE_GAP_MS);
@@ -2932,6 +2963,9 @@ static uint32_t autoCloseSecsUntilNextStart()
 //     to next window-start edge, which then re-calls this scheduler
 void update_auto_close_schedule()
 {
+    // detach autoCloseTicker: re-scheduling auto-close based on fresh config
+    // (boot, settings save, or periodic re-arm). Distinct from TTCtimer; no
+    // force-close interaction.
     autoCloseTicker.detach();
     // v31 final: read from cache for full consistency. All five
     // auto-close config reads in comms.cpp now go through the cache.
@@ -3133,6 +3167,8 @@ void door_command_close()
         // Sec+2.0 doors send us notifications as events happen, and an update every 5 minutes.
         // We may miss a notification which is why we have this test.
         // Sec+1.0 doors send a constant stream of status, so we get door uppdate every 500ms, so no need for this.
+        // detach checkDoorCompleted: defensive kill before re-arming the
+        // close-completion watchdog. Distinct from TTCtimer.
         checkDoorCompleted.detach(); // just in case.
         checkDoorCompleted.once_ms((garage_door.closeDuration + 3) * 1000, []()
                                    {
@@ -3145,11 +3181,15 @@ void door_command_close()
                                    });
     }
     // Check door starts to close
+    // detach checkDoorMoving: defensive kill before re-arming the close-moving
+    // watchdog. Distinct from TTCtimer.
     checkDoorMoving.detach(); // just in case!
     checkDoorMoving.once_ms(2000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is closing) then
                                 // it is likely that there is an error and door did not move from its open state.
+                                // detach checkDoorCompleted (inside lambda): close-moving watchdog
+                                // failed — abort the longer completion watchdog too.
                                 checkDoorCompleted.detach();
                                 ESP_LOGE(TAG, "Door is supposed to be closing but is not.  Current state: %s", DOOR_STATE(garage_door.current_state));
                                 notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_OPEN);
@@ -3173,6 +3213,8 @@ void door_command_open()
         // Sec+2.0 doors send us notifications as events happen, and an update every 5 minutes.
         // We may miss a notification which is why we have this test.
         // Sec+1.0 doors send a constant stream of status, so we get door uppdate every 500ms, so no need for this.
+        // detach checkDoorCompleted: defensive kill before re-arming the
+        // open-completion watchdog. Distinct from TTCtimer.
         checkDoorCompleted.detach(); // just in case.
         checkDoorCompleted.once_ms((garage_door.openDuration + 3) * 1000, []()
                                    {
@@ -3185,11 +3227,15 @@ void door_command_open()
                                    });
     }
     // Check door starts to open
+    // detach checkDoorMoving: defensive kill before re-arming the open-moving
+    // watchdog. Distinct from TTCtimer.
     checkDoorMoving.detach(); // just in case!
     checkDoorMoving.once_ms(2000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is opening) then
                                 // it is likely that there is an error and door did not move from its closed state.
+                                // detach checkDoorCompleted (inside lambda): open-moving watchdog
+                                // failed — abort the longer completion watchdog too.
                                 checkDoorCompleted.detach();
                                 ESP_LOGE(TAG, "Door is supposed to be opening but is not.  Current state: %s", DOOR_STATE(garage_door.current_state));
                                 notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_CLOSED);
@@ -3205,6 +3251,8 @@ GarageDoorCurrentState open_door()
         // We are in a time-to-close delay timeout.
         // Effect of open is to cancel the timeout (leaving door open)
         ESP_LOGI(TAG, "Door assumed to be open, canceling TTC delay timer");
+        // detach TTCtimer: open_door cancels TTC delay (or force-close press
+        // hold). v40/W15: paired with request_force_close_clear() below.
         TTCtimer.detach();
         // v40 (audit W15): if a force-close was using TTCtimer for its
         // press hold, the in-progress flag would otherwise leak — the
@@ -3273,6 +3321,10 @@ void TTCtimerFn(void (*callback)(), bool light)
     }
     else
     {
+        // detach TTCtimer: normal TTC countdown end — TTCiterations hit zero.
+        // The force-close press (if any) has already dispatched on a prior
+        // iteration; this path runs after the press, so no in-flight
+        // forceCloseInProgress to unwind here.
         TTCtimer.detach();
         ESP_LOGI(TAG, "End of function delay timer");
 #ifndef USE_GDOLIB
@@ -3317,11 +3369,32 @@ void TTCtimerFn(void (*callback)(), bool light)
 }
 
 // Call function after ms milliseconds during which we flash and beep
-void delayFnCall(uint32_t ms, void (*callback)())
+//
+// preempt_force_close (default true): if an in-flight force-close was using
+// TTCtimer for its press hold, the .detach() below would orphan
+// forceCloseInProgress (the release callback that would clear it never fires).
+// External callers (door_command_close TTC delay, recovery sync_and_restart,
+// homekit testDelayFn, serialCLI) take the default — TTC arm-fresh preempts
+// in-flight force-close per user direction (QUEUE.md W47 acceptance). The
+// force-close press path itself (send_force_close_press at :2825) calls
+// delayFnCall to schedule its own release; that caller MUST opt out
+// (preempt_force_close=false) or it would tear down its own 2-attempt sequence
+// (forceCloseAttempt resets to 0 before the release callback fires, dropping
+// press 2 silently). Gated under #ifndef USE_GDOLIB because
+// request_force_close_clear is itself USE_GDOLIB-gated; under USE_GDOLIB the
+// force-close path doesn't run, so the parameter is a no-op.
+void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close)
 {
     bool light = userConfig->getTTClight(); // Whether to flash light during delay
 
+    // detach TTCtimer: arm-fresh — clobber any prior TTC delay before re-arming.
     TTCtimer.detach();                 // Terminate existing timer if any
+#ifndef USE_GDOLIB
+    if (preempt_force_close)
+    {
+        request_force_close_clear("delayFnCall arm-fresh during force-close window");
+    }
+#endif
     TTCiterations = ms / TTCinterval;  // Number of times to go through loop
     TTCwasLightOn = garage_door.light; // Current state of light
     ESP_LOGI(TAG, "Start function delay timer for %lums (%d iterations)", ms, TTCiterations);
@@ -3368,6 +3441,9 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
     if (bypass_ttc && TTCtimer.active())
     {
         ESP_LOGI(TAG, "Canceling TTC delay timer for hardwired control");
+        // detach TTCtimer: hardwired close bypass cancels TTC delay (or
+        // force-close press hold). v40/W15: paired with
+        // request_force_close_clear() below.
         TTCtimer.detach();
         // v40 (audit W15): same v17 leak pattern propagated here. If the
         // timer being killed was a force-close press 1 hold, the release
@@ -3392,6 +3468,8 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
         {
             // We are in a time-to-close delay timeout, cancel the timeout
             ESP_LOGI(TAG, "Door in time-to-close delay, request to close ignored, TTC will continue");
+            // detach TTCtimer: site below is in commented-out
+            // /* two closes in-a-row */ block — not analysed (dead code).
             /* two closes in-a-row shoud not cancel TTC? Require an open request to cancel TTC
             ESP_LOGI(TAG, "Close: Canceling TTC delay timer");
             TTCtimer.detach();
@@ -3433,6 +3511,8 @@ GarageDoorCurrentState toggle_door(bool bypass_ttc)
     if (TTCtimer.active())
     {
         ESP_LOGI(TAG, "Canceling TTC delay timer prior to toggle");
+        // detach TTCtimer: hardwired toggle cancels TTC delay (or force-close
+        // press hold). v40/W15: paired with request_force_close_clear() below.
         TTCtimer.detach();
         // v40 (audit W15): third site for the same v17 leak pattern.
         // toggle_door (hardwired control) cancelling TTCtimer can clobber
