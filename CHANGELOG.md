@@ -10,6 +10,20 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.76 (2026-05-08) — HK-FC: door-state safety gate (P0 — fixes unintended door open)
+
+**Critical safety fix.** A redundant `target=Closed` HomeKit characteristic write to an already-closed door under HK-FC mode 2 fired the force-close press packet, which on Sec+1.0 GDOs is a wall-button toggle: pressing while the door is Closed **opens it**. Real-world incident at 2026-05-07T22:31:03 CDT: iOS hub state-sync wrote `target=Closed` to an already-closed door, force-close attempt 1 toggled it open (door at ~Opening when 1500 ms gap fired), attempt 2 toggled it back to Stopped — left the garage door **half-open at night**, until iOS re-triggered close 41 seconds later.
+
+**Fix**: gate `door_command_force_close()` at the entry point on the door's current state. If `CURR_CLOSED` or `CURR_CLOSING` (or unknown 0xFF pre-init), log a `WARN` and return — no press packet, no movement. Only fires the press when door is `CURR_OPEN`, `CURR_OPENING`, or `CURR_STOPPED` — the states where force-close has a meaningful intent.
+
+The fix is at the single dispatch point so it protects **every** force-close caller:
+- HK-FC mode 2 primary tile (the actual incident path)
+- HK-FC mode 1 companion force-close tile (same bug if anyone wired an automation against it)
+- Legacy `/setgdo forceClose=<ms>` POST endpoint used by `homebridge-ratgdo-forceclose`
+- Auto-close TTC fire path (already gates on door=Open, but safer to belt-and-suspenders)
+
+Matches the legacy `close_door()` semantics — close on already-closed = silent no-op, never opens the door. Force-close FSM internals (2-attempt sequence, single-hold, per-mechanic hold-ms) untouched. ESP8266 path unchanged. Build: Flash 96.1%, RAM 26.2%.
+
 ### v3.4.4-forceclose.75 (2026-05-07) — HK-FC: separate hold-ms per mechanic + UI cleanup + logging fixes
 
 User-feedback follow-up to `.74`. Three issues addressed in one PR:
