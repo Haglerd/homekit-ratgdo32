@@ -23,6 +23,15 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 
 
+## Active — log-audit findings (2026-05-08)
+
+### [P0] ~~log-audit-20260508-001~~ — HK-FC mode 2 redundant-close opens already-closed door
+**Status:** done — PR https://github.com/Haglerd/homekit-ratgdo32/pull/117 (merged 2026-05-08, shipped in v3.4.4-forceclose.76)
+**Acceptance:** real-world incident 2026-05-07T22:31:03 — iOS HomeKit hub wrote `target=Closed` to an already-closed door under HK-FC mode 2; pre-fix code dispatched `door_command_force_close()` unconditionally; Sec+1.0 wall-button-press on a Closed door = toggle to Open; door went half-open until iOS re-triggered close 41 s later. Fix: state-gate `door_command_force_close()` at entry — `CURR_CLOSED` / `CURR_CLOSING` / `0xFF` → log `WARN: refusing` and return without sending press. Single dispatch-point gate protects ALL force-close callers (HK-FC mode 2, HK-FC companion tile, `/setgdo forceClose=ms` POST, auto-close TTC fire). Verified working in production at 2026-05-08T07:24:32 (`FORCE CLOSE: refusing — door is already Closed, no action taken`).
+**Notes:** trigger source confirmed as iOS HAP characteristic write (NOT firmware auto-close, NOT homebridge plugin). HomeSpan does not log controller ID; root cause iOS-side likely an automation, scene, or hub state-sync. Fix protects against ALL redundant close requests regardless of source.
+
+---
+
 ## Active — log-audit findings (2026-05-07)
 
 ### [P0] ~~log-audit-20260507-005~~ — BOOT-OOM-MDNS recurring on .65 (PR #89 fix INCOMPLETE — wrong code path)
@@ -51,6 +60,18 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 **Source:** v39 round-3
 **Acceptance:** `iftop`/`tcpdump` measurement of redundant tx; decision to convert or stay.
 **Notes:** estimated ~240 KB/h redundant tx per device — worth measuring before paying complexity cost. Likely closes as non-finding under W48 Conclusion A.
+
+### [P3] HK-FC-MIGRATE — `.74→.75` per-mechanic hold-ms migration heuristic
+**Status:** deferred (low affected-user count, user can fix in web UI in 10 sec)
+**Source:** user incident 2026-05-08 — after OTA from .74 to .75/.76, `forceCloseHoldMs` retained the user's `.74`-era value (12000 ms, set during single-hold testing) instead of being treated as 2-attempt-specific. The user had to manually correct the 2-attempt field to 2500 ms via web UI.
+**Acceptance:** at first .75+ boot, if `forceCloseSingleHold==true` AND `forceCloseHoldMsSingle==default(7000)` AND `forceCloseHoldMs!=default(3500)` → copy `forceCloseHoldMs` into `forceCloseHoldMsSingle`, reset `forceCloseHoldMs` to 3500. Gate on a one-shot NVS flag so it runs once.
+**Notes:** affected-user count is tiny (anyone on .74 who tested single-hold with a non-default hold-ms then OTA'd to .75+). Web UI now shows both fields with explicit labels — easy to spot and fix manually. Risk of heuristic being wrong (overwriting an intentional value) outweighs benefit. Documenting in QUEUE for traceability; not implementing unless field reports show others are affected.
+
+### [P2] HANG-WATCH — `.74` 11-min firmware hang (cause unexplained, not recurring on .75+)
+**Status:** deferred (unreproducible on later firmware; watch for recurrence)
+**Source:** 2026-05-07T16:02-16:13 — `.74` device went silent for ~11 minutes (last log line at 16:02:10, no panic, no watchdog reset, no WiFi disconnect), required power-cycle to recover. `.75` (4h+ clean), `.76` (multiple hours clean) have NOT recurred.
+**Acceptance:** if hang reproduces on `.75`+, enable `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y` in `sdkconfig.defaults` and bisect changes between `.71` (last known clean) and `.74` (first hang). Candidate triggers: bool→int variant migration of `cfg_forceCloseHomeKit` in `.73`, boot-time `comms_refresh_force_close_*` calls added in `.74`, or `setup_comms` re-ordering.
+**Notes:** Per-CPU1 watchdog flip would let any future hard hang produce a reset reason instead of dying silent. Costs nothing if no hang fires. Defer until evidence forces the issue.
 
 ---
 
