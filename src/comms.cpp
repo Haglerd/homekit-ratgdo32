@@ -2988,6 +2988,39 @@ void door_command_force_close(uint32_t hold_ms)
         return;
     }
 
+    // SAFETY GATE: refuse to fire when the door is already in a closed or
+    // closing state. The Sec+1.0 wall-button-press packet that drives
+    // force-close is a TOGGLE on the GDO side: pressing while the door
+    // is Closed makes the door OPEN; pressing while it's Closing stops it
+    // mid-cycle. Neither is what the caller intends when they ask for
+    // "close." A redundant close on an already-closed door must be a no-op.
+    //
+    // Triggered by 2026-05-07T22:31:03 incident: iOS HomeKit hub wrote
+    // TargetDoorState=Closed to an already-closed door in HK-FC mode 2.
+    // Pre-this-fix: force-close fired → press 1 toggled door OPEN →
+    // attempt 2 stopped it half-open. Door sat half-open until iOS
+    // re-triggered close 41 sec later. Half-open garage at night.
+    //
+    // CURR_OPEN, CURR_OPENING, CURR_STOPPED → fire (real force-close intent).
+    // CURR_CLOSED, CURR_CLOSING                → no-op (already there or heading there).
+    // Unknown / pre-init (0xFF)                → no-op for safety (can't reason).
+    //
+    // Protects ALL force-close call sites: HK-FC mode 2 primary tile,
+    // HK-FC companion tile close, /setgdo forceClose=ms POST endpoint,
+    // and the auto-close TTC fire path. close_door() has equivalent
+    // gating in its own legacy implementation.
+    {
+        const GarageDoorCurrentState s = garage_door.current_state;
+        if (s == GarageDoorCurrentState::CURR_CLOSED ||
+            s == GarageDoorCurrentState::CURR_CLOSING ||
+            (uint8_t)s == 0xFF)
+        {
+            ESP_LOGW(TAG, "FORCE CLOSE: refusing — door is already %s, no action taken (close request on a non-open door is a no-op)",
+                     DOOR_STATE(s));
+            return;
+        }
+    }
+
     // Reject overlapping calls — if a sequence is already in flight, a second
     // POST during the press/release/gap windows could stomp the timer state
     // and emit duplicate or partial presses.
