@@ -437,49 +437,43 @@ void LOG::logToBuffer(const char *fmt, va_list args)
 
     TaskHandle_t curTask = xTaskGetCurrentTaskHandle();
 
-    // log-audit-005 (BOOT-OOM-MDNS recurrence): some FreeRTOS tasks
-    // own the lwIP socket layer themselves, so any code path that
-    // re-enters lwIP from inside their context (e.g. `socket()`,
-    // `sendto()`, `connect()`) self-deadlocks or asserts. The lwIP
-    // socket API forwards every call as a tcpip-message to
+    // log-audit-005 (BOOT-OOM-MDNS recurrence) — REDUX FIX (.78):
+    // Some FreeRTOS tasks own the lwIP socket layer themselves; any
+    // code path that re-enters lwIP from inside their context
+    // (`socket()`, `sendto()`, `connect()`) self-deadlocks or asserts.
+    // The lwIP socket API forwards every call as a tcpip-message to
     // `tcpip_thread` and waits for a reply; if the caller IS
-    // `tcpip_thread`, the wait is for itself.
+    // `tcpip_thread`, the wait is for itself → assert + panic.
     //
-    // Reproduction (.65 device, 35 min uptime): mDNS's
-    // `mdns_mem_calloc` fails to allocate a 176 B inbound packet
-    // buffer. mDNS calls `ESP_LOGE("mdns_networking", "Cannot
-    // allocate memory ...")` from inside its UDP receive callback
-    // dispatched on `tiT`. Our esp_log_vprintf hook catches it and
-    // calls `logToSyslog(outLine)` → `WiFiUDP::beginPacket` →
-    // `socket(AF_INET, SOCK_DGRAM, 0)` from inside `tcpip_thread` →
-    // panic with `IllegalInstruction` in `tiT`.
+    // Reproduction (.77 device, ~30 min uptime, 2026-05-09 02:51-06:13):
+    // mDNS's `mdns_mem_calloc` fails to allocate a 176 B inbound packet
+    // buffer ("free heap: 136 bytes" at panic). mDNS calls
+    // `ESP_LOGE("mdns_networking", "Cannot allocate memory ...")` from
+    // inside its UDP receive callback dispatched on `tiT`. Our
+    // esp_log_vprintf hook catches it and calls `logToSyslog(outLine)`
+    // → `WiFiUDP::beginPacket` → `socket(AF_INET, SOCK_DGRAM, 0)` from
+    // inside `tcpip_thread` → `__assert_func` → panic.
     //
-    // Fix: cache the handles for the lwIP / WiFi / system-event
-    // tasks once and skip the SSE broadcast + syslog calls when
-    // the originating task is one of them. The line still gets
-    // captured into the on-device message buffer above, just
-    // doesn't fan out via TCP/UDP. This is mandatory: ESP-IDF can
-    // emit ESP_LOGx from any of these tasks (DHCP, IGMP, IPv6 ND,
-    // lwIP TCP retransmit warnings, WiFi state machine), all of
-    // which are equally lethal under the v0 hook.
-    static TaskHandle_t lwipTaskHandle    = nullptr;
-    static TaskHandle_t wifiTaskHandle    = nullptr;
-    static TaskHandle_t sysEvtTaskHandle  = nullptr;
-    static volatile bool networkTasksResolved = false;
-    if (!__atomic_load_n(&networkTasksResolved, __ATOMIC_ACQUIRE))
-    {
-        // Resolve once; handles are stable for the lifetime of the
-        // task. Multiple tasks may race here on first hit — each
-        // store is independent and idempotent (xTaskGetHandle
-        // returns the same value for everyone).
-        lwipTaskHandle   = xTaskGetHandle("tiT");
-        wifiTaskHandle   = xTaskGetHandle("wifi");
-        sysEvtTaskHandle = xTaskGetHandle("sys_evt");
-        __atomic_store_n(&networkTasksResolved, true, __ATOMIC_RELEASE);
-    }
-    const bool fromNetworkTask = (curTask == lwipTaskHandle && lwipTaskHandle != nullptr) ||
-                                 (curTask == wifiTaskHandle && wifiTaskHandle != nullptr) ||
-                                 (curTask == sysEvtTaskHandle && sysEvtTaskHandle != nullptr);
+    // PR #105 (.71) "fixed" this with `xTaskGetHandle("tiT")` cached
+    // on first call. BROKEN: if the very first ESP_LOGx fires before
+    // the lwIP TCP/IP task is created (early boot), the cache stores
+    // `nullptr`. Subsequent calls FROM tiT then never match the
+    // cached `nullptr` (curTask is the real handle), so the gate
+    // never fires. The user's .77 device hit this ~13 times overnight.
+    //
+    // The redux fix uses `pcTaskGetName(curTask)` and string-compares.
+    // No caching to get wrong; pcTaskGetName is a TCB pointer-deref
+    // (~ns). Names checked: "tiT" (lwIP TCP/IP task), "tcpip_thread"
+    // (alternate lwIP name), "wifi" / "sys_evt" (WiFi + esp-netif
+    // event tasks). All four are equally lethal under the syslog
+    // re-entry pattern.
+    const char *taskName = curTask ? pcTaskGetName(curTask) : nullptr;
+    const bool fromNetworkTask = taskName != nullptr && (
+        strcmp(taskName, "tiT")          == 0 ||
+        strcmp(taskName, "tcpip_thread") == 0 ||
+        strcmp(taskName, "wifi")         == 0 ||
+        strcmp(taskName, "sys_evt")      == 0
+    );
     // Belt-and-suspenders: ESP-IDF can route ISR-deferred logs through
     // us as well. Skip broadcast + syslog on those too.
     if (fromNetworkTask || xPortInIsrContext())

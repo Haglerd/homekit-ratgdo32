@@ -10,6 +10,39 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.78 (2026-05-09) — log-audit-005 REDUX: name-based tiT-task gate (P0 — fixes panic loop)
+
+**Critical P0.** The PR #105 (.71) fix for the BOOT-OOM-MDNS panic was BROKEN — wasn't catching the case it claimed to. User device on `.77` panicked **13 times overnight** (between 02:51 and 06:13 CDT 2026-05-09) with the exact same `mdns_mem_calloc` → `ESP_LOGE` → `logToSyslog` → `socket()` from `tiT` → `__assert_func` chain that PR #105 was supposed to prevent.
+
+**Confirmed crash dump** (from /crashlog on the device):
+
+```
+E (02:16:41.355) mdns_networking: Cannot allocate memory (receive(176), free heap: 136 bytes)
+Crash in task: tiT, at address: 0x4008EBC4
+0x4008EBC4  panic_abort
+0x4008EB89  esp_system_abort
+0x40095705  __assert_func
+0x401E7833  _strerror_r
+0x4010C33F  logToSyslog            ← OUR code, called from tiT
+0x4010C635  LOG::logToBuffer
+0x4010C6F6  esp_log_hook
+0x4009544D  esp_log_va
+0x40172A72  mdns_mem_calloc
+0x40145F99  udp_input
+0x4014956F  ip4_input
+0x4008FB49  vPortTaskWrapper       ← tiT task entry
+```
+
+Identical call-chain shape to the original `.65` panic, just shifted by ASLR/build-relocation.
+
+**Why the .71 fix didn't catch it**: PR #105 cached `xTaskGetHandle("tiT")` on first call to `LOG::logToBuffer`. If the very first `ESP_LOGx` fires BEFORE the lwIP TCP/IP task is created (early boot), `xTaskGetHandle("tiT")` returns `nullptr` and gets cached as null forever. Subsequent calls FROM real-tiT-task then never match (curTask is non-null real handle, cache holds null), so the `fromNetworkTask` check is always false and the syslog re-entry path is never blocked.
+
+**Redux fix**: replace cached-handle compare with `pcTaskGetName(curTask)` + `strcmp`. No caching to get wrong; `pcTaskGetName` is a TCB pointer-deref (~ns). Checks all four task names: `"tiT"` (lwIP TCP/IP task), `"tcpip_thread"` (alternate lwIP name on some IDF versions), `"wifi"` (WiFi task), `"sys_evt"` (esp-netif event task). All four can originate ESP_LOGx that would re-enter lwIP if forwarded to syslog/SSE.
+
+**Why heap fell to 136 bytes**: separate concern. iOS hub state-sync + HomeSpan HAP + mDNS query bursts can momentarily consume nearly all heap. The fact that mDNS *attempts* its 176 B alloc when only 136 B free is a healthy lwIP behavior — the alloc fails, mDNS drops the packet, logs ESP_LOGE, and life continues. **The panic is OUR firmware mishandling that benign log line, NOT mDNS itself.** Heap-pressure mitigation is a separate workstream (HK-FC-MIGRATE / HANG-WATCH queue items track related); this PR fixes the lethal log-fanout re-entry independently.
+
+ESP8266 path unchanged. Force-close FSM untouched. Build: Flash 96.1%, RAM 26.2%.
+
 ### v3.4.4-forceclose.77 (2026-05-08) — HK-FC: rate-limit overlap-rejection log on iOS HK redundant-close bursts
 
 Hygiene fix surfaced from `.76` soak. Field observation 2026-05-08 showed iOS HomeKit / Apple home-hub state-sync periodically firing bursts of redundant `target=Closed` writes — three separate bursts of 6-13 close commands within 1-2 seconds each, all redirected through the HK-FC mode 2 path. Each burst correctly hit the `door_command_force_close` overlap-rejection guard (the `__atomic_test_and_set(&forceCloseInProgress)` check), but each rejection logged a per-event `WARN` line — flooding the 16 KB on-device ring buffer and wrapping preceding context out before `/showlog` could be fetched.
