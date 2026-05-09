@@ -10,6 +10,22 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.77 (2026-05-08) — HK-FC: rate-limit overlap-rejection log on iOS HK redundant-close bursts
+
+Hygiene fix surfaced from `.76` soak. Field observation 2026-05-08 showed iOS HomeKit / Apple home-hub state-sync periodically firing bursts of redundant `target=Closed` writes — three separate bursts of 6-13 close commands within 1-2 seconds each, all redirected through the HK-FC mode 2 path. Each burst correctly hit the `door_command_force_close` overlap-rejection guard (the `__atomic_test_and_set(&forceCloseInProgress)` check), but each rejection logged a per-event `WARN` line — flooding the 16 KB on-device ring buffer and wrapping preceding context out before `/showlog` could be fetched.
+
+**Fix**: rate-limit the overlap-rejection log to one line per 5 s window, with a suppressed-count summary on the next post-window fire — same `.72` SEC1 TX-fail / v46 SSE buffer-full pattern. First rejection logs immediately; subsequent rejections within 5 s are counted silently; next rejection after the window emits:
+
+```
+W FORCE CLOSE: ignoring request — a sequence is already in progress [+12 suppressed in last 1850ms — iOS HomeKit redundant-close burst]
+```
+
+**Defense semantics unchanged** — every redundant request still gets rejected by the atomic test-and-set guard. Only the log cadence drops. Force-close FSM internals untouched. ESP8266 path unchanged.
+
+**About the iOS-side cause**: not addressable from firmware. Likely an iOS Home automation duplicated across multiple paired controllers (iPhone + iPad + Apple TV + HomePod each firing the same close trigger), Apple home-hub state-sync retrying writes when target!=current, or a HomeKit scene with multiple participants. The firmware's overlap-rejection guard correctly prevents double-toggle in all cases — door closes once cleanly. Document for users to investigate iOS Home → Automations if they see the warn-burst pattern.
+
+Build: Flash 96.1%, RAM 26.2%.
+
 ### v3.4.4-forceclose.76 (2026-05-08) — HK-FC: door-state safety gate (P0 — fixes unintended door open)
 
 **Critical safety fix.** A redundant `target=Closed` HomeKit characteristic write to an already-closed door under HK-FC mode 2 fired the force-close press packet, which on Sec+1.0 GDOs is a wall-button toggle: pressing while the door is Closed **opens it**. Real-world incident at 2026-05-07T22:31:03 CDT: iOS hub state-sync wrote `target=Closed` to an already-closed door, force-close attempt 1 toggled it open (door at ~Opening when 1500 ms gap fired), attempt 2 toggled it back to Stopped — left the garage door **half-open at night**, until iOS re-triggered close 41 seconds later.

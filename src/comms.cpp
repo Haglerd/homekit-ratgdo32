@@ -3036,7 +3036,40 @@ void door_command_force_close(uint32_t hold_ms)
     // with the __atomic_clear in clear_force_close_state below.
     if (__atomic_test_and_set(&forceCloseInProgress, __ATOMIC_ACQUIRE))
     {
-        ESP_LOGW(TAG, "FORCE CLOSE: ignoring request — a sequence is already in progress");
+        // Rate-limit the per-rejection log. iOS HomeKit / Apple home-hub
+        // state-sync periodically fires bursts of redundant target=Closed
+        // writes (observed 2026-05-08: 3 separate bursts of 6-13 close
+        // commands within 1-2 seconds each). Each rejection is correctly
+        // deflected here, but the per-rejection ESP_LOGW floods the
+        // 16 KB on-device ring buffer and wraps preceding context out
+        // before /showlog can be fetched. Same v46 / .72 pattern as the
+        // SSE buffer-full and SEC1 TX-fail rate-limits: log the first
+        // rejection immediately, suppress for 5 s, then emit a summary
+        // line with the suppressed count on the next post-window fire.
+        // Defense semantics unchanged — only log cadence drops.
+        static uint32_t lastIgnoreLogMs = 0;
+        static uint32_t ignoreSuppressed = 0;
+        const uint32_t nowMs = (uint32_t)_millis();
+        const uint32_t deltaMs = (lastIgnoreLogMs == 0) ? UINT32_MAX
+                                                        : (nowMs - lastIgnoreLogMs);
+        if (deltaMs > 5000UL)
+        {
+            if (ignoreSuppressed > 0)
+            {
+                ESP_LOGW(TAG, "FORCE CLOSE: ignoring request — a sequence is already in progress [+%u suppressed in last %ums — iOS HomeKit redundant-close burst]",
+                         (unsigned)ignoreSuppressed, (unsigned)deltaMs);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "FORCE CLOSE: ignoring request — a sequence is already in progress");
+            }
+            lastIgnoreLogMs = nowMs;
+            ignoreSuppressed = 0;
+        }
+        else
+        {
+            ignoreSuppressed++;
+        }
         return;
     }
     // We now own the busy flag (TAS atomically set it).
