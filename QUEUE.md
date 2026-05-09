@@ -8,25 +8,7 @@ _(none queued)_
 
 ---
 
-## Deferred — need measurement / soak data first
-
-### [P3] W25 — `web_loop()` 10/sec rate limit on `server.handleClient()`
-**Status:** deferred (needs soak data)
-**Source:** v39 round-3
-**Acceptance:** burst-reconnect-storm soak data demonstrating impact; either remove throttle or scope per-IP.
-**Notes:** mechanism real, impact unverified. No field evidence today.
-
-### [P3] W40 — `build_status_json` 11 fork-added fields not using `_C`
-**Status:** deferred (needs bandwidth measurement)
-**Source:** v39 round-3
-**Acceptance:** `iftop`/`tcpdump` measurement of redundant tx; decision to convert or stay.
-**Notes:** estimated ~240 KB/h redundant tx per device — worth measuring before paying complexity cost. Likely closes as non-finding under W48 Conclusion A.
-
-### [P3] HK-FC-MIGRATE — `.74→.75` per-mechanic hold-ms migration heuristic
-**Status:** deferred (low affected-user count, user can fix in web UI in 10 sec)
-**Source:** user incident 2026-05-08 — after OTA from .74 to .75/.76, `forceCloseHoldMs` retained the user's `.74`-era value (12000 ms, set during single-hold testing) instead of being treated as 2-attempt-specific. The user had to manually correct the 2-attempt field to 2500 ms via web UI.
-**Acceptance:** at first .75+ boot, if `forceCloseSingleHold==true` AND `forceCloseHoldMsSingle==default(7000)` AND `forceCloseHoldMs!=default(3500)` → copy `forceCloseHoldMs` into `forceCloseHoldMsSingle`, reset `forceCloseHoldMs` to 3500. Gate on a one-shot NVS flag so it runs once.
-**Notes:** affected-user count is tiny. Web UI now shows both fields with explicit labels — easy to spot and fix manually. Risk of heuristic being wrong (overwriting an intentional value) outweighs benefit. Not implementing unless field reports show others are affected.
+## Deferred — soak-pending only
 
 ### [P3] HEAP-PRESSURE-WATCH — `mdns_networking: Cannot allocate memory` events under sustained operation
 **Status:** deferred (`.78` fixes the lethal symptom; root cause is heap pressure)
