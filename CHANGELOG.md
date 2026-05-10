@@ -10,6 +10,25 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.79 (2026-05-09) — log-audit-006: gate `mdns` task + heap-floor short-circuit (P0 — fixes .78 panic recurrence)
+
+**Critical P0 follow-up.** `.78` (PR #122) fixed the `tiT` re-entry chain but the device still panicked once after ~10h46m uptime. Crash dump showed the same neighborhood (`0x4008EBBC` vs `.77`'s `0x4008EBC4`) but the originating task was `mdns`, not `tiT`. The mDNS service task owns its own RX path and was not in PR #122's gated set.
+
+**Pre-panic conditions** (from syslog):
+- `19:54:50` `mdns_networking: Cannot allocate memory (receive(176), free heap: 380 bytes)`
+- `19:55:26` panic on task `mdns` at `0x4008EBBC` (IllegalInstruction → abort path)
+- Boot at `19:55:35` with `restart reason: 4` (ESP_RST_PANIC)
+
+**Fix (two layers, both in `LOG::logToBuffer`):**
+
+1. **Add `"mdns"` to the network-task name set.** Closes the immediate hole — the mDNS task can no longer fan out its own OOM `ESP_LOGE` into a `socket()` call from inside its own context.
+
+2. **Heap-floor short-circuit (`SYSLOG_HEAP_FLOOR_BYTES = 4096`).** Defense-in-depth for any task we missed. Even on a non-gated task, opening a UDP socket needs ~1 KB of heap for the lwIP control block + pbuf; below ~4 KB, `socket()` either returns ENOMEM (cheap) or asserts in a low-level alloc path (panic). When free heap is below the floor, drop the network fan-out entirely — the line is still in the on-device ring buffer for `/showlog`.
+
+**Acceptance**: `.79` runs 24h+ clean across iOS-quiet stretches AND mDNS OOM bursts without panic.
+
+**Files**: `src/log.cpp` (gate-mdns + heap floor), `docs/manifest.json` (version bump).
+
 ### v3.4.4-forceclose.78 (2026-05-09) — log-audit-005 REDUX: name-based tiT-task gate (P0 — fixes panic loop)
 
 **Critical P0.** The PR #105 (.71) fix for the BOOT-OOM-MDNS panic was BROKEN — wasn't catching the case it claimed to. User device on `.77` panicked **13 times overnight** (between 02:51 and 06:13 CDT 2026-05-09) with the exact same `mdns_mem_calloc` → `ESP_LOGE` → `logToSyslog` → `socket()` from `tiT` → `__assert_func` chain that PR #105 was supposed to prevent.
