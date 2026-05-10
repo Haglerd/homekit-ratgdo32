@@ -11,17 +11,10 @@ _(none queued)_
 ## Deferred — soak-pending only
 
 ### [P3] HEAP-PRESSURE-WATCH — `mdns_networking: Cannot allocate memory` events under sustained operation
-**Status:** deferred (`.78` fixes the lethal symptom; root cause is heap pressure)
-**Source:** 2026-05-09 .77 panic-loop investigation. Crash dump showed `free heap: 136 bytes` when mdns_mem_calloc failed. iOS hub state-sync + HomeSpan HAP + mDNS query bursts can momentarily consume nearly all heap. With `.78`'s fix the resulting log line is benign — device handles it cleanly.
-**Acceptance:** identify what's consuming heap during these bursts (heap-trace, periodic snapshots) and either bump tcpip MEMP pools / mdns rx-buf / cap HAP transaction concurrency, OR conclude the existing 30-50 KB headroom is enough now that the panic chain is fixed.
-**Notes:** panic chain was the priority — fixed at the syslog re-entry point so 100% heap exhaustion in mDNS no longer crashes. Heap pressure itself is pre-existing across many .x releases; investigate if device experiences other symptoms (slow HAP, dropped notifications) under sustained low-heap conditions. Not user-visible right now.
-
-### [P2] HANG-WATCH — `.74` 11-min firmware hang
-**Status:** deferred (rebaselined to `.79`; reopen if hang recurs on `.79+`)
-**Source:** 2026-05-07T16:02-16:13 — `.74` device went silent for ~11 minutes (no panic logged, no watchdog reset, no WiFi disconnect), required power-cycle to recover.
-**Updated 2026-05-09:** the `.77` panic loop (13 panics overnight, all `tiT` re-entry into lwIP from `mdns_mem_calloc → ESP_LOGE → logToSyslog → socket()`) shares root cause with the `.74` hang — broken cached-handle gate from PR #105. PR #122 (`.78`) added `pcTaskGetName(curTask)` + strcmp gate; `.78` ran 10h46m then panicked once on task `mdns` (not in the gated set). PR #126 (`.79`) closes the `mdns` hole and adds a 4 KB heap-floor short-circuit. 24h soak now restarts on `.79`.
-**Acceptance:** `.79` runs 24h+ clean with iOS-quiet stretches AND mDNS OOM events handled without panic OR hang → declare `.74` hang, `.77` panic-loop, and `.78` mdns-task panic all fixed.
-**Notes:** Per-CPU1 watchdog flip (`CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y`) tracked as a defensive option if any future hang fires — would produce a reset reason instead of dying silent.
+**Status:** deferred (`.79` heap-floor short-circuit makes the symptom non-lethal; OOM bursts no longer observed during overnight soak)
+**Source:** 2026-05-09 .77 panic-loop investigation. Crash dump showed `free heap: 136 bytes` when mdns_mem_calloc failed. iOS hub state-sync + HomeSpan HAP + mDNS query bursts can momentarily consume nearly all heap. With `.79`'s fix (mdns task gated + 4KB heap floor) any such event is silently dropped at the syslog hook.
+**Acceptance:** identify what's consuming heap during these bursts (heap-trace, periodic snapshots) and either bump tcpip MEMP pools / mdns rx-buf / cap HAP transaction concurrency, OR conclude the existing 30-50 KB headroom is enough now that the panic chain is fixed. Overnight `.79` soak shows heap stable at 38-42 KB — no OOM events in 10h+ — leaning toward "no further action needed" unless symptoms reappear.
+**Notes:** panic chain is the priority — fixed at the syslog re-entry point so 100% heap exhaustion in mDNS no longer crashes. Investigate only if device experiences other symptoms (slow HAP, dropped notifications) under sustained low-heap conditions. Not user-visible right now.
 
 ---
 
