@@ -17,10 +17,10 @@ _(none queued)_
 **Notes:** panic chain was the priority — fixed at the syslog re-entry point so 100% heap exhaustion in mDNS no longer crashes. Heap pressure itself is pre-existing across many .x releases; investigate if device experiences other symptoms (slow HAP, dropped notifications) under sustained low-heap conditions. Not user-visible right now.
 
 ### [P2] HANG-WATCH — `.74` 11-min firmware hang
-**Status:** deferred (likely fixed by `.78` redux gate; reopen if hang recurs on `.78+`)
+**Status:** deferred (rebaselined to `.79`; reopen if hang recurs on `.79+`)
 **Source:** 2026-05-07T16:02-16:13 — `.74` device went silent for ~11 minutes (no panic logged, no watchdog reset, no WiFi disconnect), required power-cycle to recover.
-**Updated 2026-05-09:** the `.77` panic loop (13 panics overnight, all `tiT` re-entry into lwIP from `mdns_mem_calloc → ESP_LOGE → logToSyslog → socket()`) shares root cause with the `.74` hang — broken cached-handle gate from PR #105. PR #122 (`.78`) replaces the broken cache with `pcTaskGetName(curTask)` + strcmp. Strongly expected to also resolve the `.74` hang shape.
-**Acceptance:** `.78` runs 24h+ clean with iOS-quiet stretches AND mDNS OOM events handled without panic OR hang → declare both `.74` hang and `.77` panic-loop fixed. If `.78` hangs in the same shape, escalate.
+**Updated 2026-05-09:** the `.77` panic loop (13 panics overnight, all `tiT` re-entry into lwIP from `mdns_mem_calloc → ESP_LOGE → logToSyslog → socket()`) shares root cause with the `.74` hang — broken cached-handle gate from PR #105. PR #122 (`.78`) added `pcTaskGetName(curTask)` + strcmp gate; `.78` ran 10h46m then panicked once on task `mdns` (not in the gated set). PR #126 (`.79`) closes the `mdns` hole and adds a 4 KB heap-floor short-circuit. 24h soak now restarts on `.79`.
+**Acceptance:** `.79` runs 24h+ clean with iOS-quiet stretches AND mDNS OOM events handled without panic OR hang → declare `.74` hang, `.77` panic-loop, and `.78` mdns-task panic all fixed.
 **Notes:** Per-CPU1 watchdog flip (`CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y`) tracked as a defensive option if any future hang fires — would produce a reset reason instead of dying silent.
 
 ---
