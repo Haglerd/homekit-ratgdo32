@@ -465,18 +465,36 @@ void LOG::logToBuffer(const char *fmt, va_list args)
     // No caching to get wrong; pcTaskGetName is a TCB pointer-deref
     // (~ns). Names checked: "tiT" (lwIP TCP/IP task), "tcpip_thread"
     // (alternate lwIP name), "wifi" / "sys_evt" (WiFi + esp-netif
-    // event tasks). All four are equally lethal under the syslog
-    // re-entry pattern.
+    // event tasks), "mdns" (mDNS service task — owns its own RX path
+    // and asserts the same way under the OOM→ESP_LOGE→socket() chain).
+    //
+    // log-audit-006 (.78 recurrence): `.78` panicked once after ~10h46m
+    // uptime in task `mdns` at 0x4008EBBC, the same neighborhood as the
+    // `.77` `tiT` chain. mDNS's parser fired `ESP_LOGE` from inside its
+    // own service task (free heap 276 B) — `mdns` was not in the gated
+    // task set. Adding it here. Plus a heap-floor short-circuit below
+    // catches any future task we missed: when free heap is below the
+    // socket+UDP buffer minimum, `socket()` will fail-or-assert
+    // regardless of which task we're on.
     const char *taskName = curTask ? pcTaskGetName(curTask) : nullptr;
     const bool fromNetworkTask = taskName != nullptr && (
         strcmp(taskName, "tiT")          == 0 ||
         strcmp(taskName, "tcpip_thread") == 0 ||
         strcmp(taskName, "wifi")         == 0 ||
-        strcmp(taskName, "sys_evt")      == 0
+        strcmp(taskName, "sys_evt")      == 0 ||
+        strcmp(taskName, "mdns")         == 0
     );
+    // Defense-in-depth: even on a non-gated task, attempting to open
+    // a UDP socket needs ~1 KB of heap for the lwIP control block +
+    // pbuf. Below ~4 KB we're in the danger zone where `socket()` /
+    // `sendto()` either return ENOMEM (cheap) or assert in a low-level
+    // alloc path (panic). Drop the network fan-out; the line is in the
+    // ring buffer above for /showlog observability.
+    constexpr size_t SYSLOG_HEAP_FLOOR_BYTES = 4096;
+    const bool heapStarved = esp_get_free_heap_size() < SYSLOG_HEAP_FLOOR_BYTES;
     // Belt-and-suspenders: ESP-IDF can route ISR-deferred logs through
     // us as well. Skip broadcast + syslog on those too.
-    if (fromNetworkTask || xPortInIsrContext())
+    if (fromNetworkTask || heapStarved || xPortInIsrContext())
     {
         // Drop just the network fan-out; the line is already in the
         // on-device ring buffer (Serial + msgBuffer above) so we
