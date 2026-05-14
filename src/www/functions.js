@@ -11,6 +11,13 @@ var serverStatus = {};          // object into which all server status is held.
 var checkHeartbeat = undefined; // setTimeout for heartbeat timeout
 var evtSource = undefined;      // for Server Sent Events (SSE)
 var delayStatusFn = [];         // to keep track of possible checkStatus timeouts
+// Auto-invoke checkVersion only once per page load. SSE drops post-OTA
+// cause checkStatus to re-fire (correctly — to re-subscribe + refresh
+// status), but that path doesn't need to re-hit api.github.com every
+// time. Burns rate-limit budget and visually flashes the dots animation
+// on every retry. Manual "Check for update" button calls checkVersion
+// directly and bypasses this guard.
+var versionCheckedOnce = false;
 // v51: local uptime ticker — anchors on every authoritative status
 // update from the device and increments the displayed counter every
 // second between updates. Eliminates dependence on SSE for "is the
@@ -939,7 +946,10 @@ async function checkStatus() {
                 // Hack because firmware uses v0.0.0 and 0.0.0 for different purposes.
                 serverStatus.firmwareVersion = "v" + serverStatus.firmwareVersion;
                 setElementsFromStatus(serverStatus);
-                checkVersion(); // call this only after we have retrieved status from server
+                if (!versionCheckedOnce) {
+                    versionCheckedOnce = true;
+                    checkVersion(); // GitHub call — once per page load; manual button still re-invokes.
+                }
             })
             .catch((error) => {
                 console.warn(`Promise rejection error fetching status from RATGDO, try again in 5 seconds: ${error}`);
@@ -1065,12 +1075,15 @@ async function checkVersion(progress = "dotdot1") {
     });
     const releases = await response.json();
     if (response.status !== 200) {
-        // We have probably hit the GitHub API rate limits (60 per hour for non-authenticated)
+        // 403/429 = rate-limited (60 req/hr unauthenticated, easy to hit
+        // right after a release). Other statuses = network / outage.
         clearInterval(aniDots);
         spanDots.innerHTML = "";
-        versionElem.innerHTML = "";
-        versionElem2.innerHTML = "";
-        console.warn("Error retrieving status from GitHub" + releases.message);
+        const rateLimited = (response.status === 403 || response.status === 429);
+        const errMsg = rateLimited ? "Unable to check (GitHub rate-limited)" : "Unable to check for updates";
+        versionElem.innerHTML = errMsg;
+        versionElem2.innerHTML = errMsg;
+        console.warn(`Error retrieving status from GitHub (status ${response.status}): ${releases.message}`);
         return;
     }
 
