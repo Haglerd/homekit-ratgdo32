@@ -10,6 +10,16 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.82 (2026-05-13) — UI: once-per-page-load version check + rate-limit error message
+
+Two web UI bugs surfaced by the `.80 → .81` OTA soak:
+
+**1. `checkVersion()` was being re-invoked on every SSE reconnect.** `checkStatus()` calls `checkVersion()` inside the `status.json` `.then()`, and `checkStatus()` is correctly called from SSE error/timeout handlers to re-establish the subscription. Post-OTA the device's SSE stack flaps for 2–3 min during the early-boot bring-up (HomeKit init + GDO discovery + slot bring-up), so `checkVersion()` fired every 1–3 seconds — burning GitHub API rate-limit (60 req/hr unauthenticated) and visually flashing the dots animation. Now: `versionCheckedOnce` module-level flag gates the auto-call. The manual "Check for update" button bypasses the guard and re-invokes directly.
+
+**2. Rate-limit error path showed blank instead of explanation.** Pre-`.82`, `checkVersion()`'s error path cleared `versionElem` to blank — leaving the user staring at empty space under "Firmware:" with no indication of why. Now: shows `"Unable to check (GitHub rate-limited)"` on 403/429 and `"Unable to check for updates"` on other errors.
+
+**Files**: `src/www/functions.js`, `docs/manifest.json`. No firmware behavior change.
+
 ### v3.4.4-forceclose.81 (2026-05-13) — UI: clear version-check dots animation on GitHub API error path
 
 `checkVersion()` (`src/www/functions.js`) starts a `dotDotDot` `setInterval` to animate dots under the firmware version while the GitHub releases API fetch is in flight. The success path at line 1139 cleared the interval; the error path at lines 1067-1073 returned early WITHOUT clearing it, so on GitHub API rate-limit (60 req/hr unauthenticated — easy to hit right after a release tag when the dev's browser + auto-release workflow are both polling) the dots would animate forever, growing then resetting every 10s.
