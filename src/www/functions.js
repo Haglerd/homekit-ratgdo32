@@ -1066,6 +1066,8 @@ async function checkVersion(progress = "dotdot1") {
     const releases = await response.json();
     if (response.status !== 200) {
         // We have probably hit the GitHub API rate limits (60 per hour for non-authenticated)
+        clearInterval(aniDots);
+        spanDots.innerHTML = "";
         versionElem.innerHTML = "";
         versionElem2.innerHTML = "";
         console.warn("Error retrieving status from GitHub" + releases.message);
