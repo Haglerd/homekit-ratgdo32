@@ -10,6 +10,14 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.81 (2026-05-13) — UI: clear version-check dots animation on GitHub API error path
+
+`checkVersion()` (`src/www/functions.js`) starts a `dotDotDot` `setInterval` to animate dots under the firmware version while the GitHub releases API fetch is in flight. The success path at line 1139 cleared the interval; the error path at lines 1067-1073 returned early WITHOUT clearing it, so on GitHub API rate-limit (60 req/hr unauthenticated — easy to hit right after a release tag when the dev's browser + auto-release workflow are both polling) the dots would animate forever, growing then resetting every 10s.
+
+**Fix**: add `clearInterval(aniDots)` + clear `spanDots.innerHTML` to the error-path early-return. One-line UX bug, no firmware behavior change.
+
+**Files**: `src/www/functions.js`, `docs/manifest.json`.
+
 ### v3.4.4-forceclose.80 (2026-05-13) — HK-FC: gate release callback on `forceCloseInProgress` (log-audit-20260513-007, P1)
 
 **P1 cleanup of a force-close state-machine race surfaced by the 18h post-`.79` soak.**
