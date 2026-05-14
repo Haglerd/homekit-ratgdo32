@@ -4,7 +4,12 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active
 
-_(none queued)_
+### [P1] log-audit-20260513-007 — force-close release callback runs after `clear_force_close_state` → counter=0 misattribution
+**Status:** fixed in working tree (pending soak)
+**Source:** log-audit 2026-05-13 (Pi syslog window 2026-05-13T06:03Z -> 2026-05-14T00:22Z, 18h, 1440 lines post-checkpoint)
+**Issue:** (not filed)
+**Acceptance:** force-close release callback short-circuits when `forceCloseInProgress` was cleared mid-hold; no `release sent (2-attempt mechanic, attempt 0/2)` log; 7+ force-close sequences over 24h soak with no door-reverses-after-close-command behaviour.
+**Notes:** P1 user-visible failure. At 2026-05-13T18:45:33 CDT, HK close issued, door began closing (Open->Closing at 36.784), then physically reversed to Opening at 39.837 — door ended back at Open instead of Closed. Root cause: `send_force_close_release_then_maybe_retry` (comms.cpp:2813) does NOT re-check `forceCloseInProgress` at entry. The `door=Closing detected` path at comms.cpp:1122 fires `clear_force_close_state` (counter -> 0, inProgress -> false) mid-hold; the in-flight `delayFnCall`-scheduled release callback still runs, sees `forceCloseAttempt == 0`, falls through the "skip attempt 2" gate at line 2849 (`forceCloseAttempt >= 1 && CURR_CLOSING`), and schedules a phantom attempt 1/2. The gap-arm drain at line 2790 correctly drops the second press (re-checks inProgress), so no phantom press fires — but the misleading log + the release-packet-during-motion still leaves the GDO in a state where it reverses. **State-machine touch — needs human planning per CLAUDE.md hard constraint.** Compare working 10:58 sequence where door stayed Open until *after* release fired (counter correctly read as 1). Window: 1 of 4 FC sequences raced this way (08:59 OK, 10:58 OK, 17:58 OK silent-second-press, 18:45 RACE). Evidence in checkpoint notes. Auto-fix-eligibility: **needs-human-planning**.
 
 ---
 

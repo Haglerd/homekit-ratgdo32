@@ -2812,6 +2812,17 @@ void force_close_drain_pending_clear()
 
 static void send_force_close_release_then_maybe_retry()
 {
+    // log-audit-20260513-007: re-check forceCloseInProgress at callback entry.
+    // clear_force_close_state may have run on the loopTask drain (door=Closing
+    // observed during our hold) between delayFnCall scheduling and this
+    // callback firing — that path zeroes forceCloseAttempt + inProgress.
+    // We MUST still send the release packet (pairs with the press; skipping
+    // it would leave the GDO observing an indefinite wall-button hold), but
+    // the downstream "attempt N/2" log and attempt-2 scheduling must be
+    // suppressed — otherwise we get a phantom "attempt 0/2" log line and an
+    // attempt-2 arm that the drain drops anyway.
+    const bool stillInProgress = __atomic_load_n(&forceCloseInProgress, __ATOMIC_ACQUIRE);
+
     PacketData data;
     data.type = PacketDataType::DoorAction;
     data.value.door_action.action = DoorAction::Close;
@@ -2824,7 +2835,7 @@ static void send_force_close_release_then_maybe_retry()
     if (!txQueuePush(&pkt_ac))
     {
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release");
-        request_force_close_clear("tx queue full on release");
+        if (stillInProgress) request_force_close_clear("tx queue full on release");
         return;
     }
     // Sec+1.0 normally sends release twice for reliability — preserve that here too.
@@ -2833,6 +2844,13 @@ static void send_force_close_release_then_maybe_retry()
         ESP_LOGE(TAG, "FORCE CLOSE: tx queue full on release retry");
     }
     send_get_status();
+
+    if (!stillInProgress)
+    {
+        ESP_LOGI(TAG, "FORCE CLOSE: release sent, sequence already cleared (door began Closing during hold)");
+        return;
+    }
+
     if (forceCloseSingleHoldCached)
     {
         ESP_LOGI(TAG, "FORCE CLOSE: release sent (single-hold mechanic)");
