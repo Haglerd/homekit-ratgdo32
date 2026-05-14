@@ -10,6 +10,18 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.80 (2026-05-13) — HK-FC: gate release callback on `forceCloseInProgress` (log-audit-20260513-007, P1)
+
+**P1 cleanup of a force-close state-machine race surfaced by the 18h post-`.79` soak.**
+
+At 2026-05-13T18:45 CDT, `send_force_close_release_then_maybe_retry` (esp_timer task, fires ~hold_ms after press scheduling) ran AFTER `clear_force_close_state` had already zeroed `forceCloseAttempt` + cleared `forceCloseInProgress` — the door reached `CURR_CLOSING` during the hold, `comms.cpp:1122` fired the unconditional unwind, and the in-flight release callback then mis-logged `"release sent (2-attempt mechanic, attempt 0/2)"` and armed a phantom attempt-2 (correctly dropped by the gap-arm drain at `ratgdo.cpp:449`).
+
+**Fix:** ACQUIRE-load `forceCloseInProgress` at release-callback entry. Always send the release packet (must pair with the press; skipping would leave the GDO observing an indefinite wall-button hold), but suppress the "attempt N/2" log + attempt-2 scheduling when state was cleared upstream. All existing force-close paths (single-hold, 2-attempt success, 2-attempt schedule) take the `stillInProgress=true` branch and behave identically to `.79`.
+
+**Files**: `src/comms.cpp` (release-callback entry gate), `docs/manifest.json` (version bump).
+
+**Build**: ESP32 Flash 96.3% / RAM 26.2% — no delta from `.79`. ESP8266 unaffected (non-`USE_GDOLIB` branch).
+
 ### v3.4.4-forceclose.79 (2026-05-09) — log-audit-006: gate `mdns` task + heap-floor short-circuit (P0 — fixes .78 panic recurrence)
 
 **Critical P0 follow-up.** `.78` (PR #122) fixed the `tiT` re-entry chain but the device still panicked once after ~10h46m uptime. Crash dump showed the same neighborhood (`0x4008EBBC` vs `.77`'s `0x4008EBC4`) but the originating task was `mdns`, not `tiT`. The mDNS service task owns its own RX path and was not in PR #122's gated set.
