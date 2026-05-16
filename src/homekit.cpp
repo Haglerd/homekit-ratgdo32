@@ -532,6 +532,33 @@ static void hap_controller_change_cb()
 constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 180000; // 180s
 static Ticker homekitHealthTicker;
 
+#ifndef ESP8266
+// log-audit-010: adaptive sampler cadence — drops to a 30s interval when
+// free heap falls below the watermark, holds fast for 5 min after recovery
+// so we don't oscillate. Visibility for transient heap dips that hide
+// between the default 180s samples (log-audit found heap_min ~6.4 KB on a
+// 180s tick with no obvious upstream pressure event in the prior window).
+//
+// Threshold rationale:
+//   * HEAP_WATERMARK = 20000 — well above SYSLOG_HEAP_FLOOR_BYTES (4096,
+//     log.cpp) so we start fast-sampling BEFORE the syslog-floor kicks in
+//     and we lose the network fan-out for diagnostic lines.
+//   * INTERVAL_FAST_MS = 30000 — 6x finer than the default; still well
+//     under any watchdog threshold (minutes).
+//   * FAST_DURATION_MS = 300000 — 10 fast samples worth of trailing
+//     visibility past recovery; prevents hysteresis flap if heap bounces
+//     across the watermark.
+constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_FAST_MS = 30000;
+constexpr uint32_t HOMEKIT_HEALTH_HEAP_WATERMARK   = 20000;
+constexpr uint32_t HOMEKIT_HEALTH_FAST_DURATION_MS = 300000;
+// NOT static — web.cpp's /heap handler externs this for the
+// sampler_interval_ms field. Volatile + atomic ops because writes
+// happen from esp_timer task (homekit_health_log Ticker callback)
+// and reads happen from loopTask (HTTP handler dispatch).
+volatile uint32_t currentHealthIntervalMs = HOMEKIT_HEALTH_INTERVAL_MS;
+static _millis_t fastModeEntryMs = 0;
+#endif
+
 // Self-healing watchdog. Settings cached at boot + on settings-save
 // (via homekit_refresh_watchdog_config) — Ticker callback reads cached
 // values, no userConfig mutex inside the callback. Recovery escalation
@@ -658,7 +685,7 @@ static void homekit_health_log()
     //                     fragmentation buildup)
     static _millis_t lastTickMs = 0;
     int32_t tickDriftMs = 0;
-    if (lastTickMs) tickDriftMs = (int32_t)(((uint32_t)_millis() - (uint32_t)lastTickMs) - HOMEKIT_HEALTH_INTERVAL_MS);
+    if (lastTickMs) tickDriftMs = (int32_t)((int64_t)(_millis() - lastTickMs) - (int64_t)HOMEKIT_HEALTH_INTERVAL_MS);
     lastTickMs = _millis();
     // Instrumentation counters (W41: declarations in src/instrumentation.h):
     //   logMtxMaxWaitMs      : max log mutex wait, see log.cpp
@@ -859,6 +886,65 @@ static void homekit_health_log()
                  (unsigned)hkConsecutiveHealthyTicks, lastReadAgo);
         hkRecoverAttempts = 0;
     }
+
+#ifndef ESP8266
+    // log-audit-010: adaptive cadence — react to transient heap dips that
+    // hide between 180s ticks. Below the watermark we sample every 30s for
+    // up to 5 min after recovery; otherwise we hold the default 180s.
+    //
+    // Context: this runs in the esp_timer task (arduino-esp32 Ticker
+    // dispatches there — see v43/audit-W18 comment above). detach() +
+    // attach_ms() from within the callback re-arms the underlying
+    // esp_timer via esp_timer_stop / esp_timer_start_periodic, which is
+    // documented safe to call from inside the timer's own callback.
+    //
+    // All deltas unsigned (uint64_t cast); never (int32_t)(now - past) —
+    // _millis_t is int64 on ESP32 so a cross-callback delta math bug here
+    // would not be a 25-day rollover but a stricter signedness audit.
+    {
+        uint32_t freeHeapNow = esp_get_free_heap_size();
+        _millis_t now = _millis();
+        uint32_t desired;
+        if (freeHeapNow < HOMEKIT_HEALTH_HEAP_WATERMARK)
+        {
+            // Below watermark — (re-)enter fast mode and refresh the
+            // hold timer. Re-arming on every tick while we're under
+            // pressure means recovery is measured from the LAST dip,
+            // not the first.
+            fastModeEntryMs = now;
+            desired = HOMEKIT_HEALTH_INTERVAL_FAST_MS;
+        }
+        else if (fastModeEntryMs != 0 &&
+                 (uint64_t)(now - fastModeEntryMs) < (uint64_t)HOMEKIT_HEALTH_FAST_DURATION_MS)
+        {
+            // Heap recovered but we're still inside the trailing-visibility
+            // window. Hold fast.
+            desired = HOMEKIT_HEALTH_INTERVAL_FAST_MS;
+        }
+        else
+        {
+            // Fully out of fast mode — clear the entry timestamp so the
+            // next dip cleanly re-triggers the fast-mode window from
+            // its own first-tick timestamp.
+            fastModeEntryMs = 0;
+            desired = HOMEKIT_HEALTH_INTERVAL_MS;
+        }
+
+        uint32_t current = __atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED);
+        if (desired != current)
+        {
+            HK_DIAG_LOG("HomeKit health sampler cadence: %lu ms -> %lu ms (free_heap=%lu)",
+                        (unsigned long)current,
+                        (unsigned long)desired,
+                        (unsigned long)freeHeapNow);
+            __atomic_store_n(&currentHealthIntervalMs, desired, __ATOMIC_RELAXED);
+            // Re-arm under the new cadence. Safe from within the
+            // callback (see context note above).
+            homekitHealthTicker.detach();
+            homekitHealthTicker.attach_ms(desired, homekit_health_log);
+        }
+    }
+#endif
 }
 
 void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
@@ -1776,9 +1862,104 @@ DEV_GarageDoor::DEV_GarageDoor() : Service::GarageDoorOpener()
     }
 }
 
+// log-audit-20260515-008/009 dispatch-storm dedup. iOS HomeKit periodically
+// fires bursts of redundant target-state writes (typically 4-13 within 1-2 s)
+// to verify HK accessory state; pre-dedup every burst write reached
+// open_door()/close_door()/door_command_force_close(), producing a cascade of
+// SEC1 packets, internal retries, and (in the 009 path) a real risk of a
+// second force-close sequence firing inside the cross-task state-propagation
+// race window.
+//
+// Decision logic uses garage_door.current_state ONLY — NOT target_state.
+// target_state is itself a HomeKit-driven echo and using it as the gate would
+// race the iOS burst writer (the first burst write updates target, the
+// second-through-Nth would all see "target already matches my intent" and
+// drop the legitimate first-of-burst that drove the GDO command). current_state
+// is GDO-truth and lags HK by physical motion, which is the property we want.
+//
+// CRITICAL: mid-cycle reversal (CURR_OPENING + target=CLOSED, or
+// CURR_CLOSING + target=OPEN) MUST fire — user changed their mind mid-motion
+// and the GDO's wall-button packet semantics will honor a reversal toggle.
+// Eating the reversal would leave the door doing the opposite of what the
+// user just asked for.
+//
+// Returning true ACKs the HK characteristic write (HomeKit is happy and
+// settled); we just skip pushing to the GDO. Rate-limited summary log
+// uses the same 5s-window + [+N suppressed] shape as comms.cpp:3068.
+//
+// Two pairs of file-scope counters so Open and Close bursts are independently
+// observable in /showlog — diagnosing 008 vs 009 root cause requires
+// distinguishing direction.
+static uint32_t hkOpenDedupLastMs    = 0;
+static uint32_t hkOpenDedupSuppressed = 0;
+static uint32_t hkCloseDedupLastMs   = 0;
+static uint32_t hkCloseDedupSuppressed = 0;
+
+static bool hk_target_is_redundant(uint8_t requestedTarget, const char *tag)
+{
+    // Single byte read — garage_door.current_state is uint8_t-sized and
+    // updated by the loopTask same as this caller (both DEV_GarageDoor::update
+    // and DEV_GarageDoorForceClose::update run from HomeSpan poll on loopTask).
+    // No cross-task concern at the read site.
+    const GarageDoorCurrentState cs = garage_door.current_state;
+    bool drop = false;
+    if (requestedTarget == Characteristic::TargetDoorState::OPEN)
+    {
+        // OPEN intent: drop when already open or actively opening. CURR_CLOSING
+        // is a legit reversal — fire. CURR_CLOSED / CURR_STOPPED / 0xFF fire.
+        if (cs == GarageDoorCurrentState::CURR_OPEN || cs == GarageDoorCurrentState::CURR_OPENING)
+        {
+            drop = true;
+        }
+    }
+    else if (requestedTarget == Characteristic::TargetDoorState::CLOSED)
+    {
+        // CLOSED intent: drop when already closed or actively closing. CURR_OPENING
+        // is a legit reversal — fire. CURR_OPEN / CURR_STOPPED / 0xFF fire.
+        if (cs == GarageDoorCurrentState::CURR_CLOSED || cs == GarageDoorCurrentState::CURR_CLOSING)
+        {
+            drop = true;
+        }
+    }
+    // Any unexpected target value (shouldn't occur — HK enum is OPEN/CLOSED only)
+    // falls through with drop=false to preserve forward-compat.
+
+    if (!drop) return false;
+
+    // Rate-limited summary log — pattern matches comms.cpp:3068 (force-close
+    // reject) and comms.cpp:1684 (SEC1 retry). 5s window, [+N suppressed]
+    // count on the next post-window fire.
+    uint32_t *lastMs       = (requestedTarget == Characteristic::TargetDoorState::OPEN) ? &hkOpenDedupLastMs       : &hkCloseDedupLastMs;
+    uint32_t *suppressed   = (requestedTarget == Characteristic::TargetDoorState::OPEN) ? &hkOpenDedupSuppressed   : &hkCloseDedupSuppressed;
+    const uint32_t nowMs = (uint32_t)_millis();
+    const uint32_t deltaMs = (*lastMs == 0) ? UINT32_MAX : (nowMs - *lastMs);
+    if (deltaMs > 5000UL)
+    {
+        if (*suppressed > 0)
+        {
+            ESP_LOGI(TAG, "HK %s: redundant target=%s dropped (current=%s) [+%u suppressed in last %ums — iOS HomeKit dispatch burst]",
+                     tag, DOOR_STATE(requestedTarget), DOOR_STATE(cs),
+                     (unsigned)*suppressed, (unsigned)deltaMs);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "HK %s: redundant target=%s dropped (current=%s)",
+                     tag, DOOR_STATE(requestedTarget), DOOR_STATE(cs));
+        }
+        *lastMs = nowMs;
+        *suppressed = 0;
+    }
+    else
+    {
+        (*suppressed)++;
+    }
+    return true;
+}
+
 boolean DEV_GarageDoor::update()
 {
     ESP_LOGI(TAG, "Garage Door Characteristics Update, door target: %s", DOOR_STATE(target->getNewVal()));
+    if (hk_target_is_redundant(target->getNewVal(), "primary tile")) return true;
     GarageDoorCurrentState state;
     if (target->getNewVal() == target->OPEN)
     {
@@ -1865,6 +2046,7 @@ boolean DEV_GarageDoorForceClose::update()
 {
     const uint8_t tgt = target->getNewVal();
     ESP_LOGI(TAG, "Force-close tile target: %s", DOOR_STATE(tgt));
+    if (hk_target_is_redundant(tgt, "FC tile")) return true;
     if (tgt == target->OPEN)
     {
         // Open mirrors a normal open — no hold-override needed.

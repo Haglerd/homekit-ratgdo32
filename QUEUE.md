@@ -5,7 +5,7 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 ## Active
 
 ### [P1] log-audit-20260515-010 — heap dip to **4396** (maxBlock=12788) — deepest dip ever observed, fragmentation signal, .79 4KB heap-floor is sole barrier to OOM-chain
-**Status:** queued (new finding, single sample on .82 at 2026-05-15T03:52:26 CDT)
+**Status:** in-progress (planner routing 2026-05-15)
 **Source:** log-audit 2026-05-15 (Pi syslog window 2026-05-15T06:01Z -> 2026-05-15T21:05Z, 15h, 1112 lines)
 **Issue:** (not filed)
 **Acceptance:** 72h soak with no `HomeKit health: heap=` sample below 10000 AND no sub-25000 sample with `maxBlock < heap/2` (fragmentation indicator). Either identify and bound the transient allocator (mDNS rx-burst / HAP request batch / SSE write buffer / TCP retransmit queue) responsible, or land a periodic heap-defragmentation/compaction hint. Acceptance also requires a heap-sample-on-demand endpoint so the 3-min health-sampler isn't the only visibility window — the actual dip may go deeper than 4396 between samples.

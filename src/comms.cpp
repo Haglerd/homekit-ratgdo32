@@ -1688,14 +1688,26 @@ bool process_send_queue()
                                                                   : (nowMs - lastSec1FailLogMs);
                 if (deltaMs > 5000UL)
                 {
+                    // log-audit-20260515-011 enrichment: capture the four root-cause
+                    // attribution fields that are otherwise lost when the retry-loop
+                    // gives up — cmd byte (which wall-button packet), retries (always
+                    // MAX_COMMS_RETRY here, logged explicitly for self-documenting),
+                    // bus_silent (gap since last full RX message — large value implies
+                    // RX-starved bus, small implies collision), cts (clearToSend gate
+                    // state), rx_pending (in-flight RX byte at decision time).
+                    const uint32_t busSilentMs = (uint32_t)(_millis() - msg_complete);
+                    const int ctsFlag = clearToSend ? 1 : 0;
+                    const int rxPendingFlag = isRxPending() ? 1 : 0;
                     if (sec1FailSuppressed > 0)
                     {
-                        ESP_LOGE(TAG, "SEC%d TX send failed, exceeded max retry [+%u suppressed in last %ums — obstructed door / busy bus]",
-                                 doorControlType, (unsigned)sec1FailSuppressed, (unsigned)deltaMs);
+                        ESP_LOGE(TAG, "SEC%d TX send failed, exceeded max retry [cmd=0x%02X retries=%d bus_silent=%ums cts=%d rx_pending=%d] [+%u suppressed in last %ums — obstructed door / busy bus]",
+                                 doorControlType, pkt_ac.pkt.m_data.value.cmd, retryCount, (unsigned)busSilentMs, ctsFlag, rxPendingFlag,
+                                 (unsigned)sec1FailSuppressed, (unsigned)deltaMs);
                     }
                     else
                     {
-                        ESP_LOGE(TAG, "SEC%d TX send failed, exceeded max retry", doorControlType);
+                        ESP_LOGE(TAG, "SEC%d TX send failed, exceeded max retry [cmd=0x%02X retries=%d bus_silent=%ums cts=%d rx_pending=%d]",
+                                 doorControlType, pkt_ac.pkt.m_data.value.cmd, retryCount, (unsigned)busSilentMs, ctsFlag, rxPendingFlag);
                     }
                     lastSec1FailLogMs = nowMs;
                     sec1FailSuppressed = 0;
@@ -2720,6 +2732,19 @@ static volatile uint32_t forceCloseHoldMsCached = 3500;
 // from helperForceCloseSingleHold (settings save) and at boot in setup_comms.
 static volatile bool forceCloseSingleHoldCached = false;
 static volatile bool forceCloseInProgress = false;
+// log-audit-20260515-009: reentry cooldown — timestamp (set by
+// clear_force_close_state BEFORE the inProgress atomic_clear) gates a second
+// FC sequence from firing inside the cross-task race window where the
+// HomeSpan task (loopTask) has not yet seen the post-FC current_state
+// propagate. Strictly additive to the existing CURR_CLOSED/CLOSING/0xFF
+// safety gate in door_command_force_close — does not relax it. Self-expires
+// after FORCE_CLOSE_REENTRY_COOLDOWN_MS so a legitimate retry minutes later
+// passes cleanly. Auto-close TTC fire path passes trivially (TTC schedule
+// is minutes-scale, never seconds). On ESP8266 (uint32 _millis_t), wrap
+// between store and load produces a huge uint32 delta → gate passes
+// (fail-OPEN, never blocks a legitimate force-close).
+static volatile _millis_t forceCloseClearedAtMs = 0;
+static constexpr uint32_t FORCE_CLOSE_REENTRY_COOLDOWN_MS = 3000;
 // Deferred gap-timer arm (Ticker → loopTask). 0 = no pending arm;
 // non-zero = arm forceCloseGapTimer for that ms. force_close_drain_pending_arm
 // re-checks forceCloseInProgress before arming so a concurrent
@@ -2757,6 +2782,13 @@ static void clear_force_close_state(const char *reason)
     // force_close_drain_pending_arm. Fourth flag from the V3-pattern
     // family that was missed in the v32/v36 atomic discipline pass.
     __atomic_store_n(&forceCloseGapPendingArmMs, (uint32_t)0, __ATOMIC_RELEASE);
+    // log-audit-20260515-009: stamp the cleared-at timestamp BEFORE the
+    // inProgress atomic_clear. Ordering matters — the reentry cooldown
+    // check in door_command_force_close reads forceCloseClearedAtMs via
+    // acquire-load and uses it to gate a possibly-concurrent second FC
+    // request. Releasing the timestamp first guarantees any task that
+    // sees inProgress=false will also see the fresh timestamp.
+    __atomic_store_n(&forceCloseClearedAtMs, _millis(), __ATOMIC_RELEASE);
     __atomic_clear(&forceCloseInProgress, __ATOMIC_RELEASE);
 }
 
@@ -3036,6 +3068,41 @@ void door_command_force_close(uint32_t hold_ms)
             ESP_LOGW(TAG, "FORCE CLOSE: refusing — door is already %s, no action taken (close request on a non-open door is a no-op)",
                      DOOR_STATE(s));
             return;
+        }
+    }
+
+    // log-audit-20260515-009: reentry cooldown — block a second FC sequence
+    // from firing in the cross-task race window where clear_force_close_state
+    // has run on the comms task but garage_door.current_state has not yet
+    // propagated to the HomeSpan task (audit observed reentry at 1.34 s after
+    // the first press cleared, with HK still seeing CURR_OPEN). Strictly
+    // additive to the existing CURR_CLOSED/CLOSING/0xFF safety gate above
+    // and the in-progress TAS below; self-expires after
+    // FORCE_CLOSE_REENTRY_COOLDOWN_MS so a legitimate retry minutes later
+    // passes cleanly.
+    //
+    // Safety properties:
+    //   * First-ever press: forceCloseClearedAtMs == 0 → gate passes.
+    //   * Legitimate retry minutes later: elapsed >> 3000 → gate passes.
+    //   * Auto-close TTC fires minutes after prior FC → passes cleanly.
+    //   * ESP8266 49.7-day uint32 wrap between store and load: unsigned
+    //     subtraction produces a huge cast value → gate passes (fail-OPEN).
+    //   * Does NOT touch the .80 release-callback fix
+    //     (send_force_close_release_then_maybe_retry).
+    //   * Does NOT modify the 2-attempt mechanic.
+    //   * Does NOT weaken the existing safety gate above.
+    {
+        _millis_t cleared = __atomic_load_n(&forceCloseClearedAtMs, __ATOMIC_ACQUIRE);
+        if (cleared != 0)
+        {
+            _millis_t now = _millis();
+            uint64_t elapsed = (uint64_t)(now - cleared);
+            if (elapsed < FORCE_CLOSE_REENTRY_COOLDOWN_MS)
+            {
+                ESP_LOGW(TAG, "FORCE CLOSE: refusing — reentry cooldown (%llums since last sequence cleared, need %lums)",
+                         (unsigned long long)elapsed, (unsigned long)FORCE_CLOSE_REENTRY_COOLDOWN_MS);
+                return;
+            }
         }
     }
 
