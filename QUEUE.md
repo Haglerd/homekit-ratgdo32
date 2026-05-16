@@ -4,6 +4,37 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active
 
+### [P1] log-audit-20260515-010 — heap dip to **4396** (maxBlock=12788) — deepest dip ever observed, fragmentation signal, .79 4KB heap-floor is sole barrier to OOM-chain
+**Status:** in-progress (planner routing 2026-05-15)
+**Source:** log-audit 2026-05-15 (Pi syslog window 2026-05-15T06:01Z -> 2026-05-15T21:05Z, 15h, 1112 lines)
+**Issue:** (not filed)
+**Acceptance:** 72h soak with no `HomeKit health: heap=` sample below 10000 AND no sub-25000 sample with `maxBlock < heap/2` (fragmentation indicator). Either identify and bound the transient allocator (mDNS rx-burst / HAP request batch / SSE write buffer / TCP retransmit queue) responsible, or land a periodic heap-defragmentation/compaction hint. Acceptance also requires a heap-sample-on-demand endpoint so the 3-min health-sampler isn't the only visibility window — the actual dip may go deeper than 4396 between samples.
+**Notes:** P1 latent — no user-visible failure (.79 heap-floor short-circuit at 4096B prevents OOM panic chain that bit `.77` per mdns_networking crash). But the safety margin collapsed 73% vs prior worst:
+- **Deepest dip this audit: heap=4396 maxBlock=12788 rssi=-41dBm** at 03:52:26 CDT (single 3-min health sample, recovered to 42172 by next sample — burst lasted <3 min)
+- **Prior worst dip (2026-05-14 audit, .82): heap=15332** — this is **3.5x deeper** at 4396, only 300B above the 4096B heap-floor
+- maxBlock=12788 vs typical 36852 = **65% fragmentation** of remaining heap; this is a different failure mode than the prior dips (which were pressure, not fragmentation)
+- 2 additional sub-25K dips same window: 14516@11:22 (maxBlock=11764 — also fragmented), 24560@11:55 (maxBlock=36852 — pressure only). Five total samples below 35K across 302 samples (~1.7% — up from 1.4% in prior audit).
+- The 03:52 dip coincided with RSSI degradation (-34dBm baseline -> -41dBm at the dip sample) suggesting a WiFi RX-burst / lwIP buffer expansion may be the proximate consumer. iOS was extended-idle (last_hap_read_ago=2553s, threshold-level=3 watchdog hint firing concurrently) — so this is NOT an iOS request flood.
+- Door operations during window: 7 open/close cycles, all within 12047-12061ms tolerance (no degraded performance correlated with heap dips).
+Representative lines:
+```
+2026-05-15T03:49:26 heap=42144 maxBlock=36852 rssi=-40dBm  (3 min before)
+2026-05-15T03:52:26 heap=4396  maxBlock=12788 rssi=-41dBm  hintLevel=3  (the dip)
+2026-05-15T03:55:26 heap=42172 maxBlock=36852 rssi=-40dBm  (3 min after — full recovery)
+```
+Cross-reference: existing **[P3] HEAP-PRESSURE-WATCH** (deferred) was justified by "30-50 KB headroom is enough now that the panic chain is fixed; overnight soak shows 38-42 KB" — that assumption no longer holds when 4396 with fragmentation appears in normal idle. Recommend escalating P3 -> P1 attention. Auto-fix-eligibility: **needs-human-planning** (intersects heap policy, lwIP rx buffer sizing, mDNS task gating, RSSI-correlated allocations).
+
+### [P2] log-audit-20260515-011 — `SEC1 TX send failed, exceeded max retry` recurring at close-command time (3 events in 15h, all immediately preceding Open->Closing transitions, door closes correctly each time)
+**Status:** queued (new finding, observed on .82)
+**Source:** log-audit 2026-05-15 (Pi syslog window 2026-05-15T06:01Z -> 2026-05-15T21:05Z, 15h, 1112 lines); .1 log shows 5 more in prior 24h (2026-05-14)
+**Issue:** (not filed)
+**Acceptance:** Either capture the SEC1 retry attempt count + reason (collision / no-ack / parity?) in the log line so root cause is identifiable, OR confirm via correlation that this is pure GDO-bus contention with a remote (wired) keypad / wall console and add suppression to drop the `E` to `W`. Acceptance: 48h with either a structured retry log OR an explanation in audit-notes that the event is benign-and-expected, with no user-visible delayed-close.
+**Notes:** P2 observability/diagnostic. End-to-end outcome correct in all 3 events:
+- 2026-05-15T06:22:01 — SEC1 fail, 1.5s later Door state Open->Closing, close took 12048ms (median)
+- 2026-05-15T08:13:12 — SEC1 fail, 1.3s later Door state Open->Closing, close took 12048ms (median)
+- 2026-05-15T15:29:41 — SEC1 fail, 1.5s later Door state Open->Closing, close took 12047ms (median)
+All 3 fired immediately before a HK-initiated close that completed normally. The May-14 log already includes a suppression hint `[+2 suppressed in last 34653722ms — obstructed door / busy bus]` indicating firmware has bus-busy rate-limit logic — but the underlying cause (lost ack? collision? local door obstruction sensor wiggle?) is not in the log. Door open/close durations are extremely stable (12048ms median across 5+ samples each side), so this is unlikely to be a real obstruction. Most plausible: SEC1 protocol retry collision with internal GDO traffic (motion/light status broadcasts from the head unit) — the first press packet gets clobbered, the retry succeeds 1-1.5s later, door responds normally on the retry. Auto-fix-eligibility: **auto-fixable** (instrument the log line with retry-attempt-count + last-rx-byte timestamp; severity downgrade to W if benign).
+
 ### [P1] log-audit-20260515-009 — HK redundant-target dispatch burst on Closed path → second `FORCE CLOSE: starting 2-attempt sequence` re-fires after first sequence clears mid-burst
 **Status:** queued (new finding, observed on .82 at 2026-05-14T16:25:28 CDT)
 **Source:** log-audit 2026-05-15 (Pi syslog window 2026-05-14T06:01Z -> 2026-05-15T06:01Z, 24h, 1888 lines)
