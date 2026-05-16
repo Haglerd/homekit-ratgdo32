@@ -31,6 +31,7 @@
 #include <ESP8266mDNS.h>
 #else
 #include "esp_core_dump.h"
+#include "esp_heap_caps.h" // log-audit-010: handle_heap() needs heap_caps_get_*
 #include <ESPmDNS.h>
 #ifndef ESP8266
 // v24: setsockopt(SO_SNDTIMEO) on SSE TCP sockets to bound write times.
@@ -75,12 +76,24 @@ static const char *TAG = "ratgdo-http";
 // This is used for CSS, JS and IMAGE file types.  Set to 30 days !!
 #define CACHE_CONTROL (60 * 60 * 24 * 30)
 
+#ifndef ESP8266
+// log-audit-010: adaptive HomeKit-health-sampler cadence lives in homekit.cpp;
+// /heap surfaces the active cadence so a client can correlate diagnostics
+// without having to derive cadence from log timestamps.
+extern volatile uint32_t currentHealthIntervalMs;
+#endif
+
 // Forward declare the internal URI handling functions...
 void handle_reset();
 void handle_reconnect_homekit();
 void handle_refresh_mdns();
 void handle_dump_homekit_state();
 void handle_status();
+#ifndef ESP8266
+// log-audit-010: heap-visibility diagnostic endpoint. ESP32-only — uses
+// heap_caps_* APIs and PSRAM/internal split that have no ESP8266 analog.
+void handle_heap();
+#endif
 void handle_everything();
 void handle_setgdo();
 void handle_logout();
@@ -110,6 +123,10 @@ void try_register_ratgdo_mdns();
 const char restEvents[] = "/rest/events/";
 const std::unordered_map<std::string, std::pair<const HTTPMethod, void (*)()>> builtInUri = {
     {"/status.json", {HTTP_GET, handle_status}},
+#ifndef ESP8266
+    // log-audit-010: heap-visibility diagnostic. ESP32-only.
+    {"/heap", {HTTP_GET, handle_heap}},
+#endif
     {"/reset", {HTTP_POST, handle_reset}},
     {"/reboot", {HTTP_POST, handle_reboot}},
     {"/reconnectHomeKit", {HTTP_POST, handle_reconnect_homekit}},
@@ -2097,6 +2114,57 @@ void handle_status()
     }
     return;
 }
+
+#ifndef ESP8266
+// log-audit-010: GET /heap — heap-pressure diagnostic. Pure read-only;
+// no auth (matches /status.json and /crashlog precedent). All sources
+// here are task-safe IDF/lwIP APIs that don't allocate. The handler
+// itself uses a stack-local 256-byte buffer — NO dynamic allocation
+// because this endpoint exists to be queryable WHILE the heap is under
+// pressure. Field names mirror the "HomeKit health:" diag-line keys
+// (free_heap, max_alloc_block) so log-audit grep regex stays compatible.
+//
+// ESP8266 gating: heap_caps_*, MALLOC_CAP_INTERNAL/SPIRAM, and
+// esp_get_minimum_free_heap_size have no clean ESP8266 analog, and
+// ESP8266 free heap is too tight to justify a new diagnostic endpoint
+// at all. Zero ESP8266 footprint by construction (entire function +
+// the URI registration + forward declaration all live under #ifndef
+// ESP8266).
+void handle_heap()
+{
+    char buf[256];
+    int written = snprintf(buf, sizeof(buf),
+        "{"
+        "\"free_heap\":%lu,"
+        "\"min_free_heap_ever\":%lu,"
+        "\"max_alloc_block\":%lu,"
+        "\"internal_free\":%lu,"
+        "\"internal_largest\":%lu,"
+        "\"psram_free\":%lu,"
+        "\"rssi_dbm\":%d,"
+        "\"uptime_s\":%lu,"
+        "\"sampler_interval_ms\":%lu"
+        "}",
+        (unsigned long)esp_get_free_heap_size(),
+        (unsigned long)esp_get_minimum_free_heap_size(),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        WiFi.isConnected() ? (int)WiFi.RSSI() : 0,
+        (unsigned long)(millis() / 1000UL),
+        (unsigned long)__atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED));
+    // Truncation guard: snprintf returns the would-be length, not the
+    // truncated length. Worst-case content with all fields at uint32
+    // max is ~230 chars; 256 has comfortable headroom but cap defensively.
+    if (written < 0 || (size_t)written >= sizeof(buf))
+    {
+        buf[sizeof(buf) - 1] = '\0';
+    }
+    server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
+    server.send(200, type_json, buf);
+}
+#endif
 
 void handle_logout()
 {
