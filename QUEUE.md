@@ -25,6 +25,35 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 **Acceptance:** force-close release callback short-circuits when `forceCloseInProgress` was cleared mid-hold; no `release sent (2-attempt mechanic, attempt 0/2)` log; the new `FORCE CLOSE: release sent, sequence already cleared (door began Closing during hold)` log line appears when the race fires; 7+ force-close sequences over 24h soak with no door-reverses-after-close-command behaviour.
 **Notes:** P1 user-visible failure. Fix verified in source at comms.cpp:2813-2850 (entry-check on forceCloseInProgress + ESP_LOGI "sequence already cleared"). Device on .82 (status.json firmwareVersion="3.4.4-forceclose.82", uptime ~27.5h at 2026-05-15 audit end, crashCount=0). **5 HK-initiated FC sequences observed cumulatively across .80+.81+.82, ALL took the non-race path** (Closing-during-hold/TTCtimer.detach). New on this audit: FC#3 (2026-05-14 16:25:30, Closing concurrent with press), FC#4 (2026-05-14 18:48:08, Closing 1.37s into 2500ms hold), FC#5 (2026-05-14 20:00:12, Closing 1.40s into hold). The `sequence already cleared` race log line has **NEVER appeared** — the user's GDO consistently enters Closing within 1.0-1.5s, well inside the 2500ms hold, so the post-clear release-callback race window has not been naturally exercised. Code review confirms fix is correct; soak metric ("7+ sequences with no reverse") trivially met by the non-race path but the targeted race log condition (the actual acceptance criteria) remains untriggered. Auto-fix-eligibility: **shipped, awaiting telemetry** — consider re-classifying acceptance to "verified via static review" since natural race-trigger frequency may be measured in months. NOTE: finding 009's reentry symptom now covered separately by the .83 FC cooldown gate.
 
+
+### [P3] codebase-audit-20260517-001 — fastModeEntryMs int64 cross-task non-atomic (loopTask + esp_timer task writers)
+**Status:** queued
+**Source:** codebase-audit 2026-05-17 (.84 follow-up review; new helper added a second-task writer to a 64-bit static)
+**Issue:** (not filed)
+**Acceptance:** reads/writes of fastModeEntryMs at src/homekit.cpp:559,914,918,929,979,984 use __atomic_load_n/__atomic_store_n (or downcast to uint32_t with documented 49-day wrap rationale). No torn-read possible across the loopTask helper writes and esp_timer-task in-callback reads. Build clean on ESP32.
+**Notes:** S — single-file diff, ~6 sites. Same bug class as AUDIT-007 but introduced in .84 by the new homekit_health_arm_fast_mode_if_low helper. The in-callback comparator (uint64_t)(now minus fastModeEntryMs) could read a torn 64-bit value if the helper writes the low half then yields. Sibling currentHealthIntervalMs already uses __atomic_store_n on its uint32 write at line 985 — author got the atomic discipline right on the 32-bit but missed the int64. Confidence high. Heap delta 0 B. Auto-fix-eligibility: **auto-fixable** (single file, no FC, mechanical change). Cross-ref: AUDIT-007.
+
+### [P3] codebase-audit-20260517-002 — homekitHealthTicker detach+attach race across two tasks (loopTask + esp_timer task)
+**Status:** queued
+**Source:** codebase-audit 2026-05-17 (.84 follow-up — helper writes Ticker._timer concurrently with in-callback re-arm)
+**Issue:** (not filed)
+**Acceptance:** Ticker re-arm in homekit_health_arm_fast_mode_if_low (loopTask) and the in-callback adaptive block (esp_timer task) cannot race the homekitHealthTicker._timer pointer. Either (a) detach+attach pair runs under a single FreeRTOS critical section/mutex, or (b) the helper sets a deferred-arm flag that the next esp_timer callback consumes (W2/W14 deferred-arm pattern). Confirmed no leaked esp_timer handles under a heap-watermark trigger storm soak.
+**Notes:** S-M — single file, ~10-20 lines, design choice between mutex and deferred-flag pattern. Mechanism: Ticker._timer is a single esp_timer_handle_t pointer with no sync; helper does detach plus attach_ms at homekit.cpp:991-992 while esp_timer callback at lines 943-944 may be doing the same. Race results in one esp_timer handle leak per occurrence (~100 B) and possible double-fire of homekit_health_log. Comment at lines 962-967 incorrectly claims this is safe (it is safe at IDF level, not at Ticker C++ wrapper level). Confidence medium — race is real, observability of actual leak needs soak telemetry. Heap delta: 0 B (mutex) or +8 B (deferred-flag). Auto-fix-eligibility: **auto-fixable** preferring the deferred-flag pattern.
+
+### [P3] codebase-audit-20260517-003 — heap_caps_get_largest_free_block called every 1Hz for observability-only value
+**Status:** queued
+**Source:** codebase-audit 2026-05-17 (.84 follow-up — caller pays heap-mutex cost unconditionally)
+**Issue:** (not filed)
+**Acceptance:** heap_caps_get_largest_free_block runs only when freeHeap is below HOMEKIT_HEALTH_HEAP_WATERMARK. 99.99% of seconds skip the cost. service_timer_loop hot path drops from 2 heap reads/sec to 1.
+**Notes:** XS — single-file diff, move call from ratgdo.cpp:432 inside homekit_health_arm_fast_mode_if_low. Saves ~0.1s CPU/day and 86400 heap-mutex acquire/release pairs/day. Marginal win in normal operation; potentially material if heap-pressure events correlate with heap-mutex contention. Confidence high. Heap delta: 0 B. Auto-fix-eligibility: **auto-fixable**.
+
+### [P3] codebase-audit-20260517-005 — extract homekit_health_update_adaptive_cadence helper (homekit_health_log grew to ~280 LoC)
+**Status:** queued
+**Source:** codebase-audit 2026-05-17 (.83+.84 file-size growth — homekit.cpp +228 LoC in 7 days)
+**Issue:** (not filed)
+**Acceptance:** in-callback adaptive cadence block (homekit.cpp:890-947, ~57 lines) extracted to homekit_health_update_adaptive_cadence(uint32_t freeHeapNow) static helper. homekit_health_log drops below 240 LoC again. Paired naming with homekit_health_arm_fast_mode_if_low so the entry/in-callback split is obvious.
+**Notes:** S — single-file refactor, mechanical move into static helper. Counterpart to AUDIT-2026-05-17-002 if that fix uses the deferred-arm pattern (the extracted helper becomes the consumer of the pending-arm flag). Defer until 001/002 are resolved so the extraction can pick up the right pattern. Confidence high. Heap delta: 0 B. Auto-fix-eligibility: **auto-fixable**.
+
 ---
 
 ## Recently completed (.84 follow-up, 2026-05-17, PR #132)
