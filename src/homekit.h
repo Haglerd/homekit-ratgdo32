@@ -117,6 +117,14 @@ extern void homekit_dump_state(const char *reason);
 // path; also called once at boot from setup_homekit). The Ticker
 // callback reads the cache instead of taking the userConfig mutex.
 extern void homekit_refresh_watchdog_config();
+// log-audit-010 follow-up: 1Hz heap-watermark trigger entry point.
+// Called from service_timer_loop on loopTask. Arms adaptive-sampler
+// fast cadence (30s) immediately when freeHeap dips below the
+// watermark, instead of waiting for the next 180s slow-mode sample.
+// Pass freeHeap from esp_get_free_heap_size() and maxBlock from
+// heap_caps_get_largest_free_block(MALLOC_CAP_8BIT). Helper handles
+// the watermark check internally; safe to call every iteration.
+extern void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock);
 
 extern char ipv6_addresses[];
 
