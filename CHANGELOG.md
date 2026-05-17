@@ -10,6 +10,18 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.85 (2026-05-17) — tickDrift telemetry fix + fastModeEntryMs/lastTickMs atomics (.84 follow-up, log-audit-2026-05-17-002 + codebase-audit-2026-05-17-001)
+
+Two zero-byte regression fixes for `.84` self-inflicted issues exposed by the post-flash audit.
+
+**1. `tickDrift` telemetry artifact (log-audit-20260517-002).** After `.84` added the 1Hz heap-watermark helper, cadence transitions started producing `tickDrift=-150000ms` log lines (= 30000 − 180000). Root cause: the drift formula at `homekit.cpp:688` used the literal `HOMEKIT_HEALTH_INTERVAL_MS` constant regardless of currently-armed cadence, and `lastTickMs` carried a stale reference across the re-arm boundary. Fix: drift formula now reads currently-armed interval via `__atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED)`; both re-arm sites (in-callback adaptive transition and the `.84` helper) zero `lastTickMs` so the first post-transition sample reports `tickDrift=0` and subsequent samples report true single-interval drift in either mode. No functional impact (watchdog logic unaffected) — telemetry hygiene only.
+
+**2. `fastModeEntryMs` / `lastTickMs` non-atomic across two-task writers (codebase-audit-20260517-001).** `.84` introduced a loopTask writer to a 64-bit `_millis_t` that was previously esp_timer-task-only. Xtensa is 32-bit so 64-bit accesses are not atomic at the C-abstract-machine level — torn reads/writes were structurally possible (none observed). Fix: both fields are now `static volatile _millis_t` with all accesses through `__atomic_store_n(..., __ATOMIC_RELEASE)` and `__atomic_load_n(..., __ATOMIC_ACQUIRE)`. Snapshot-once pattern at the read sites for consistent multi-check expressions. GCC emits `__atomic_*_8` from libgcc which is safe (sub-microsecond critical section, neither writer in ISR context).
+
+**Does not change** any state-machine behavior, force-close paths, HK dedup helper, `/heap` endpoint, or the underlying adaptive sampler logic. Zero bytes added (volatile qualifier doesn't grow memory; atomic primitives compile to load/store instructions).
+
+**Files**: `src/homekit.cpp`, `CHANGELOG.md`, `docs/manifest.json`.
+
 ### v3.4.4-forceclose.84 (2026-05-16) — Heap-watermark trigger closes .83 sub-180s visibility gap (log-audit-20260515-010 follow-up)
 
 Follow-up to the `.83` adaptive HomeKit-health-sampler (item `log-audit-20260515-010`). The `.83` cadence-flip only evaluates on the slow-mode tick itself, so a transient heap dip that begins and ends inside a single 180s window never arms fast mode. Observed on `.83` at 2026-05-16: free heap reached **3424 B** and recovered before the next 180s sample — fast mode never engaged and the dip was invisible to the syslog timeline.
