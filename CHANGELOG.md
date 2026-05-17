@@ -10,6 +10,16 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.84 (2026-05-16) — Heap-watermark trigger closes .83 sub-180s visibility gap (log-audit-20260515-010 follow-up)
+
+Follow-up to the `.83` adaptive HomeKit-health-sampler (item `log-audit-20260515-010`). The `.83` cadence-flip only evaluates on the slow-mode tick itself, so a transient heap dip that begins and ends inside a single 180s window never arms fast mode. Observed on `.83` at 2026-05-16: free heap reached **3424 B** and recovered before the next 180s sample — fast mode never engaged and the dip was invisible to the syslog timeline.
+
+**Fix**: new 1Hz heap-watermark check on the main `loopTask` (`service_timer_loop()`), gated `#ifndef ESP8266` to match the existing adaptive sampler. Hot-path cost is one `_millis_t` subtraction per loop iteration; `esp_get_free_heap_size()` + `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` are read once per second. When `freeHeap < HOMEKIT_HEALTH_HEAP_WATERMARK` (20 KB) and we are still in slow mode, the new `homekit_health_arm_fast_mode_if_low()` helper in `homekit.cpp` flips `currentHealthIntervalMs` to 30 s and re-arms `homekitHealthTicker` immediately. When already in fast mode the helper refreshes `fastModeEntryMs` so the trailing 5-min visibility window is measured from the LAST dip rather than the first — mirrors the in-callback "below watermark" branch behavior.
+
+**Does not change** the existing in-`homekit_health_log()` adaptive block: that still owns the "stay fast 5 min after recovery, then revert to slow" logic on each fast-mode sample. The new helper only covers the *entry* path that `.83` missed. Both writers use `__atomic_store_n` on `currentHealthIntervalMs` so the `/heap` handler still sees a clean read. Loop check sits AFTER the `suspend_service_loop` gate so it does not churn the ticker during OTA (heap can spike then; we want to avoid re-arming mid-flash). `homekitHealthTicker` detach/attach from `loopTask` is documented safe — `esp_timer_stop` / `esp_timer_start_periodic` take the service lock.
+
+**Files**: `src/homekit.cpp` (new helper), `src/homekit.h` (forward decl), `src/ratgdo.cpp` (1Hz call site + `esp_heap_caps.h` include), `CHANGELOG.md`, `docs/manifest.json`.
+
 ### v3.4.4-forceclose.83 (2026-05-15) — Heap visibility + dispatch-storm dedup + force-close reentry cooldown + SEC1 log attribution + tickDriftMs (log-audit-20260515-008/009/010/011)
 
 Bundled release covering the four open audit findings plus a code-review out-of-scope time-math regression. All five changes ship together so the next soak window sees the complete picture.

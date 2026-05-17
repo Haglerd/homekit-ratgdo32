@@ -24,6 +24,7 @@
 #else
 #include <esp_core_dump.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h> // log-audit-010 follow-up: heap-watermark trigger
 #include <ping/ping_sock.h>
 #endif
 
@@ -412,6 +413,29 @@ void service_timer_loop()
 
     if (suspend_service_loop)
         return;
+
+#ifndef ESP8266
+    // log-audit-010 follow-up: 1Hz heap-watermark check on loopTask. The
+    // .83 adaptive sampler only re-evaluates cadence at the 180s slow-
+    // mode tick — so a sub-180s dip (observed 2026-05-16: free heap
+    // bottomed at 3424 B and recovered before the next 180s sample)
+    // never arms fast mode. This catches the entry; the existing in-
+    // callback block in homekit_health_log() still owns the trailing
+    // 5-min hold + revert-to-slow logic. Gated by suspend_service_loop
+    // above so it doesn't churn the ticker during OTA. ~100ns hot path
+    // (one millis subtract); the heap reads only run once per second.
+    static _millis_t lastHeapWatermarkCheckMs = 0;
+    if ((uint64_t)(current_millis - lastHeapWatermarkCheckMs) >= 1000)
+    {
+        lastHeapWatermarkCheckMs = current_millis;
+        uint32_t freeHeap = esp_get_free_heap_size();
+        uint32_t maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        // Helper does the watermark comparison and is a no-op when the
+        // heap is healthy or we're already in fast mode (with a hold-
+        // timer refresh on the latter).
+        homekit_health_arm_fast_mode_if_low(freeHeap, maxBlock);
+    }
+#endif
 
     if ((rebootSeconds != 0) && (rebootSeconds < (uint32_t)(current_millis / 1000)))
     {
