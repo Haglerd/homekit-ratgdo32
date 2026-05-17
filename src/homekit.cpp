@@ -947,6 +947,52 @@ static void homekit_health_log()
 #endif
 }
 
+#ifndef ESP8266
+// log-audit-010 follow-up: 1Hz heap-watermark trigger. The .83 adaptive
+// sampler only re-evaluates cadence at the 180s slow-mode tick — so a
+// sub-180s heap dip (observed on .83 at 2026-05-16: free heap reached
+// 3424 B and recovered before the next 180s sample) never arms fast
+// mode. This helper is called from service_timer_loop on loopTask at
+// 1Hz and arms fast cadence IMMEDIATELY when freeHeap < watermark,
+// independent of the slow-mode poll. The existing in-callback adaptive
+// block above continues to handle the "stay fast 5 min after recovery,
+// then revert to slow" logic on each fast-mode sample — this helper
+// only covers the *entry* path.
+//
+// Context: called from loopTask. Ticker detach/attach_ms calls into
+// esp_timer_stop / esp_timer_start_periodic, which are documented safe
+// from any task context (they take the esp_timer service lock). The
+// existing in-callback block runs on the esp_timer task; both writers
+// use __atomic_store_n on currentHealthIntervalMs so there is no torn
+// read for the /heap handler.
+void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock)
+{
+    if (freeHeap >= HOMEKIT_HEALTH_HEAP_WATERMARK)
+        return;
+    uint32_t interval = __atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED);
+    if (interval == HOMEKIT_HEALTH_INTERVAL_FAST_MS)
+    {
+        // Already in fast mode — refresh the hold timer so the trailing
+        // 5-min visibility window is measured from the LAST dip rather
+        // than the first. Mirrors the in-callback "below watermark"
+        // branch behavior.
+        fastModeEntryMs = _millis();
+        return;
+    }
+    // Heap below watermark in slow mode — arm fast cadence NOW, don't
+    // wait for the next 180s slow-mode sample.
+    fastModeEntryMs = _millis();
+    __atomic_store_n(&currentHealthIntervalMs, HOMEKIT_HEALTH_INTERVAL_FAST_MS, __ATOMIC_RELAXED);
+    HK_DIAG_LOG("HomeKit health: heap-watermark trigger (free=%u maxBlock=%u < %u), arming fast cadence (%lu ms -> %lu ms)",
+                (unsigned)freeHeap, (unsigned)maxBlock,
+                (unsigned)HOMEKIT_HEALTH_HEAP_WATERMARK,
+                (unsigned long)HOMEKIT_HEALTH_INTERVAL_MS,
+                (unsigned long)HOMEKIT_HEALTH_INTERVAL_FAST_MS);
+    homekitHealthTicker.detach();
+    homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_FAST_MS, homekit_health_log);
+}
+#endif
+
 void WiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
 {
     // ESP-IDF reason codes — most useful ones called out by name; rest
