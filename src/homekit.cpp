@@ -556,7 +556,20 @@ constexpr uint32_t HOMEKIT_HEALTH_FAST_DURATION_MS = 300000;
 // happen from esp_timer task (homekit_health_log Ticker callback)
 // and reads happen from loopTask (HTTP handler dispatch).
 volatile uint32_t currentHealthIntervalMs = HOMEKIT_HEALTH_INTERVAL_MS;
-static _millis_t fastModeEntryMs = 0;
+// fastModeEntryMs and lastTickMs are written from BOTH the in-callback
+// adaptive block in homekit_health_log() (esp_timer task) AND the .84
+// helper homekit_health_arm_fast_mode_if_low() (loopTask). 64-bit stores
+// are not atomic on Xtensa at the C-abstract-machine level — torn r/w
+// across these two task contexts is possible. All accesses go through
+// __atomic_load_n / __atomic_store_n with acquire/release semantics.
+// (codebase-audit-20260517-001)
+//
+// lastTickMs is also zeroed by the helper and the in-callback re-arm
+// path so the first sample after a cadence transition reports
+// tickDrift=0 instead of garbage against the old-cadence reference
+// (log-audit-20260517-002).
+static volatile _millis_t fastModeEntryMs = 0;
+static volatile _millis_t lastTickMs      = 0;
 #endif
 
 // Self-healing watchdog. Settings cached at boot + on settings-save
@@ -683,10 +696,20 @@ static void homekit_health_log()
     //                     = esp_timer task starved)
     //   maxAllocBlock   : largest contiguous heap (gap from freeHeap =
     //                     fragmentation buildup)
-    static _millis_t lastTickMs = 0;
+    // lastTickMs is file-scope (volatile _millis_t, see declaration near
+    // currentHealthIntervalMs) so the .84 helper and the in-callback
+    // re-arm path can zero it after a cadence transition. The drift
+    // expected-interval is read from the currently-armed cadence rather
+    // than the static slow-mode constant — otherwise the first sample
+    // after a fast-mode arm reports a -150000ms artifact
+    // (30000 actual - 180000 expected). (log-audit-20260517-002)
     int32_t tickDriftMs = 0;
-    if (lastTickMs) tickDriftMs = (int32_t)((int64_t)(_millis() - lastTickMs) - (int64_t)HOMEKIT_HEALTH_INTERVAL_MS);
-    lastTickMs = _millis();
+    _millis_t lastTickSnapshot = __atomic_load_n(&lastTickMs, __ATOMIC_ACQUIRE);
+    if (lastTickSnapshot) {
+        uint32_t armedInterval = __atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED);
+        tickDriftMs = (int32_t)((int64_t)(_millis() - lastTickSnapshot) - (int64_t)armedInterval);
+    }
+    __atomic_store_n(&lastTickMs, _millis(), __ATOMIC_RELEASE);
     // Instrumentation counters (W41: declarations in src/instrumentation.h):
     //   logMtxMaxWaitMs      : max log mutex wait, see log.cpp
     //   sseSlowWrites        : SSE writes > CLIENT_SLOW_WRITE_MS since boot
@@ -904,6 +927,11 @@ static void homekit_health_log()
     {
         uint32_t freeHeapNow = esp_get_free_heap_size();
         _millis_t now = _millis();
+        // Single acquire-load snapshot — used for both the duration check
+        // and the !=0 guard so we evaluate against one consistent value
+        // even if loopTask races a write between the two reads.
+        // (codebase-audit-20260517-001)
+        _millis_t fastModeEntry_snapshot = __atomic_load_n(&fastModeEntryMs, __ATOMIC_ACQUIRE);
         uint32_t desired;
         if (freeHeapNow < HOMEKIT_HEALTH_HEAP_WATERMARK)
         {
@@ -911,11 +939,11 @@ static void homekit_health_log()
             // hold timer. Re-arming on every tick while we're under
             // pressure means recovery is measured from the LAST dip,
             // not the first.
-            fastModeEntryMs = now;
+            __atomic_store_n(&fastModeEntryMs, now, __ATOMIC_RELEASE);
             desired = HOMEKIT_HEALTH_INTERVAL_FAST_MS;
         }
-        else if (fastModeEntryMs != 0 &&
-                 (uint64_t)(now - fastModeEntryMs) < (uint64_t)HOMEKIT_HEALTH_FAST_DURATION_MS)
+        else if (fastModeEntry_snapshot != 0 &&
+                 (uint64_t)(now - fastModeEntry_snapshot) < (uint64_t)HOMEKIT_HEALTH_FAST_DURATION_MS)
         {
             // Heap recovered but we're still inside the trailing-visibility
             // window. Hold fast.
@@ -926,7 +954,7 @@ static void homekit_health_log()
             // Fully out of fast mode — clear the entry timestamp so the
             // next dip cleanly re-triggers the fast-mode window from
             // its own first-tick timestamp.
-            fastModeEntryMs = 0;
+            __atomic_store_n(&fastModeEntryMs, (_millis_t)0, __ATOMIC_RELEASE);
             desired = HOMEKIT_HEALTH_INTERVAL_MS;
         }
 
@@ -939,7 +967,11 @@ static void homekit_health_log()
                         (unsigned long)freeHeapNow);
             __atomic_store_n(&currentHealthIntervalMs, desired, __ATOMIC_RELAXED);
             // Re-arm under the new cadence. Safe from within the
-            // callback (see context note above).
+            // callback (see context note above). Zero lastTickMs so the
+            // first sample after the transition reports tickDrift=0
+            // rather than (newInterval - oldInterval) garbage.
+            // (log-audit-20260517-002)
+            __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
             homekitHealthTicker.detach();
             homekitHealthTicker.attach_ms(desired, homekit_health_log);
         }
@@ -975,19 +1007,25 @@ void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock)
         // Already in fast mode — refresh the hold timer so the trailing
         // 5-min visibility window is measured from the LAST dip rather
         // than the first. Mirrors the in-callback "below watermark"
-        // branch behavior.
-        fastModeEntryMs = _millis();
+        // branch behavior. Atomic store for the cross-task writer.
+        // (codebase-audit-20260517-001)
+        __atomic_store_n(&fastModeEntryMs, _millis(), __ATOMIC_RELEASE);
         return;
     }
     // Heap below watermark in slow mode — arm fast cadence NOW, don't
     // wait for the next 180s slow-mode sample.
-    fastModeEntryMs = _millis();
+    __atomic_store_n(&fastModeEntryMs, _millis(), __ATOMIC_RELEASE);
     __atomic_store_n(&currentHealthIntervalMs, HOMEKIT_HEALTH_INTERVAL_FAST_MS, __ATOMIC_RELAXED);
     HK_DIAG_LOG("HomeKit health: heap-watermark trigger (free=%u maxBlock=%u < %u), arming fast cadence (%lu ms -> %lu ms)",
                 (unsigned)freeHeap, (unsigned)maxBlock,
                 (unsigned)HOMEKIT_HEALTH_HEAP_WATERMARK,
                 (unsigned long)HOMEKIT_HEALTH_INTERVAL_MS,
                 (unsigned long)HOMEKIT_HEALTH_INTERVAL_FAST_MS);
+    // Zero lastTickMs so the FIRST sample after this cadence transition
+    // reports tickDrift=0 instead of a stale-reference artifact (the
+    // existing if (lastTickSnapshot) guard in homekit_health_log()
+    // handles the zero case correctly). (log-audit-20260517-002)
+    __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
     homekitHealthTicker.detach();
     homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_FAST_MS, homekit_health_log);
 }
