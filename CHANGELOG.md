@@ -10,6 +10,22 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.86 (2026-05-18) — HAP heap-pressure gate + failed-alloc graceful-restart safety net (log-audit-20260517-001)
+
+Two-gate defense against the heap-pressure transient class observed across .83/.84/.85: free-heap dips into sub-1KB territory (deepest captured: 528B intrinsic via `/heap`, 800B via 1Hz syslog poll), often coinciding with iOS hub state-sync bursts. On `.84` at 2026-05-17 08:20 CDT, `pollTask` reset via TASK_WDT (`reset_reason=6`) with the captured backtrace pointing to HomeSpan `TempBuffer<>` allocation inside `HAPClient::processRequest()` at `HomeSpan/src/HAP.cpp:129` — heap-pressure-induced allocator slowness exceeded the 5s watchdog window.
+
+**1. HAP preflight gate** — fork patch to vendored `HomeSpan/src/HAP.cpp::processRequest()` applied at build time via the existing `patch_files.py` mechanism (mirrors the pre-existing `url_not_found_log.patch` pattern). When `esp_get_free_heap_size() < 8192` (2× the syslog floor, 8× the worst observed transient), refuses the HAP request before allocating the `TempBuffer`. iOS retries on TCP timeout naturally. Patch is at repo root `hap_heap_gate.patch`; `patch -N -p0` is idempotent so repeat builds are safe. Local Windows builds skip the patch (no POSIX `patch` binary); CI release builds run on Linux and apply it.
+
+**2. Heap-cap failed-alloc safety net** — registers `heap_caps_register_failed_alloc_callback()` at boot. When any task hits an OOM on a ≥1KB allocation despite the HAP gate, the callback (no-alloc, lock-free `Serial.printf` only) sets a one-shot flag that `service_timer_loop()` on `loopTask` drains, logs an `ESP_LOGE` line, waits 2s for syslog flush, then calls `sync_and_restart()` for a clean reboot. Sub-1KB failures (lwIP / mDNS / WiFi self-recovering retries) are filtered out — only structural failures trigger restart.
+
+**Does not touch** force-close paths (`door_command_force_close`, `forceCloseInProgress`, `forceCloseClearedAtMs`, `forceCloseAttempt`, the 2-attempt mechanic, the `.80` release-callback fix, or the `.83` reentry cooldown). The HAP gate sits BEFORE HomeSpan dispatch, so a force-close target update under heap pressure is dropped at the TCP layer (iOS retries) — same UX as today's reboot-then-retry but without the reboot.
+
+**Force-close safety**: the alternative to the gate is the panic-reboot we just had. With the gate, an FC press received during the ~2s heap-pressure window gets a TCP-level no-response; iOS retries within 5-30s. With no gate, the device reboots in ~4s and iOS retries on reconnect. Same end state, no reboot.
+
+**Files**: `hap_heap_gate.patch` (new at repo root), `patch_files.py`, `src/log.cpp` (failed-alloc callback + atomic-exchange consumer), `lib/ratgdo/log.h` (consumer extern decl), `src/ratgdo.cpp` (drain in `service_timer_loop`), `CHANGELOG.md`, `docs/manifest.json`.
+
+**Heap impact**: ESP32 +~20B static; ESP8266 zero (all under `#ifndef ESP8266`). Net behavior is heap-NEGATIVE under pressure (we refuse allocs that would otherwise have succeeded then crashed).
+
 ### v3.4.4-forceclose.85 (2026-05-17) — tickDrift telemetry fix + fastModeEntryMs/lastTickMs atomics (.84 follow-up, log-audit-2026-05-17-002 + codebase-audit-2026-05-17-001)
 
 Two zero-byte regression fixes for `.84` self-inflicted issues exposed by the post-flash audit.
