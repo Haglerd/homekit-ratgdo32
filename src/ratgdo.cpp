@@ -435,6 +435,25 @@ void service_timer_loop()
         // timer refresh on the latter).
         homekit_health_arm_fast_mode_if_low(freeHeap, maxBlock);
     }
+
+    // .86 (log-audit-20260517-001): drain heap-cap OOM safety net.
+    // ratgdo_failed_alloc_hook (log.cpp) sets a flag from arbitrary task
+    // context when a >=1KB allocation fails despite the HAP preflight
+    // gate. We pull the flag here on loopTask, give the syslog line 2s
+    // to flush to the Pi, then graceful-restart. Restart-during-FC was
+    // analyzed in audit-007 and the .83 force-close cooldown design;
+    // restart-clean-state is the existing happy path for the FC machine.
+    {
+        uint32_t failedSize = 0;
+        if (log_consume_failed_alloc(&failedSize))
+        {
+            ESP_LOGE(TAG, "Heap-cap failed-alloc callback fired (sz=%u), graceful restart in 2s",
+                     (unsigned)failedSize);
+            delay(2000);  // brief blocking delay so the log line flushes to syslog
+            sync_and_restart();
+            return;
+        }
+    }
 #endif
 
     if ((rebootSeconds != 0) && (rebootSeconds < (uint32_t)(current_millis / 1000)))

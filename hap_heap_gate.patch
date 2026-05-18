@@ -1,0 +1,21 @@
+--- HAP.cpp
++++ HAP.cpp
+@@ -117,6 +117,18 @@
+ void HAPClient::processRequest(){
+
+   int nBytes, messageSize;
++
++  // homekit-ratgdo32 fork patch (log-audit-20260517-001): HAP heap-pressure gate.
++  // The TempBuffer<uint8_t> ctor below allocates messageSize+1 bytes via malloc;
++  // an OOM at that point crashes in HomeSpan's allocator (observed .84 crash
++  // 2026-05-17 08:20 CDT at free=324 B). Refuse the request before allocation:
++  // don't drain TCP, don't allocate the buffer — iOS retries the HAP request
++  // naturally. LOG0 is HomeSpan's lock-free Serial.print wrapper, no allocation.
++  uint32_t hapFreeHeap = esp_get_free_heap_size();
++  if (hapFreeHeap < 8192) {
++    LOG0("\n*** HAP-gate: request refused, free heap %u < floor 8192\n\n", (unsigned)hapFreeHeap);
++    return;
++  }
+
+   messageSize=client.available();
+
