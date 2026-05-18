@@ -10,6 +10,22 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.87 (2026-05-18) — Revert .86 failed-alloc callback (caused reboot storm); keep HAP gate (log-audit-20260518-004)
+
+`.86`'s `heap_caps_register_failed_alloc_callback` portion was a regression: 25 fires in 27 min post-OTA (2026-05-18T06:23 → 06:50 CDT), each on a recoverable 2308B HAP TempBuffer alloc → graceful restart → reboot → same 2308B alloc fails on next boot → loop. The threshold I picked (`>=1KB triggers restart`) was wrong — HomeSpan routinely allocates 1-2KB chunks for HAP request processing and OOM at those sizes is recoverable, not structural. iOS retries the request on TCP timeout; pre-`.86` behavior under the same transient class was zero crashes.
+
+**This release reverts ONLY the failed-alloc callback portion** of `.86`. Removed:
+- `heap_caps_register_failed_alloc_callback()` registration in `LOG::LOG()`
+- `ratgdo_failed_alloc_hook()` callback function
+- `log_consume_failed_alloc()` consumer + extern in `lib/ratgdo/log.h`
+- The drain block in `service_timer_loop()` in `src/ratgdo.cpp`
+
+**The HAP preflight gate from `.86` STAYS** — `hap_heap_gate.patch` against `HomeSpan/src/HAP.cpp::processRequest()` refusing requests when free heap < 8KB is read-side only, can't cause crashes, and is the right pressure-relief for HAP TempBuffer allocations. The `.85` storm was caused by the callback path firing on every recoverable HAP OOM during HomeSpan's 4-controller reattach sequence at boot, not by the gate itself.
+
+If we ever want to capture failed-alloc diagnostics in the future, the right approach is: log only (no restart action), with rate-limiting (≤ 1 per minute) and post-boot grace period (skip first 5 min) so the bursty HomeSpan boot-time allocations don't poison the signal. That's a future planning exercise — not in this release.
+
+**Files**: `src/log.cpp` (callback removed), `src/ratgdo.cpp` (drain removed), `lib/ratgdo/log.h` (extern removed), `CHANGELOG.md`, `docs/manifest.json`. `hap_heap_gate.patch` and `patch_files.py` untouched.
+
 ### v3.4.4-forceclose.86 (2026-05-18) — HAP heap-pressure gate + failed-alloc graceful-restart safety net (log-audit-20260517-001)
 
 Two-gate defense against the heap-pressure transient class observed across .83/.84/.85: free-heap dips into sub-1KB territory (deepest captured: 528B intrinsic via `/heap`, 800B via 1Hz syslog poll), often coinciding with iOS hub state-sync bursts. On `.84` at 2026-05-17 08:20 CDT, `pollTask` reset via TASK_WDT (`reset_reason=6`) with the captured backtrace pointing to HomeSpan `TempBuffer<>` allocation inside `HAPClient::processRequest()` at `HomeSpan/src/HAP.cpp:129` — heap-pressure-induced allocator slowness exceeded the 5s watchdog window.
