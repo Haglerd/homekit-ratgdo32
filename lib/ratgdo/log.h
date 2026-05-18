@@ -150,13 +150,3 @@ public:
 extern LOG *ratgdoLogger;
 
 extern void esp_log_hook(const char *fmt, va_list args);
-
-#ifndef ESP8266
-// .86 (log-audit-20260517-001): atomic-exchange consumer for the heap-cap
-// failed-alloc safety net. Returns true exactly once per registered failure
-// and stores the captured allocation size in *out_size. Safe to call from
-// any task; the underlying flag is __atomic_exchange_n'd to 0 so subsequent
-// calls return false until the next failure fires. Drained by
-// service_timer_loop() on loopTask, which then graceful-restarts.
-extern "C" bool log_consume_failed_alloc(uint32_t *out_size);
-#endif

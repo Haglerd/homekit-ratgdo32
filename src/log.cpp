@@ -23,7 +23,6 @@
 #include <esp32-hal.h>
 #include <esp_core_dump.h>
 #include <esp_timer.h>  // esp_timer_get_time for log mutex wait instrumentation
-#include <esp_heap_caps.h>  // .86: heap_caps_register_failed_alloc_callback (log-audit-20260517-001)
 #endif
 
 // RATGDO project includes
@@ -249,60 +248,6 @@ void panic_handler(arduino_panic_info_t *info, void *arg)
     __atomic_store_n(&panicSnapshotDone, true, __ATOMIC_RELEASE);
 }
 
-// .86 (log-audit-20260517-001): heap-cap failed-alloc safety net.
-//
-// Catches the case where SOME allocator path beneath HAP / lwIP / mdns
-// hits OOM despite the HAP preflight gate. Sets a flag that
-// service_timer_loop() drains on loopTask and triggers a graceful
-// restart with a 2s delay so the syslog line flushes to the Pi.
-//
-// CRITICAL: the hook is called from inside the heap mutex, from any
-// task context (mdns / lwIP / esp_timer / loopTask / ISR-deferred work).
-// Permitted primitives only: Serial.printf (lock-free on ESP-IDF >= 5.0),
-// __atomic_store_n / __atomic_load_n, xPortInIsrContext early-return.
-// NO ESP_LOGx (allocates), NO socket I/O, NO heap allocations of any
-// kind, NO mutex takes, NO String. esp_alloc_failed_hook_t returns void
-// in current ESP-IDF — we record state and let the allocator fail naturally.
-static volatile uint32_t lastFailedAllocSize = 0;
-
-static void ratgdo_failed_alloc_hook(size_t size, uint32_t caps, const char *function_name)
-{
-    // ISR context: bail. Allocations from ISRs would be a separate bug,
-    // and Serial.printf may not be ISR-safe across all framework versions.
-    if (xPortInIsrContext()) return;
-
-    // Filter: ignore sub-1KB requests. lwIP / mdns / WiFi internals
-    // routinely retry small allocations and self-recover. We only want
-    // to react to real "no large block available" pressure that would
-    // crash a TempBuffer<uint8_t> ctor or similar.
-    if (size < 1024) return;
-
-    // One-shot capture: if a previous failure is already pending a drain
-    // (service_timer_loop hasn't run yet, or hasn't consumed it), drop
-    // additional failures. We don't want to overwrite the first one,
-    // and we don't want the Serial.printf below to fire repeatedly while
-    // the system is already on its way to a graceful restart.
-    uint32_t prev = __atomic_load_n(&lastFailedAllocSize, __ATOMIC_ACQUIRE);
-    if (prev != 0) return;
-
-    __atomic_store_n(&lastFailedAllocSize, (uint32_t)size, __ATOMIC_RELEASE);
-
-    // Lock-free direct serial output. No printf-style allocation
-    // (the format string lives in flash; varargs go on stack).
-    Serial.printf("[HEAP-CAP] failed alloc sz=%u caps=0x%lx fn=%s -- graceful restart pending\r\n",
-                  (unsigned)size, (unsigned long)caps, function_name ? function_name : "?");
-}
-
-// Atomic-exchange consumer used by service_timer_loop on loopTask.
-// Returns true exactly once per registered failure; stores the captured
-// size in *out_size when true.
-extern "C" bool log_consume_failed_alloc(uint32_t *out_size)
-{
-    uint32_t sz = __atomic_exchange_n(&lastFailedAllocSize, 0u, __ATOMIC_ACQ_REL);
-    if (sz == 0) return false;
-    if (out_size) *out_size = sz;
-    return true;
-}
 #endif
 
 // Constructor for LOG class
@@ -339,11 +284,6 @@ LOG::LOG()
     msgBuffer = static_cast<logBuffer *>(malloc(sizeof(logBuffer)));
     lineBuffer = static_cast<char *>(malloc(LINE_BUFFER_SIZE));
     set_arduino_panic_handler(panic_handler, NULL);
-    // .86 (log-audit-20260517-001): register heap-cap OOM safety net.
-    // Captures alloc failures from ANY task; service_timer_loop drains
-    // on loopTask and triggers a graceful restart with a 2s delay so the
-    // syslog line flushes. Belt-and-suspenders for the HAP preflight gate.
-    heap_caps_register_failed_alloc_callback(ratgdo_failed_alloc_hook);
 #endif
     // Zero out the buffer... because if we crash and dump buffer before it fills
     // up, we want blank space not garbage!
