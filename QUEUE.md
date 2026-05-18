@@ -4,6 +4,13 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active
 
+### [P0] log-audit-20260518-004 — .86 `heap_caps_register_failed_alloc_callback` triggered 25-fire reboot storm over 27 min post-OTA (2026-05-18T06:23 -> 06:50 CDT, all sz=2308B)
+**Status:** shipped revert in .87 (PR #138) — failed-alloc callback portion removed; HAP gate retained; soak validation pending
+**Source:** log-audit 2026-05-18 22:30 (Pi syslog 24h, .86 OTA at 06:21:57)
+**Issue:** (not filed — auto-mode denied, queue-only)
+**Acceptance:** revert the failed-alloc callback portion of PR #137 (keep the HAP heap-pressure gate). Build .87, OTA flash, soak 72h with zero `Heap-cap failed-alloc callback fired` lines and zero unexpected reboots, crashCount=0.
+**Notes:** P0 user-visible failure. 25 fires from 06:23:21 to 06:50:25 CDT on 2026-05-18, all identical sz=2308B, each triggering `graceful restart in 2s`. Storm self-resolved at 06:50 and device has been stable since (uptime=21908s/~6.08h at audit time, crashCount=0, freeHeap=80216, minHeap=64436, min_free_heap_ever=15540 from /heap). Pattern: WiFi establish -> HomeSpan setup -> ~55-180s -> 2308B alloc fails -> restart -> loop. Each boot reports `Free heap at boot: 193KB` then `Current free heap: 82KB` (60% consumed by HomeSpan/HK 4-controller reattach before the fire). The callback is firing on a recoverable transient (same allocator class as the .85 sub-1KB events, likely HAP TempBuffer/pairing-verify/curve25519) but reacting with immediate restart, and the next boot encounters the same transient — net result MORE harmful than the original threat. Pre-.86 behavior under the same transient class was: 1Hz heap-watermark log + adaptive 30s cadence + zero crash. **Recommend option 1: revert the callback entirely, keep the HAP gate (read-side observability that can't make things worse).** Secondary: instrument the 2308B allocator (likely HAP TempBuffer/pairing-verify) before re-introducing any callback-driven action. Alternative paths considered: (2) tolerate N fires in sliding window, (3) skip callback for first 5-10 min post-boot. Option 1 is the cleanest revert path with the least new code. Auto-fix-eligibility: **needs-human-planning** — touches the in-flight `fix/hap-heap-pressure-gate` branch, revert decision needs user sign-off.
+
 ### [P0] log-audit-20260518-001 — TASK_WDT reboot on .84 at 2026-05-17T08:20:11 CDT (reset_reason=6, ESP_RST_TASK_WDT), heap healthy (42268B) 18s prior — diagnosis correction for in-flight `fix/hap-heap-pressure-gate` branch
 **Status:** queued
 **Source:** log-audit 2026-05-18 (Pi syslog 24h window, device endpoints; full notes audit-notes/log-audit-2026-05-18.md)
