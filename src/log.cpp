@@ -248,6 +248,20 @@ void panic_handler(arduino_panic_info_t *info, void *arg)
     __atomic_store_n(&panicSnapshotDone, true, __ATOMIC_RELEASE);
 }
 
+#ifdef ESP32
+#include "esp_task_wdt.h"
+// Called from the TWDT interrupt, before the panic. ISR context:
+// esp_rom_printf only — no ESP_LOGx, no heap, no FreeRTOS blocking calls.
+extern "C" void esp_task_wdt_isr_user_handler(void)
+{
+    TaskHandle_t cur0 = xTaskGetCurrentTaskHandleForCore(0);
+    TaskHandle_t cur1 = xTaskGetCurrentTaskHandleForCore(1);
+    esp_rom_printf("TWDT ISR: running CPU0=%s CPU1=%s\n",
+                   cur0 ? pcTaskGetName(cur0) : "?",
+                   cur1 ? pcTaskGetName(cur1) : "?");
+}
+#endif
+
 #endif
 
 // Constructor for LOG class
