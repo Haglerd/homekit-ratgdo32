@@ -124,6 +124,9 @@ extern void homekit_refresh_watchdog_config();
 // Pass freeHeap from esp_get_free_heap_size() and maxBlock from
 // heap_caps_get_largest_free_block(MALLOC_CAP_8BIT). Helper handles
 // the watermark check internally; safe to call every iteration.
+// Watermark exposed so callers can gate the maxBlock heap read
+// (observability-only) on the low-heap path. (codebase-audit-20260517-003)
+constexpr uint32_t HOMEKIT_HEALTH_HEAP_WATERMARK = 20000;
 extern void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock);
 
 extern char ipv6_addresses[];

@@ -554,7 +554,8 @@ static portMUX_TYPE healthTickerMux = portMUX_INITIALIZER_UNLOCKED;
 //     visibility past recovery; prevents hysteresis flap if heap bounces
 //     across the watermark.
 constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_FAST_MS = 30000;
-constexpr uint32_t HOMEKIT_HEALTH_HEAP_WATERMARK   = 20000;
+// HOMEKIT_HEALTH_HEAP_WATERMARK declared in homekit.h (shared with the
+// 1Hz loopTask caller in ratgdo.cpp). (codebase-audit-20260517-003)
 constexpr uint32_t HOMEKIT_HEALTH_FAST_DURATION_MS = 300000;
 // NOT static — web.cpp's /heap handler externs this for the
 // sampler_interval_ms field. Volatile + atomic ops because writes
