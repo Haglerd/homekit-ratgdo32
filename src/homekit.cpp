@@ -665,6 +665,89 @@ void homekit_refresh_watchdog_config()
                 (unsigned)__atomic_load_n(&hkCfgLikelyNRSecs, __ATOMIC_RELAXED));
 }
 
+#ifndef ESP8266
+// Forward declaration: homekit_health_update_adaptive_cadence re-arms the
+// Ticker with homekit_health_log as the callback, but the callback is
+// defined below this helper. (codebase-audit-20260517-005)
+static void homekit_health_log();
+
+// log-audit-010: adaptive cadence — react to transient heap dips that
+// hide between 180s ticks. Below the watermark we sample every 30s for
+// up to 5 min after recovery; otherwise we hold the default 180s.
+//
+// Context: this runs in the esp_timer task (arduino-esp32 Ticker
+// dispatches there — see v43/audit-W18 comment in homekit_health_log).
+// detach() + attach_ms() from within the callback re-arms the underlying
+// esp_timer via esp_timer_stop / esp_timer_start_periodic. The IDF
+// calls are task-safe, but the Ticker wrapper's _timer pointer
+// write/free is not — the detach+attach pair below is spinlock-
+// guarded (healthTickerMux) against the loopTask helper
+// homekit_health_arm_fast_mode_if_low(). (codebase-audit-20260517-002)
+//
+// All deltas unsigned (uint64_t cast); never (int32_t)(now - past) —
+// _millis_t is int64 on ESP32 so a cross-callback delta math bug here
+// would not be a 25-day rollover but a stricter signedness audit.
+//
+// codebase-audit-20260517-005: extracted from homekit_health_log to keep
+// the entry-point callback below ~240 LoC. Pairs with the loopTask-side
+// homekit_health_arm_fast_mode_if_low() helper. Pure mechanical move —
+// runs in the same esp_timer task context as before.
+static void homekit_health_update_adaptive_cadence(uint32_t freeHeapNow)
+{
+    _millis_t now = _millis();
+    // Single acquire-load snapshot — used for both the duration check
+    // and the !=0 guard so we evaluate against one consistent value
+    // even if loopTask races a write between the two reads.
+    // (codebase-audit-20260517-001)
+    _millis_t fastModeEntry_snapshot = __atomic_load_n(&fastModeEntryMs, __ATOMIC_ACQUIRE);
+    uint32_t desired;
+    if (freeHeapNow < HOMEKIT_HEALTH_HEAP_WATERMARK)
+    {
+        // Below watermark — (re-)enter fast mode and refresh the
+        // hold timer. Re-arming on every tick while we're under
+        // pressure means recovery is measured from the LAST dip,
+        // not the first.
+        __atomic_store_n(&fastModeEntryMs, now, __ATOMIC_RELEASE);
+        desired = HOMEKIT_HEALTH_INTERVAL_FAST_MS;
+    }
+    else if (fastModeEntry_snapshot != 0 &&
+             (uint64_t)(now - fastModeEntry_snapshot) < (uint64_t)HOMEKIT_HEALTH_FAST_DURATION_MS)
+    {
+        // Heap recovered but we're still inside the trailing-visibility
+        // window. Hold fast.
+        desired = HOMEKIT_HEALTH_INTERVAL_FAST_MS;
+    }
+    else
+    {
+        // Fully out of fast mode — clear the entry timestamp so the
+        // next dip cleanly re-triggers the fast-mode window from
+        // its own first-tick timestamp.
+        __atomic_store_n(&fastModeEntryMs, (_millis_t)0, __ATOMIC_RELEASE);
+        desired = HOMEKIT_HEALTH_INTERVAL_MS;
+    }
+
+    uint32_t current = __atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED);
+    if (desired != current)
+    {
+        HK_DIAG_LOG("HomeKit health sampler cadence: %lu ms -> %lu ms (free_heap=%lu)",
+                    (unsigned long)current,
+                    (unsigned long)desired,
+                    (unsigned long)freeHeapNow);
+        __atomic_store_n(&currentHealthIntervalMs, desired, __ATOMIC_RELAXED);
+        // Re-arm under the new cadence. Safe from within the
+        // callback (see context note above). Zero lastTickMs so the
+        // first sample after the transition reports tickDrift=0
+        // rather than (newInterval - oldInterval) garbage.
+        // (log-audit-20260517-002)
+        __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
+        taskENTER_CRITICAL(&healthTickerMux);
+        homekitHealthTicker.detach();
+        homekitHealthTicker.attach_ms(desired, homekit_health_log);
+        taskEXIT_CRITICAL(&healthTickerMux);
+    }
+}
+#endif
+
 static void homekit_health_log()
 {
     if (rebooting) return;
@@ -917,76 +1000,9 @@ static void homekit_health_log()
     }
 
 #ifndef ESP8266
-    // log-audit-010: adaptive cadence — react to transient heap dips that
-    // hide between 180s ticks. Below the watermark we sample every 30s for
-    // up to 5 min after recovery; otherwise we hold the default 180s.
-    //
-    // Context: this runs in the esp_timer task (arduino-esp32 Ticker
-    // dispatches there — see v43/audit-W18 comment above). detach() +
-    // attach_ms() from within the callback re-arms the underlying
-    // esp_timer via esp_timer_stop / esp_timer_start_periodic. The IDF
-    // calls are task-safe, but the Ticker wrapper's _timer pointer
-    // write/free is not — the detach+attach pair below is spinlock-
-    // guarded (healthTickerMux) against the loopTask helper
-    // homekit_health_arm_fast_mode_if_low(). (codebase-audit-20260517-002)
-    //
-    // All deltas unsigned (uint64_t cast); never (int32_t)(now - past) —
-    // _millis_t is int64 on ESP32 so a cross-callback delta math bug here
-    // would not be a 25-day rollover but a stricter signedness audit.
-    {
-        uint32_t freeHeapNow = esp_get_free_heap_size();
-        _millis_t now = _millis();
-        // Single acquire-load snapshot — used for both the duration check
-        // and the !=0 guard so we evaluate against one consistent value
-        // even if loopTask races a write between the two reads.
-        // (codebase-audit-20260517-001)
-        _millis_t fastModeEntry_snapshot = __atomic_load_n(&fastModeEntryMs, __ATOMIC_ACQUIRE);
-        uint32_t desired;
-        if (freeHeapNow < HOMEKIT_HEALTH_HEAP_WATERMARK)
-        {
-            // Below watermark — (re-)enter fast mode and refresh the
-            // hold timer. Re-arming on every tick while we're under
-            // pressure means recovery is measured from the LAST dip,
-            // not the first.
-            __atomic_store_n(&fastModeEntryMs, now, __ATOMIC_RELEASE);
-            desired = HOMEKIT_HEALTH_INTERVAL_FAST_MS;
-        }
-        else if (fastModeEntry_snapshot != 0 &&
-                 (uint64_t)(now - fastModeEntry_snapshot) < (uint64_t)HOMEKIT_HEALTH_FAST_DURATION_MS)
-        {
-            // Heap recovered but we're still inside the trailing-visibility
-            // window. Hold fast.
-            desired = HOMEKIT_HEALTH_INTERVAL_FAST_MS;
-        }
-        else
-        {
-            // Fully out of fast mode — clear the entry timestamp so the
-            // next dip cleanly re-triggers the fast-mode window from
-            // its own first-tick timestamp.
-            __atomic_store_n(&fastModeEntryMs, (_millis_t)0, __ATOMIC_RELEASE);
-            desired = HOMEKIT_HEALTH_INTERVAL_MS;
-        }
-
-        uint32_t current = __atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED);
-        if (desired != current)
-        {
-            HK_DIAG_LOG("HomeKit health sampler cadence: %lu ms -> %lu ms (free_heap=%lu)",
-                        (unsigned long)current,
-                        (unsigned long)desired,
-                        (unsigned long)freeHeapNow);
-            __atomic_store_n(&currentHealthIntervalMs, desired, __ATOMIC_RELAXED);
-            // Re-arm under the new cadence. Safe from within the
-            // callback (see context note above). Zero lastTickMs so the
-            // first sample after the transition reports tickDrift=0
-            // rather than (newInterval - oldInterval) garbage.
-            // (log-audit-20260517-002)
-            __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
-            taskENTER_CRITICAL(&healthTickerMux);
-            homekitHealthTicker.detach();
-            homekitHealthTicker.attach_ms(desired, homekit_health_log);
-            taskEXIT_CRITICAL(&healthTickerMux);
-        }
-    }
+    // Adaptive cadence decision — extracted into a helper above to keep
+    // this callback under ~240 LoC. (codebase-audit-20260517-005)
+    homekit_health_update_adaptive_cadence(esp_get_free_heap_size());
 #endif
 }
 
