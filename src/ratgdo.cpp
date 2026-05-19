@@ -429,7 +429,11 @@ void service_timer_loop()
     {
         lastHeapWatermarkCheckMs = current_millis;
         uint32_t freeHeap = esp_get_free_heap_size();
-        uint32_t maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        // maxBlock is observability-only — computed on demand, since the
+        // helper only consumes it on the below-watermark (low-heap) path.
+        uint32_t maxBlock = (freeHeap < HOMEKIT_HEALTH_HEAP_WATERMARK)
+                                ? heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)
+                                : 0;
         // Helper does the watermark comparison and is a no-op when the
         // heap is healthy or we're already in fast mode (with a hold-
         // timer refresh on the latter).
