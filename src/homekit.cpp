@@ -533,6 +533,11 @@ constexpr uint32_t HOMEKIT_HEALTH_INTERVAL_MS = 180000; // 180s
 static Ticker homekitHealthTicker;
 
 #ifndef ESP8266
+// codebase-audit-20260517-002: homekitHealthTicker is re-armed from two
+// task contexts (loopTask + esp_timer task). The Arduino Ticker wrapper's
+// _timer pointer write/free is not atomic — spinlock the detach+attach
+// pair. Boot-time arm in setup_homekit() is single-threaded — no lock.
+static portMUX_TYPE healthTickerMux = portMUX_INITIALIZER_UNLOCKED;
 // log-audit-010: adaptive sampler cadence — drops to a 30s interval when
 // free heap falls below the watermark, holds fast for 5 min after recovery
 // so we don't oscillate. Visibility for transient heap dips that hide
@@ -918,8 +923,11 @@ static void homekit_health_log()
     // Context: this runs in the esp_timer task (arduino-esp32 Ticker
     // dispatches there — see v43/audit-W18 comment above). detach() +
     // attach_ms() from within the callback re-arms the underlying
-    // esp_timer via esp_timer_stop / esp_timer_start_periodic, which is
-    // documented safe to call from inside the timer's own callback.
+    // esp_timer via esp_timer_stop / esp_timer_start_periodic. The IDF
+    // calls are task-safe, but the Ticker wrapper's _timer pointer
+    // write/free is not — the detach+attach pair below is spinlock-
+    // guarded (healthTickerMux) against the loopTask helper
+    // homekit_health_arm_fast_mode_if_low(). (codebase-audit-20260517-002)
     //
     // All deltas unsigned (uint64_t cast); never (int32_t)(now - past) —
     // _millis_t is int64 on ESP32 so a cross-callback delta math bug here
@@ -972,8 +980,10 @@ static void homekit_health_log()
             // rather than (newInterval - oldInterval) garbage.
             // (log-audit-20260517-002)
             __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
+            taskENTER_CRITICAL(&healthTickerMux);
             homekitHealthTicker.detach();
             homekitHealthTicker.attach_ms(desired, homekit_health_log);
+            taskEXIT_CRITICAL(&healthTickerMux);
         }
     }
 #endif
@@ -992,11 +1002,13 @@ static void homekit_health_log()
 // only covers the *entry* path.
 //
 // Context: called from loopTask. Ticker detach/attach_ms calls into
-// esp_timer_stop / esp_timer_start_periodic, which are documented safe
-// from any task context (they take the esp_timer service lock). The
-// existing in-callback block runs on the esp_timer task; both writers
+// esp_timer_stop / esp_timer_start_periodic, which are safe from any
+// task context (they take the esp_timer service lock). The Ticker
+// wrapper's _timer pointer write/free is NOT atomic, however — the
+// detach+attach pair below is spinlock-guarded (healthTickerMux)
+// against the esp_timer-task in-callback re-arm. Both writers also
 // use __atomic_store_n on currentHealthIntervalMs so there is no torn
-// read for the /heap handler.
+// read for the /heap handler. (codebase-audit-20260517-002)
 void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock)
 {
     if (freeHeap >= HOMEKIT_HEALTH_HEAP_WATERMARK)
@@ -1026,8 +1038,10 @@ void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock)
     // existing if (lastTickSnapshot) guard in homekit_health_log()
     // handles the zero case correctly). (log-audit-20260517-002)
     __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
+    taskENTER_CRITICAL(&healthTickerMux);
     homekitHealthTicker.detach();
     homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_FAST_MS, homekit_health_log);
+    taskEXIT_CRITICAL(&healthTickerMux);
 }
 #endif
 
