@@ -438,6 +438,15 @@ void service_timer_loop()
         // heap is healthy or we're already in fast mode (with a hold-
         // timer refresh on the latter).
         homekit_health_arm_fast_mode_if_low(freeHeap, maxBlock);
+        // log-audit-20260520-001: deferred-retry for Ticker arm failures.
+        // Cheap steady-state: one volatile load + one branch.
+        if (homekitHealthTicker_armFailed)
+        {
+            uint32_t retryMaxBlock = (freeHeap >= HOMEKIT_HEALTH_HEAP_WATERMARK)
+                                     ? heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)
+                                     : maxBlock;
+            homekit_health_retry_arm_if_failed(freeHeap, retryMaxBlock);
+        }
     }
 
 #endif

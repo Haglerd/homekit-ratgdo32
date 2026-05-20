@@ -128,6 +128,9 @@ extern void homekit_refresh_watchdog_config();
 // (observability-only) on the low-heap path. (codebase-audit-20260517-003)
 constexpr uint32_t HOMEKIT_HEALTH_HEAP_WATERMARK = 20000;
 extern void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock);
+extern void homekit_health_retry_arm_if_failed(uint32_t freeHeap, uint32_t maxBlock);
+extern void homekit_health_ticker_get_status(bool *outActive, uint32_t *outArmCount, uint32_t *outLastFailedMs);
+extern volatile bool homekitHealthTicker_armFailed;
 
 extern char ipv6_addresses[];
 
