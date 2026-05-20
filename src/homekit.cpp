@@ -576,6 +576,26 @@ volatile uint32_t currentHealthIntervalMs = HOMEKIT_HEALTH_INTERVAL_MS;
 // (log-audit-20260517-002).
 static volatile _millis_t fastModeEntryMs = 0;
 static volatile _millis_t lastTickMs      = 0;
+
+// log-audit-20260520-001: Ticker arm-failure observability + retry state.
+// All three counters are written from BOTH task contexts (loopTask arm-fast
+// helper, esp_timer-task adaptive helper, loopTask deferred retry below)
+// under healthTickerMux — same critical section as detach+attach. Web /heap
+// handler reads them under the same lock. armCount uses uint32 because slow-
+// cadence (180s) re-arms can accumulate >1000 over a 7-day uptime; uint16
+// would wrap. Heap delta: 4+4+1 = 9 B static.
+static volatile uint32_t  homekitHealthTicker_armCount        = 0;
+static volatile uint32_t  homekitHealthTicker_lastArmFailedMs = 0;
+// NOT static — read directly from service_timer_loop (loopTask 1Hz fast
+// path) without the spinlock. Volatile + monotonic transitions make the
+// unlocked read race-safe.
+volatile bool homekitHealthTicker_armFailed = false;
+
+// log-audit-20260520-001: gate the detach+attach pair when largest free
+// block is too small to fit an esp_timer struct (~70 B observed; 256 gives
+// allocator-overhead + fragmentation headroom). Hitting this skips the
+// cadence change; the existing ticker keeps firing at its prior interval.
+constexpr uint32_t HOMEKIT_HEALTH_TICKER_REARM_MIN_BLOCK = 256;
 #endif
 
 // Self-healing watchdog. Settings cached at boot + on settings-save
@@ -692,6 +712,25 @@ static void homekit_health_log();
 // the entry-point callback below ~240 LoC. Pairs with the loopTask-side
 // homekit_health_arm_fast_mode_if_low() helper. Pure mechanical move —
 // runs in the same esp_timer task context as before.
+
+// log-audit-20260520-001: centralizes the guarded detach+attach+verify
+// sequence used by both task contexts. Caller must hold healthTickerMux
+// across the entire call. Returns true on success, false on arm failure.
+static bool homekit_health_ticker_rearm_locked(uint32_t intervalMs)
+{
+    homekitHealthTicker.detach();
+    homekitHealthTicker.attach_ms(intervalMs, homekit_health_log);
+    if (homekitHealthTicker.active())
+    {
+        homekitHealthTicker_armCount++;
+        homekitHealthTicker_armFailed = false;
+        return true;
+    }
+    homekitHealthTicker_armFailed       = true;
+    homekitHealthTicker_lastArmFailedMs = (uint32_t)_millis();
+    return false;
+}
+
 static void homekit_health_update_adaptive_cadence(uint32_t freeHeapNow)
 {
     _millis_t now = _millis();
@@ -740,10 +779,31 @@ static void homekit_health_update_adaptive_cadence(uint32_t freeHeapNow)
         // rather than (newInterval - oldInterval) garbage.
         // (log-audit-20260517-002)
         __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
-        taskENTER_CRITICAL(&healthTickerMux);
-        homekitHealthTicker.detach();
-        homekitHealthTicker.attach_ms(desired, homekit_health_log);
-        taskEXIT_CRITICAL(&healthTickerMux);
+        // log-audit-20260520-001: skip the re-arm if the largest free block
+        // can't fit an esp_timer struct — failed esp_timer_create would leave
+        // the Ticker dead. Better to keep firing at the old interval and
+        // re-evaluate next callback.
+        size_t lfb = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if (lfb < HOMEKIT_HEALTH_TICKER_REARM_MIN_BLOCK)
+        {
+            ESP_LOGW(TAG, "HomeKit health: skipping cadence re-arm (largest_free=%uB < %uB), keeping interval=%lums",
+                     (unsigned)lfb,
+                     (unsigned)HOMEKIT_HEALTH_TICKER_REARM_MIN_BLOCK,
+                     (unsigned long)current);
+            __atomic_store_n(&currentHealthIntervalMs, current, __ATOMIC_RELAXED);
+        }
+        else
+        {
+            taskENTER_CRITICAL(&healthTickerMux);
+            bool ok = homekit_health_ticker_rearm_locked(desired);
+            taskEXIT_CRITICAL(&healthTickerMux);
+            if (!ok)
+            {
+                ESP_LOGE(TAG, "HomeKit health: Ticker arm FAILED (in-callback adaptive, desired=%lums, largest_free=%uB) — deferred-retry armed",
+                         (unsigned long)desired, (unsigned)lfb);
+                __atomic_store_n(&currentHealthIntervalMs, current, __ATOMIC_RELAXED);
+            }
+        }
     }
 }
 #endif
@@ -1055,10 +1115,75 @@ void homekit_health_arm_fast_mode_if_low(uint32_t freeHeap, uint32_t maxBlock)
     // existing if (lastTickSnapshot) guard in homekit_health_log()
     // handles the zero case correctly). (log-audit-20260517-002)
     __atomic_store_n(&lastTickMs, (_millis_t)0, __ATOMIC_RELEASE);
+    // log-audit-20260520-001: heap-pressure-guarded re-arm. This site fires
+    // PRECISELY when free heap < 20KB — the highest-risk arm in the codebase.
+    if (maxBlock < HOMEKIT_HEALTH_TICKER_REARM_MIN_BLOCK)
+    {
+        ESP_LOGW(TAG, "HomeKit health: skipping fast-cadence re-arm (largest_free=%uB < %uB), staying at slow interval",
+                 (unsigned)maxBlock,
+                 (unsigned)HOMEKIT_HEALTH_TICKER_REARM_MIN_BLOCK);
+        __atomic_store_n(&currentHealthIntervalMs, HOMEKIT_HEALTH_INTERVAL_MS, __ATOMIC_RELAXED);
+        return;
+    }
     taskENTER_CRITICAL(&healthTickerMux);
-    homekitHealthTicker.detach();
-    homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_FAST_MS, homekit_health_log);
+    bool ok = homekit_health_ticker_rearm_locked(HOMEKIT_HEALTH_INTERVAL_FAST_MS);
     taskEXIT_CRITICAL(&healthTickerMux);
+    if (!ok)
+    {
+        ESP_LOGE(TAG, "HomeKit health: Ticker arm FAILED (loopTask fast-mode entry, largest_free=%uB) — deferred-retry armed",
+                 (unsigned)maxBlock);
+        __atomic_store_n(&currentHealthIntervalMs, HOMEKIT_HEALTH_INTERVAL_MS, __ATOMIC_RELAXED);
+    }
+}
+
+// log-audit-20260520-001: deferred-retry path for Ticker arm failures.
+// Called from service_timer_loop on loopTask at 1Hz. No-op when armed
+// healthy. Idempotent.
+void homekit_health_retry_arm_if_failed(uint32_t freeHeap, uint32_t maxBlock)
+{
+    if (!homekitHealthTicker_armFailed)
+        return;
+    if (maxBlock < HOMEKIT_HEALTH_TICKER_REARM_MIN_BLOCK)
+        return;
+    uint32_t intervalToArm = __atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED);
+
+    // Rate-limit the retry-attempt warning to once per minute — the
+    // retry itself runs every 1Hz, but emitting that log at 1Hz under
+    // sustained heap pressure would flood syslog. Unsigned subtraction
+    // is wraparound-safe per the codebase's unsigned-time-math convention.
+    static uint32_t lastRetryLoggedMs = 0;
+    uint32_t nowMs = (uint32_t)_millis();
+    if (lastRetryLoggedMs == 0 || (nowMs - lastRetryLoggedMs) >= 60000U)
+    {
+        ESP_LOGW(TAG, "HomeKit health: retrying Ticker arm (prior failure at %ums, free=%uB, largest_free=%uB, interval=%lums)",
+                 (unsigned)homekitHealthTicker_lastArmFailedMs,
+                 (unsigned)freeHeap,
+                 (unsigned)maxBlock,
+                 (unsigned long)intervalToArm);
+        lastRetryLoggedMs = nowMs;
+    }
+
+    taskENTER_CRITICAL(&healthTickerMux);
+    bool ok = homekit_health_ticker_rearm_locked(intervalToArm);
+    taskEXIT_CRITICAL(&healthTickerMux);
+    if (ok)
+    {
+        ESP_LOGI(TAG, "HomeKit health: Ticker re-armed successfully after prior failure");
+        lastRetryLoggedMs = 0;  // reset so the next failure cycle logs immediately
+    }
+}
+
+// log-audit-20260520-001: spinlock-protected accessor for /heap handler.
+void homekit_health_ticker_get_status(bool *outActive, uint32_t *outArmCount, uint32_t *outLastFailedMs)
+{
+    taskENTER_CRITICAL(&healthTickerMux);
+    bool a = homekitHealthTicker.active();
+    uint32_t c = homekitHealthTicker_armCount;
+    uint32_t f = homekitHealthTicker_lastArmFailedMs;
+    taskEXIT_CRITICAL(&healthTickerMux);
+    if (outActive)        *outActive        = a;
+    if (outArmCount)      *outArmCount      = c;
+    if (outLastFailedMs)  *outLastFailedMs  = f;
 }
 #endif
 
@@ -1898,8 +2023,21 @@ void setup_homekit()
     // detach homekitHealthTicker: defensive kill before re-arming the
     // health-log periodic ticker at boot. Distinct from TTCtimer; no
     // force-close interaction.
+    // log-audit-20260520-001: verify the boot-time arm. No spinlock needed
+    // (single-threaded — homekit_setup_done one-shot enforces this).
     homekitHealthTicker.detach();
     homekitHealthTicker.attach_ms(HOMEKIT_HEALTH_INTERVAL_MS, homekit_health_log);
+    if (homekitHealthTicker.active())
+    {
+        homekitHealthTicker_armCount++;
+        homekitHealthTicker_armFailed = false;
+    }
+    else
+    {
+        homekitHealthTicker_armFailed       = true;
+        homekitHealthTicker_lastArmFailedMs = (uint32_t)_millis();
+        ESP_LOGE(TAG, "HomeKit health: Ticker arm FAILED at boot — deferred-retry armed");
+    }
 
     // v27: HomeSpan does not invoke the controller-change callback for
     // pairings loaded from NVS at boot, only for live add/remove events.

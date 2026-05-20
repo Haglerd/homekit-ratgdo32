@@ -2119,7 +2119,7 @@ void handle_status()
 // log-audit-010: GET /heap — heap-pressure diagnostic. Pure read-only;
 // no auth (matches /status.json and /crashlog precedent). All sources
 // here are task-safe IDF/lwIP APIs that don't allocate. The handler
-// itself uses a stack-local 256-byte buffer — NO dynamic allocation
+// itself uses a stack-local 320-byte buffer — NO dynamic allocation
 // because this endpoint exists to be queryable WHILE the heap is under
 // pressure. Field names mirror the "HomeKit health:" diag-line keys
 // (free_heap, max_alloc_block) so log-audit grep regex stays compatible.
@@ -2132,7 +2132,11 @@ void handle_status()
 // ESP8266).
 void handle_heap()
 {
-    char buf[256];
+    char buf[320];
+    bool     tickerActive       = false;
+    uint32_t tickerArmCount     = 0;
+    uint32_t tickerArmFailedMs  = 0;
+    homekit_health_ticker_get_status(&tickerActive, &tickerArmCount, &tickerArmFailedMs);
     int written = snprintf(buf, sizeof(buf),
         "{"
         "\"free_heap\":%lu,"
@@ -2143,7 +2147,10 @@ void handle_heap()
         "\"psram_free\":%lu,"
         "\"rssi_dbm\":%d,"
         "\"uptime_s\":%lu,"
-        "\"sampler_interval_ms\":%lu"
+        "\"sampler_interval_ms\":%lu,"
+        "\"ticker_active\":%d,"
+        "\"ticker_arm_count\":%lu,"
+        "\"ticker_arm_failed_at_ms\":%lu"
         "}",
         (unsigned long)esp_get_free_heap_size(),
         (unsigned long)esp_get_minimum_free_heap_size(),
@@ -2153,10 +2160,16 @@ void handle_heap()
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         WiFi.isConnected() ? (int)WiFi.RSSI() : 0,
         (unsigned long)(millis() / 1000UL),
-        (unsigned long)__atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED));
+        (unsigned long)__atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED),
+        tickerActive ? 1 : 0,
+        (unsigned long)tickerArmCount,
+        (unsigned long)tickerArmFailedMs);
     // Truncation guard: snprintf returns the would-be length, not the
-    // truncated length. Worst-case content with all fields at uint32
-    // max is ~230 chars; 256 has comfortable headroom but cap defensively.
+    // truncated length. In practice the rendered JSON is ~288 chars; the
+    // theoretical worst case (all uint32 fields at UINT32_MAX) is ~322,
+    // which would trip this guard. The guard then yields a truncated
+    // non-JSON string — acceptable for a diagnostic endpoint.
+    // (log-audit-20260520-001: +3 ticker fields)
     if (written < 0 || (size_t)written >= sizeof(buf))
     {
         buf[sizeof(buf) - 1] = '\0';
