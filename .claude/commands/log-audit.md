@@ -8,7 +8,7 @@ Pull the **full last-7-day** ratgdo Pi syslog, analyze trends over the whole spa
 
 1. Invoke the `log-auditor` agent
 2. Auditor reads `.claude/.log_audit_state` for the newness cursor (NOT to limit the window)
-3. Auditor SSHes to Pi (`dakot@100.121.96.114` via `~/.ssh/pi_key`), assembles the full last-7-day chronological stream from all rotated archives (`.log` + `.1` + `.2.gz`/`.3.gz`/… via `zcat`), and pulls the device endpoints for current state
+3. Auditor SSHes to Pi (`dakot@100.121.96.114` via `~/.ssh/pi_key`), assembles the full last-7-day chronological stream from all rotated archives (`.log` + `.1` + `.2.gz`/`.3.gz`/…). Each `.gz` is decompressed in its **own** `zcat` invocation — a multi-file `zcat` aborts at the first corrupt archive and silently drops the rest (this once masqueraded as a multi-day gap). Then sanity-checks date coverage and pulls the device endpoints for current state
 4. Auditor pattern-matches across:
    - **P0**: panics, OOM, watchdog resets, reboot loops
    - **P1**: heap leaks, SSE counter desync, WiFi flapping, HomeKit pair loss, force-close stuck

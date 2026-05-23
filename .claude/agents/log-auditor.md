@@ -44,13 +44,21 @@ Logs forwarded over UDP 5140, persisted at `/var/log/ratgdo.log` (current) + `.1
 
 ```bash
 ssh -i ~/.ssh/pi_key dakot@100.121.96.114 '
-  # oldest-first: ls -tr orders rotated archives by mtime ascending
-  zcat -f $(ls -tr /var/log/ratgdo.log.*.gz 2>/dev/null) > /tmp/span.txt 2>/dev/null
-  cat /var/log/ratgdo.log.1 /var/log/ratgdo.log >> /tmp/span.txt 2>/dev/null
+  # Assemble oldest-first (ls -tr = mtime ascending). CRITICAL: zcat each
+  # archive in its OWN invocation. A single multi-file "zcat f1 f2 f3" ABORTS
+  # at the first corrupt .gz and silently drops every file after it (this
+  # masqueraded as a multi-day "gap" on 2026-05-23). Per-file isolation
+  # recovers partial data from a corrupt archive and surfaces a WARN instead.
   cutoff=$(date -u -d "7 days ago" +%Y-%m-%d)
-  awk -v c="$cutoff" "substr(\$0,1,10) >= c" /tmp/span.txt
+  { for f in $(ls -tr /var/log/ratgdo.log.*.gz 2>/dev/null); do
+      zcat -f "$f" 2>/dev/null || echo "[log-audit] WARN: $f corrupt, recovered partial" >&2
+    done
+    cat /var/log/ratgdo.log.1 /var/log/ratgdo.log 2>/dev/null
+  } | awk -v c="$cutoff" "substr(\$0,1,10) >= c"
 ' > /tmp/ratgdo-syslog.txt
 ```
+
+**After pulling, sanity-check date coverage** — a missing calendar day inside the 7-day window means either a real device/forwarding outage OR (more likely, given history) a corrupt `.gz`. Always run `cut -c1-10 /tmp/ratgdo-syslog.txt | sort | uniq -c` and reconcile any absent day against device uptime (monotonic uptime across a gap = the device was up, so the gap is Pi-side log loss, not a device fault). Report any `WARN: ... corrupt` lines.
 
 World-readable, no sudo. **This is the PRIMARY trend source and is pulled EVERY run** — the device `/showlog` endpoint only retains ~24h, so the 7-day picture only exists in the Pi archives:
 - Reboot frequency / uptime-reset count over the week (detect silent reboots via uptime regressions, not just boot banners)
@@ -134,11 +142,14 @@ curl -s --max-time 5 http://10.112.60.151/status.json > /tmp/ratgdo-status.json
 curl -s --max-time 5 http://10.112.60.151/heap > /tmp/ratgdo-heap.json   # ESP32: min_free_heap_ever, ticker_* fields
 
 # Pi syslog — full last-7-day chronological stream (mandatory; see "Log sources / Source 2")
+# Per-file zcat loop is required — a multi-file zcat aborts at the first corrupt .gz.
 ssh -i ~/.ssh/pi_key dakot@100.121.96.114 '
-  zcat -f $(ls -tr /var/log/ratgdo.log.*.gz 2>/dev/null) > /tmp/span.txt 2>/dev/null
-  cat /var/log/ratgdo.log.1 /var/log/ratgdo.log >> /tmp/span.txt 2>/dev/null
   cutoff=$(date -u -d "7 days ago" +%Y-%m-%d)
-  awk -v c="$cutoff" "substr(\$0,1,10) >= c" /tmp/span.txt
+  { for f in $(ls -tr /var/log/ratgdo.log.*.gz 2>/dev/null); do
+      zcat -f "$f" 2>/dev/null || echo "[log-audit] WARN: $f corrupt, recovered partial" >&2
+    done
+    cat /var/log/ratgdo.log.1 /var/log/ratgdo.log 2>/dev/null
+  } | awk -v c="$cutoff" "substr(\$0,1,10) >= c"
 ' > /tmp/ratgdo-syslog.txt
 ```
 
