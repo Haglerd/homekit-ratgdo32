@@ -54,6 +54,34 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 **Acceptance:** if `setup_homekit()`'s one-shot guard is ever weakened or removed, wrap the boot-time `detach()`/`attach_ms()` pair (`src/homekit.cpp` ~1884-1885) in `taskENTER_CRITICAL(&healthTickerMux)` / `taskEXIT_CRITICAL`. No action needed while the guard holds.
 **Notes:** XS — the codebase-audit-20260517-002 spinlock fix deliberately leaves the boot-time Ticker arm unguarded because it runs single-threaded before the esp_timer task is live (correct today). Latent fragility only: correctness depends on `setup_homekit()` never executing twice, enforced by the `homekit_setup_done` one-shot. Filed so the dependency is explicit; not actionable while the guard stands. Confidence high. Heap delta: 0 B. Auto-fix-eligibility: **auto-fixable**.
 
+### [P3] codebase-audit-20260523-001 — SSE write-result accounting block duplicated at 6 call sites in `web.cpp`
+**Status:** queued
+**Source:** codebase-audit 2026-05-23 (Pi cron)
+**Issue:** https://github.com/Haglerd/homekit-ratgdo32/issues/148
+**Acceptance:** one `sse_account_write_result(SSESubscription&, SseWriteResult)` helper replaces all six identical `OK`/`BUFFER_FULL` `__atomic_*` stamping blocks (`SSEheartbeat` ~2863, `SSEBroadcastState` LOG/STATUS in-buffer + malloc paths ~3488/3519/3570/3597, OTA writer ~3813); `pio run -e ratgdo_esp32dev` clean; `consecutiveBufferFull`/`firstBufferFullAt`/`sseSlowWrites` telemetry byte-identical over a short soak.
+**Notes:** S, ESP8266 portability: both, heap delta 0 B (likely flash savings). Strongest dedup in the file — ~100 lines, and the `log-audit-003` streak-start + `v47` reset fixes had to be hand-applied to every copy (real divergence hazard: a missed copy silently desyncs the orphan-sweep 5d reaper). Pure mechanical, zero behavior change. Confidence high. Auto-fix-eligibility: **auto-fixable** (1 file, no FSM, heap Δ 0).
+
+### [P3] codebase-audit-20260523-002 — `json.h`: 4 identical `add_int` overloads collapse to one template
+**Status:** queued
+**Source:** codebase-audit 2026-05-23 (Pi cron)
+**Issue:** https://github.com/Haglerd/homekit-ratgdo32/issues/149
+**Acceptance:** the four `add_int` overloads (`int64_t`/`uint64_t`/`int32_t`/`uint32_t`, `json.h:38-92`) replaced by one `template <typename T>` whose body forwards to `std::to_string(v)`; `pio run -e ratgdo_esp32dev` clean; sample `status.json` length unchanged via serialCLI `S`.
+**Notes:** S, ESP8266 portability: both (shared header, no platform APIs), heap delta 0 B. Bodies are byte-for-byte identical; `std::to_string` already overloads per width so the template resolves correctly at each `JSON_ADD_INT` call site. Optional `static_assert(is_integral_v<T>)` to keep the contract explicit. Confidence high. Auto-fix-eligibility: **auto-fixable** (1 file, header-only).
+
+### [P3] codebase-audit-20260523-003 — `web.cpp`: dead `reapedThisTick` counter masked by `(void)` cast in SSE orphan sweep
+**Status:** queued
+**Source:** codebase-audit 2026-05-23 (Pi cron)
+**Issue:** https://github.com/Haglerd/homekit-ratgdo32/issues/150
+**Acceptance:** `reapedThisTick` (decl ~2627, incremented at ~2657/2670/2738/2758) is either read meaningfully (preferred: a single rate-limited end-of-sweep summary `ESP_LOGI ... reaped %u orphan slot(s)`) or fully removed; the `(void)reapedThisTick;` suppression at ~2775 is gone; `pio run -e ratgdo_esp32dev` clean with no unused-var warning reintroduced.
+**Notes:** XS, ESP8266 portability: both, heap delta 0 B. Write-only dead variable suppressed with a `(void)` cast — the exact "assigned-but-never-read masked by `(void)var;`" hygiene class. Option 1 (consolidated reap-count log) pairs well with the existing `sseOrphansReaped` lifetime counter for log-audits. Confidence high. Auto-fix-eligibility: **auto-fixable** (1 file, handful of lines).
+
+### [P3] codebase-audit-20260523-004 — `web.cpp`: `SSEBroadcastState` LOG_MESSAGE/RATGDO_STATUS branches ~80 lines duplicated
+**Status:** queued
+**Source:** codebase-audit 2026-05-23 (Pi cron)
+**Issue:** https://github.com/Haglerd/homekit-ratgdo32/issues/151
+**Acceptance:** one `sse_emit_event(SSESubscription&, char *wb, size_t wbSize, const char *eventName, const char *data)` helper handles the in-buffer fast path + oversized malloc fallback (ESP32) / framework printf fallback (ESP8266) + write-result accounting; LOG_MESSAGE (~3451-3534) reduced to `logViewer` guard + one call (`"logger"`), RATGDO_STATUS (~3536-3612) reduced to one call (`"message"`); both ESP32 and ESP8266 build clean; log-viewer + status SSE deliver byte-identical payloads.
+**Notes:** M, ESP8266 portability: both, heap delta 0 B (flash savings). The two branches differ ONLY in the event-name string (`"logger"` vs `"message"`) plus LOG_MESSAGE's `logViewer` guard; everything else is copy-pasted. Land codebase-audit-20260523-001 (write-result helper) FIRST so this helper can call it — together they remove ~150 lines. Larger refactor with dual-platform `#ifdef` inside the helper. Confidence high. Auto-fix-eligibility: **auto-fixable** (1 file, ≤3, no FSM, heap Δ 0) — but sequence after -001.
+
 ---
 
 ## Recently completed (log-audit-20260520, 2026-05-20)
