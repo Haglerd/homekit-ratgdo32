@@ -403,6 +403,11 @@ static bool mdnsUpdatePending = false;
 static bool ratgdo_mdns_register_pending = false;
 static constexpr uint32_t RATGDO_MDNS_HEAP_FLOOR_BYTES = 50 * 1024;
 static constexpr uint32_t RATGDO_MDNS_MAX_DEFER_MS = 30 * 1000;
+// NetworkClient ctor allocates ~2 KB via operator new (shared_ptr<NetworkClientRxBuffer>).
+// If new throws bad_alloc AND __cxa_allocate_exception also fails (heap gone + emergency
+// pool exhausted), std::terminate() fires — a try-catch cannot intercept it. HomeKit TLS
+// handshakes can transiently consume ~40 KB; guard accept() against that window.
+static constexpr uint32_t WEB_ACCEPT_MIN_HEAP_BYTES = 8 * 1024;
 #endif
 
 // Connection throttling
@@ -893,6 +898,15 @@ void web_loop()
         return; // Skip this cycle to enforce rate limit
     }
 
+#ifndef ESP8266
+    if (esp_get_free_heap_size() < WEB_ACCEPT_MIN_HEAP_BYTES)
+    {
+        ESP_LOGW(TAG, "web_loop: heap %lu B < %lu B floor, skipping handleClient",
+                 (unsigned long)esp_get_free_heap_size(),
+                 (unsigned long)WEB_ACCEPT_MIN_HEAP_BYTES);
+        return;
+    }
+#endif
     server.handleClient();
     // Update last request time after handling client
     last_request_time = current_time;
