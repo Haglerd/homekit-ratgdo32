@@ -403,11 +403,6 @@ static bool mdnsUpdatePending = false;
 static bool ratgdo_mdns_register_pending = false;
 static constexpr uint32_t RATGDO_MDNS_HEAP_FLOOR_BYTES = 50 * 1024;
 static constexpr uint32_t RATGDO_MDNS_MAX_DEFER_MS = 30 * 1000;
-// NetworkClient ctor allocates ~2 KB via operator new (shared_ptr<NetworkClientRxBuffer>).
-// If new throws bad_alloc AND __cxa_allocate_exception also fails (heap gone + emergency
-// pool exhausted), std::terminate() fires — a try-catch cannot intercept it. HomeKit TLS
-// handshakes can transiently consume ~40 KB; guard accept() against that window.
-static constexpr uint32_t WEB_ACCEPT_MIN_HEAP_BYTES = 8 * 1024;
 #endif
 
 // Connection throttling
@@ -898,15 +893,14 @@ void web_loop()
         return; // Skip this cycle to enforce rate limit
     }
 
-#ifndef ESP8266
-    if (esp_get_free_heap_size() < WEB_ACCEPT_MIN_HEAP_BYTES)
-    {
-        ESP_LOGW(TAG, "web_loop: heap %lu B < %lu B floor, skipping handleClient",
-                 (unsigned long)esp_get_free_heap_size(),
-                 (unsigned long)WEB_ACCEPT_MIN_HEAP_BYTES);
-        return;
-    }
-#endif
+    // v90 (.90) added an 8 KB heap floor here that skipped handleClient() to
+    // dodge the #153 accept-path std::terminate. It backfired: the early
+    // return also stopped servicing/closing EXISTING sockets, and with the
+    // recovery reboot in ratgdo.cpp gated behind a record-low heap reading
+    // the device could wedge in a low-heap state with no path back (the .90
+    // 1h47m hang, log-audit-20260525-001 / issue #154). Reverted in .91 —
+    // .89 ran 26h with sub-1KB floors without this guard. Recovery is now
+    // owned by the de-gated low-heap reboot in ratgdo.cpp::service_timer_loop.
     server.handleClient();
     // Update last request time after handling client
     last_request_time = current_time;

@@ -520,11 +520,16 @@ void service_timer_loop()
         {
             min_heap = free_heap;
             ESP_LOGD(TAG, "Free heap dropped to %d", min_heap);
-            if (free_heap < MIN_FREE_HEAP)
-            {
-                ESP_LOGW(TAG, "Free heap dropped below %d, rebooting to maintain stability", MIN_FREE_HEAP);
-                sync_and_restart();
-            }
+        }
+        // .91 (log-audit-20260525-001): the reboot check used to be nested
+        // inside the `free_heap < min_heap` record-low gate, so once the
+        // all-time minimum was set, a SUSTAINED sub-MIN_FREE_HEAP plateau
+        // never reached sync_and_restart() — the device could sit starved
+        // with no recovery. De-gated: any below-floor reading reboots.
+        if (free_heap < MIN_FREE_HEAP)
+        {
+            ESP_LOGW(TAG, "Free heap dropped below %d, rebooting to maintain stability", MIN_FREE_HEAP);
+            sync_and_restart();
         }
 
 #ifdef MMU_IRAM_HEAP
