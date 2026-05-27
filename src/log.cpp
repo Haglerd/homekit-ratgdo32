@@ -23,6 +23,10 @@
 #include <esp32-hal.h>
 #include <esp_core_dump.h>
 #include <esp_timer.h>  // esp_timer_get_time for log mutex wait instrumentation
+#include <esp_heap_caps.h>  // v.92: heap_caps_get_largest_free_block in panic snapshot
+#include <esp_rom_sys.h>    // v.92: esp_rom_printf in panic snapshot (panic-safe printf)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>  // v.92: pcTaskGetName for the task that panicked
 #endif
 
 // RATGDO project includes
@@ -236,6 +240,30 @@ void panic_handler(arduino_panic_info_t *info, void *arg)
     }
     strlcpy(reasonString, info->reason, sizeof(reasonString));
     strlcpy(crashVersion, AUTO_VERSION, sizeof(crashVersion));
+#ifndef ESP8266
+    // v.92: heap-at-panic snapshot. Investigating the .91 tiT-task
+    // panic (log-audit-20260527-001 / #156): backtrace decoded to
+    // `tiT -> sys_check_timeouts -> memp_malloc(MEMP_SYS_TIMEOUT)
+    // returned NULL -> LWIP_ASSERT`. Arduino-esp32 lwIP is compiled
+    // with MEMP_MEM_MALLOC=1 (lwipopts.h:105), so `memp_malloc` is
+    // really `malloc(sizeof(sys_timeo))` from the regular heap —
+    // meaning the assert IS a heap-OOM signal, just fired from the
+    // lwIP task instead of loopTask's `web_loop`. We need to know
+    // the heap state at the moment of crash to confirm the OOM
+    // hypothesis vs alternatives (stack overflow into struct, alloc
+    // from an interrupt context, etc.). esp_rom_printf is panic-safe
+    // (no heap, no FreeRTOS, no flash cache). pcTaskGetName tells us
+    // which task fired the panic — should be `tiT` for the
+    // sys_check_timeouts class but could surface other heap-OOM
+    // chains (e.g. mDNS, HomeSpan auto-poll).
+    TaskHandle_t panicTask = xTaskGetCurrentTaskHandle();
+    const char *panicTaskName = panicTask ? pcTaskGetName(panicTask) : "?";
+    esp_rom_printf("heap-at-panic: task=%s free=%u max_block=%u min_ever=%u\n",
+                   panicTaskName,
+                   (unsigned)esp_get_free_heap_size(),
+                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                   (unsigned)esp_get_minimum_free_heap_size());
+#endif
     // v37: snapshot complete — block further writes to msgBuffer from
     // tasks that survived past the panic. UART (`SERIAL_PRINT`) still
     // works, so a serial-console observer keeps seeing post-panic
