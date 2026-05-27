@@ -928,14 +928,31 @@ static void homekit_health_log()
                 (unsigned)sseAlloc,
                 (unsigned)sseReaped,
                 (unsigned)jsonPeak);
-    HK_DIAG_LOG("HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms",
+    // v.92 adds `minFreeEver` — `esp_get_minimum_free_heap_size()` is
+    // the IDF intrinsic all-time lowest free-heap reading, updated by
+    // the allocator on every alloc/free with no sampling resolution
+    // limit. The 1Hz Ticker can miss sub-second spikes (e.g. TLS
+    // handshake transients) that the intrinsic does NOT miss — `/heap`
+    // already exposes it, but plotting the diag-hk timeseries lets us
+    // watch it for slope vs steady-state without HTTP polling. If the
+    // device panics in `tiT` again (log-audit-20260527-001 / #156:
+    // heap-OOM via lwIP memp_malloc since arduino-esp32 lwIP runs
+    // with MEMP_MEM_MALLOC=1, so all "lwIP pools" come from the
+    // regular heap), the next pre-crash diag-hk line tells us how
+    // close we were already running to zero.
+    uint32_t minFreeEver = 0;
+#ifndef ESP8266
+    minFreeEver = (uint32_t)esp_get_minimum_free_heap_size();
+#endif
+    HK_DIAG_LOG("HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms minFreeEver=%uB",
                 (unsigned)hkRecoverAttempts,
                 (unsigned)hkLastHintLevel,
                 (unsigned)hkConsecutiveHealthyTicks,
                 (unsigned)loopHWM,
                 (unsigned)tmrSvcHWM,
                 (unsigned)apHWM,
-                (int)tickDriftMs);
+                (int)tickDriftMs,
+                (unsigned)minFreeEver);
 
     // Self-healing watchdog. Trigger only when:
     //   * we've seen a HAP read at least once (lastReadAgo > 0) — so
