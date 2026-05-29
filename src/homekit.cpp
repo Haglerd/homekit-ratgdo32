@@ -940,11 +940,31 @@ static void homekit_health_log()
     // with MEMP_MEM_MALLOC=1, so all "lwIP pools" come from the
     // regular heap), the next pre-crash diag-hk line tells us how
     // close we were already running to zero.
-    uint32_t minFreeEver = 0;
+    uint32_t minFreeEver  = 0;
+    int32_t  minFreeDelta = 0;
 #ifndef ESP8266
     minFreeEver = (uint32_t)esp_get_minimum_free_heap_size();
+    // v.93 (log-audit-20260527-001 / #156): minFreeEver is the all-time
+    // heap floor — it only ever decreases. The signed delta vs the prior
+    // diag sample is therefore <= 0: a NEGATIVE value means the floor
+    // dropped FURTHER this window (the general heap that lwIP's sys_timeo
+    // mallocs draw from is still grazing deeper toward the tiT OOM), ZERO
+    // means it has plateaued. Watching this slope across the diag-hk
+    // timeseries distinguishes "still leaking" from "bounded" WITHOUT
+    // waiting for a rare panic — the gap .92's one-shot minFreeEver left
+    // open. Unsigned subtraction, cast to signed only for display (same
+    // wrap-safe convention as tickDrift). This function runs only in the
+    // esp_timer (Ticker) task, so lastMinFreeEver needs no cross-task
+    // atomic. First sample (lastMinFreeEver==0) reports 0 to avoid a
+    // bogus first-window jump.
+    static uint32_t lastMinFreeEver = 0;
+    if (lastMinFreeEver != 0)
+    {
+        minFreeDelta = (int32_t)(minFreeEver - lastMinFreeEver);
+    }
+    lastMinFreeEver = minFreeEver;
 #endif
-    HK_DIAG_LOG("HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms minFreeEver=%uB",
+    HK_DIAG_LOG("HomeKit diag-hk: recoverAttempts=%u hintLevel=%u hkHealthyTicks=%u loopHWM=%uB tmrHWM=%uB apHWM=%uB tickDrift=%dms minFreeEver=%uB minFreeDelta=%dB",
                 (unsigned)hkRecoverAttempts,
                 (unsigned)hkLastHintLevel,
                 (unsigned)hkConsecutiveHealthyTicks,
@@ -952,7 +972,8 @@ static void homekit_health_log()
                 (unsigned)tmrSvcHWM,
                 (unsigned)apHWM,
                 (int)tickDriftMs,
-                (unsigned)minFreeEver);
+                (unsigned)minFreeEver,
+                (int)minFreeDelta);
 
     // Self-healing watchdog. Trigger only when:
     //   * we've seen a HAP read at least once (lastReadAgo > 0) — so
