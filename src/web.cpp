@@ -32,6 +32,13 @@
 #else
 #include "esp_core_dump.h"
 #include "esp_heap_caps.h" // log-audit-010: handle_heap() needs heap_caps_get_*
+// .93 (log-audit-20260527-001 / #156): handle_heap() walks the lwIP TCP PCB
+// lists (tcp_active_pcbs / tcp_tw_pcbs) to expose live + TIME-WAIT connection
+// counts. tcp_priv.h declares the list-head globals; tcpip.h gives
+// LOCK_TCPIP_CORE() (CONFIG_LWIP_TCPIP_CORE_LOCKING=y) so the walk is a safe
+// snapshot against the tiT task that mutates the lists.
+#include "lwip/tcpip.h"
+#include "lwip/priv/tcp_priv.h"
 #include <ESPmDNS.h>
 #ifndef ESP8266
 // v24: setsockopt(SO_SNDTIMEO) on SSE TCP sockets to bound write times.
@@ -2140,11 +2147,34 @@ void handle_status()
 // ESP8266).
 void handle_heap()
 {
-    char buf[320];
+    char buf[384];
     bool     tickerActive       = false;
     uint32_t tickerArmCount     = 0;
     uint32_t tickerArmFailedMs  = 0;
     homekit_health_ticker_get_status(&tickerActive, &tickerArmCount, &tickerArmFailedMs);
+
+    // .93 (log-audit-20260527-001 / #156): count live + TIME-WAIT TCP PCBs.
+    // The .91 panic was a tiT-task heap-OOM at sys_timeout_abs; the prime
+    // suspect is sys_timeo timers leaked by TCP TIME-WAIT PCBs (each holds a
+    // 2*MSL=120s timer, MSL=60000ms). A tcp_tw count that climbs faster than
+    // it drains is the smoking gun. tcp_active_pcbs / tcp_tw_pcbs are mutated
+    // by the tiT task, so walk them under LOCK_TCPIP_CORE() (real mutex under
+    // CONFIG_LWIP_TCPIP_CORE_LOCKING=y) — a brief safe snapshot, NOT a
+    // blocking socket call (so not the lwip-mailbox deadlock class). Counting
+    // only; no allocation, no PCB mutation.
+    uint32_t tcpActive = 0;
+    uint32_t tcpTimeWait = 0;
+    LOCK_TCPIP_CORE();
+    for (const struct tcp_pcb *p = tcp_active_pcbs; p != NULL; p = p->next)
+    {
+        tcpActive++;
+    }
+    for (const struct tcp_pcb *p = tcp_tw_pcbs; p != NULL; p = p->next)
+    {
+        tcpTimeWait++;
+    }
+    UNLOCK_TCPIP_CORE();
+
     int written = snprintf(buf, sizeof(buf),
         "{"
         "\"free_heap\":%lu,"
@@ -2158,7 +2188,9 @@ void handle_heap()
         "\"sampler_interval_ms\":%lu,"
         "\"ticker_active\":%d,"
         "\"ticker_arm_count\":%lu,"
-        "\"ticker_arm_failed_at_ms\":%lu"
+        "\"ticker_arm_failed_at_ms\":%lu,"
+        "\"tcp_active\":%lu,"
+        "\"tcp_time_wait\":%lu"
         "}",
         (unsigned long)esp_get_free_heap_size(),
         (unsigned long)esp_get_minimum_free_heap_size(),
@@ -2171,13 +2203,15 @@ void handle_heap()
         (unsigned long)__atomic_load_n(&currentHealthIntervalMs, __ATOMIC_RELAXED),
         tickerActive ? 1 : 0,
         (unsigned long)tickerArmCount,
-        (unsigned long)tickerArmFailedMs);
+        (unsigned long)tickerArmFailedMs,
+        (unsigned long)tcpActive,
+        (unsigned long)tcpTimeWait);
     // Truncation guard: snprintf returns the would-be length, not the
-    // truncated length. In practice the rendered JSON is ~288 chars; the
-    // theoretical worst case (all uint32 fields at UINT32_MAX) is ~322,
-    // which would trip this guard. The guard then yields a truncated
-    // non-JSON string — acceptable for a diagnostic endpoint.
-    // (log-audit-20260520-001: +3 ticker fields)
+    // truncated length. In practice the rendered JSON is ~320 chars; the
+    // theoretical worst case (all uint32 fields at UINT32_MAX) is ~360,
+    // which fits the 384-byte buffer. The guard then yields a truncated
+    // non-JSON string only on overflow — acceptable for a diagnostic endpoint.
+    // (log-audit-20260520-001: +3 ticker fields; .93/#156: +2 tcp fields)
     if (written < 0 || (size_t)written >= sizeof(buf))
     {
         buf[sizeof(buf) - 1] = '\0';
