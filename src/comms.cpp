@@ -1228,13 +1228,24 @@ void update_door_state(GarageDoorCurrentState current_state)
         (current_state != garage_door.current_state))
     {
         ESP_LOGI(TAG, "Door state changing from %s to %s (target %s)", DOOR_STATE(garage_door.current_state), DOOR_STATE(current_state), DOOR_STATE(target_state));
+        // Snapshot the OLD current_state BEFORE notify_homekit_current_door_state_change
+        // overwrites garage_door.current_state (homekit.cpp: it assigns the new
+        // state on its first line). The auto-close hook below needs the prior
+        // state to detect a genuine transition INTO Open; reading the global
+        // after the notify always sees the new value, so the `!= CURR_OPEN`
+        // edge test silently never fired and doorOpenedAtMillis was only ever
+        // anchored by checkAutoClose's bootstrap (countdown started at the first
+        // tick, not the physical open — log-audit door auto-close countdown bug).
+        GarageDoorCurrentState prev_current_state = garage_door.current_state;
         notify_homekit_current_door_state_change(current_state);
         notify_homekit_target_door_state_change(target_state);
 
         // Auto-close hook — record when door becomes Open (uptime millis,
-        // works without NTP), clear on any other state.
+        // works without NTP), clear on any other state. Edge test uses the
+        // pre-notify snapshot so a real CLOSED/OPENING→OPEN transition anchors
+        // the countdown to the physical open.
         if (current_state == GarageDoorCurrentState::CURR_OPEN &&
-            garage_door.current_state != GarageDoorCurrentState::CURR_OPEN)
+            prev_current_state != GarageDoorCurrentState::CURR_OPEN)
         {
             doorOpenedAtMillis = millis();
             autoCloseFiredThisCycle = false;
