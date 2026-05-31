@@ -35,49 +35,14 @@ inline char *end_json(char *s, bool remove_nl = true)
     return stpcpy(s, "\n}");
 }
 
-inline char *add_int(char *s, const char *k, int64_t v)
-{
-    *s++ = '"';
-    s = stpcpy(s, k);
-    *s++ = '"';
-    *s++ = ':';
-    *s++ = ' ';
-    s = stpcpy(s, std::to_string(v).c_str());
-    *s++ = ',';
-    *s++ = '\n';
-    *s = 0; // null terminate
-    return s;
-}
-
-inline char *add_int(char *s, const char *k, uint64_t v)
-{
-    *s++ = '"';
-    s = stpcpy(s, k);
-    *s++ = '"';
-    *s++ = ':';
-    *s++ = ' ';
-    s = stpcpy(s, std::to_string(v).c_str());
-    *s++ = ',';
-    *s++ = '\n';
-    *s = 0; // null terminate
-    return s;
-}
-
-inline char *add_int(char *s, const char *k, int32_t v)
-{
-    *s++ = '"';
-    s = stpcpy(s, k);
-    *s++ = '"';
-    *s++ = ':';
-    *s++ = ' ';
-    s = stpcpy(s, std::to_string(v).c_str());
-    *s++ = ',';
-    *s++ = '\n';
-    *s = 0; // null terminate
-    return s;
-}
-
-inline char *add_int(char *s, const char *k, uint32_t v)
+// #149: single function template replacing the four identical
+// int64_t/uint64_t/int32_t/uint32_t overloads. add_int is only ever
+// invoked via the JSON_ADD_INT macro (no address-of taken), so the
+// template is a safe drop-in. std::to_string overloads every reaching
+// integer type (int/long/unsigned/long long), and the time_t (==long)
+// site deduces exactly rather than picking between ambiguous overloads.
+template <typename T>
+inline char *add_int(char *s, const char *k, T v)
 {
     *s++ = '"';
     s = stpcpy(s, k);
