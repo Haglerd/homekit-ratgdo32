@@ -617,6 +617,98 @@ bool clientWrite(WiFiClient client, const char *data)
     return clientWriteEx(client, data) != SseWriteResult::FAILED;
 }
 
+// #148: shared SSE write-result accounting. Byte-identical to the
+// per-site OK/BUFFER_FULL/FAILED tri-state blocks it replaces: same
+// __ATOMIC_RELAXED orders, two separate _millis() calls in the
+// BUFFER_FULL path (one for lastActivity, one inside the prev==0
+// streak-start stamp). No #ifdef inside — the ESP8266 client.printf
+// fallback paths keep their own single lastActivity stamp and are not
+// routed through here (that asymmetry is intentional).
+static inline void accountSseWrite(SSESubscription &s, SseWriteResult r)
+{
+    if (r == SseWriteResult::OK)
+    {
+        s.lastActivity = (uint32_t)_millis();
+        __atomic_store_n(&s.consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
+        __atomic_store_n(&s.firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
+    }
+    else if (r == SseWriteResult::BUFFER_FULL)
+    {
+        s.lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
+        // log-audit-003: stamp streak-start on the 0->1 transition.
+        // fetch_add returns the previous value; if 0 we just started a
+        // streak. Multi-writer: a racing writer may overwrite our stamp
+        // with a slightly later one — acceptable, diagnostic-quality.
+        uint32_t prev = __atomic_fetch_add(&s.consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
+        if (prev == 0)
+        {
+            __atomic_store_n(&s.firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
+        }
+    }
+    // FAILED: no stamp, no counter; slot is being reaped.
+}
+
+// #151: shared SSEBroadcastState per-channel send body. Formats `data`
+// via `fmtP` into the caller-provided buffer (`wb`/`wbSize`); on
+// overflow it takes the oversized path. The internal #ifdef ESP8266
+// split is preserved exactly: ESP8266 uses the framework client.printf
+// fallback (its own single lastActivity stamp, NOT routed through
+// accountSseWrite), ESP32 mallocs an exact-fit buffer, writes via
+// clientWriteEx, then accounts. The buffer is owned by the caller so
+// the ESP8266/ESP32 buffer-selection (#ifdef in SSEBroadcastState)
+// stays at the call site.
+static void sseSendToChannel(uint32_t i, const char *fmtP, char *wb, size_t wbSize, const char *data)
+{
+    if (snprintf_P(wb, wbSize, fmtP, data) >= (int)wbSize)
+    {
+        // Will not fit in our write buffer.
+#ifdef ESP8266
+        subscription[i].client.flush(); // make sure previous data all sent.
+        // ESP8266 keeps the framework printf fallback — its
+        // WiFiClient::availableForWrite() works (queries tcp_sndbuf), so
+        // the framework's send loop doesn't hit the log_e-on-EAGAIN
+        // noise pattern. printf_P (not printf): fmtP is a PSTR/PROGMEM
+        // pointer passed by the caller, and the non-_P printf reads its
+        // format byte-wise from RAM — a flash-pointer there is a garbage
+        // read on lx106. Pre-refactor each branch passed a RAM literal;
+        // printf_P restores byte-identical output from the PROGMEM format.
+        size_t pwrote = subscription[i].client.printf_P(fmtP, data);
+        if (pwrote > 0)
+            subscription[i].lastActivity = (uint32_t)_millis();
+#else
+        // log-audit-004: route oversized payloads through clientWriteEx so
+        // they use the same direct lwip_send path as in-buffer writes —
+        // avoids the framework NetworkClient::write retry loop's `log_e
+        // fail on fd %d, errno: %d` flood on benign EAGAIN flow control.
+        // Heap allocation is fine here: this branch only fires for
+        // payloads > ~490 B (rare).
+        int needed = snprintf_P(NULL, 0, fmtP, data);
+        if (needed > 0)
+        {
+            char *bigBuf = (char *)malloc((size_t)needed + 1);
+            if (bigBuf)
+            {
+                snprintf_P(bigBuf, (size_t)needed + 1, fmtP, data);
+                SseWriteResult r = clientWriteEx(subscription[i].client, bigBuf);
+                free(bigBuf);
+                accountSseWrite(subscription[i], r);  // #148
+            }
+            // malloc failure: drop the oversized entry silently — the
+            // alternative is the noisy framework path we're escaping.
+        }
+#endif
+    }
+    else
+    {
+        // v29: tri-state — stamp on OK or BUFFER_FULL, only skip on FAILED
+        // (real wedge). Tailscale / congested-link subscribers no longer
+        // get reaped every 120s. v47: also reset/increment
+        // consecutiveBufferFull for sweep 5d.
+        SseWriteResult r = clientWriteEx(subscription[i].client, wb);
+        accountSseWrite(subscription[i], r);  // #148
+    }
+}
+
 // Helper functions for connection throttling
 bool registerRequest()
 {
@@ -2666,7 +2758,6 @@ void sweep_sse_orphans()
     // (mod-2^32 wrap-safe at any age).
     uint32_t now = (uint32_t)_millis();
     uint32_t currentlyAlloc = 0;
-    uint32_t reapedThisTick = 0;
     for (uint32_t i = 0; i < SSE_MAX_CHANNELS; i++)
     {
         SSESubscription &s = subscription[i];
@@ -2696,7 +2787,6 @@ void sweep_sse_orphans()
                              (unsigned)age);
                     s.pendingRemove = true;
                     __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
-                    reapedThisTick++;
                     continue;
                 }
             }
@@ -2709,7 +2799,6 @@ void sweep_sse_orphans()
                      s.clientIP.toString().c_str());
             s.pendingRemove = true;
             __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
-            reapedThisTick++;
             continue;
         }
         // 5d) wedged on flow control — v47. After SSE_MAX_CONSECUTIVE_BUFFER_FULL
@@ -2777,7 +2866,6 @@ void sweep_sse_orphans()
 
                 s.pendingRemove = true;
                 __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
-                reapedThisTick++;
                 continue;
             }
         }
@@ -2797,7 +2885,6 @@ void sweep_sse_orphans()
                              (unsigned)age);
                     s.pendingRemove = true;
                     __atomic_fetch_add(&sseOrphansReaped, 1, __ATOMIC_RELAXED);
-                    reapedThisTick++;
                     continue;
                 }
             }
@@ -2814,7 +2901,6 @@ void sweep_sse_orphans()
                  (unsigned)subscriptionCount, (unsigned)currentlyAlloc);
         subscriptionCount = currentlyAlloc;
     }
-    (void)reapedThisTick;
 }
 
 void SSEheartbeat(SSESubscription *s)
@@ -2903,27 +2989,7 @@ void SSEheartbeat(SSESubscription *s)
         // the real wedge signal where lwIP rejected bytes for delivery.
         // v47: also reset/increment consecutiveBufferFull for sweep 5d.
         SseWriteResult r = clientWriteEx(s->client, localBuf);
-        if (r == SseWriteResult::OK)
-        {
-            s->lastActivity = (uint32_t)_millis();
-            __atomic_store_n(&s->consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
-            __atomic_store_n(&s->firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
-        }
-        else if (r == SseWriteResult::BUFFER_FULL)
-        {
-            s->lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
-            // log-audit-003: stamp streak-start on the 0->1 transition.
-            // fetch_add returns the previous value; if 0 we just started a
-            // streak. Multi-writer: a racing writer may overwrite our stamp
-            // with a slightly later one — acceptable, the log line is
-            // diagnostic-quality and the delta is at most one tick.
-            uint32_t prev = __atomic_fetch_add(&s->consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
-            if (prev == 0)
-            {
-                __atomic_store_n(&s->firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
-            }
-        }
-        // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
+        accountSseWrite(*s, r);  // #148
         YIELD();
     }
     else
@@ -3494,85 +3560,9 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                 {
                     if (subscription[i].logViewer)
                     {
-                        if (snprintf_P(wb, wbSize, PSTR("event: logger\ndata: %s\n\n"), data) >= (int)wbSize)
-                        {
-                            // Will not fit in our write buffer.
-#ifdef ESP8266
-                            subscription[i].client.flush(); // make sure previous data all sent.
-                            // ESP8266 keeps the framework printf fallback — its
-                            // WiFiClient::availableForWrite() works (queries
-                            // tcp_sndbuf), so the framework's send loop doesn't
-                            // hit the log_e-on-EAGAIN noise pattern.
-                            size_t pwrote = subscription[i].client.printf("event: logger\ndata: %s\n\n", data);
-                            if (pwrote > 0)
-                                subscription[i].lastActivity = (uint32_t)_millis();
-#else
-                            // log-audit-004: route oversized log payloads through
-                            // clientWriteEx so they use the same direct lwip_send
-                            // path as in-buffer writes — avoids the framework
-                            // NetworkClient::write retry loop's `log_e fail on fd
-                            // %d, errno: %d` flood on benign EAGAIN flow control.
-                            // Heap allocation is fine here: this branch only fires
-                            // for log lines > ~490 B (rare), and ~3 KB allocations
-                            // are clean against typical post-boot heap (~50 KB+).
-                            int needed = snprintf_P(NULL, 0, PSTR("event: logger\ndata: %s\n\n"), data);
-                            if (needed > 0)
-                            {
-                                char *bigBuf = (char *)malloc((size_t)needed + 1);
-                                if (bigBuf)
-                                {
-                                    snprintf_P(bigBuf, (size_t)needed + 1, PSTR("event: logger\ndata: %s\n\n"), data);
-                                    SseWriteResult r = clientWriteEx(subscription[i].client, bigBuf);
-                                    free(bigBuf);
-                                    if (r == SseWriteResult::OK)
-                                    {
-                                        subscription[i].lastActivity = (uint32_t)_millis();
-                                        __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);
-                                        __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);
-                                    }
-                                    else if (r == SseWriteResult::BUFFER_FULL)
-                                    {
-                                        subscription[i].lastActivity = (uint32_t)_millis();
-                                        uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);
-                                        if (prev == 0)
-                                        {
-                                            __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
-                                        }
-                                    }
-                                }
-                                // malloc failure: drop the oversized log entry
-                                // silently — alternative is the noisy framework
-                                // path we're trying to escape.
-                            }
-#endif
-                        }
-                        else
-                        {
-                            // v27: only stamp lastActivity on a successful write so
-                            // the orphan-sweep idle check (5c) actually sees idle slots.
-                            // v29: tri-state — stamp on OK or BUFFER_FULL, only skip
-                            // on FAILED (real wedge). Tailscale / congested-link
-                            // subscribers no longer get reaped every 120s.
-                            // v47: also reset/increment consecutiveBufferFull for sweep 5d.
-                            SseWriteResult r = clientWriteEx(subscription[i].client, wb);
-                            if (r == SseWriteResult::OK)
-                            {
-                                subscription[i].lastActivity = (uint32_t)_millis();
-                                __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
-                                __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
-                            }
-                            else if (r == SseWriteResult::BUFFER_FULL)
-                            {
-                                subscription[i].lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
-                                // log-audit-003: stamp streak-start on 0->1 transition (see SSEheartbeat for rationale).
-                                uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
-                                if (prev == 0)
-                                {
-                                    __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
-                                }
-                            }
-                            // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
-                        }
+                        // #151: shared per-channel send body (oversized/in-buffer
+                        // split + ESP8266/ESP32 fallback all live in the helper).
+                        sseSendToChannel(i, PSTR("event: logger\ndata: %s\n\n"), wb, wbSize, data);
                     }
                 }
                 else if (type == RATGDO_STATUS)
@@ -3580,77 +3570,8 @@ void SSEBroadcastState(const char *data, BroadcastType type)
                     ESP_LOGV(TAG, "Client %s (%s) send status SSE on channel %d, data: %s",
                              IPAddress(subscription[i].clientIP).toString().c_str(),
                              subscription[i].clientUUID.c_str(), i, data);
-                    if (snprintf_P(wb, wbSize, PSTR("event: message\ndata: %s\n\n"), data) >= (int)wbSize)
-                    {
-                        // Will not fit in our write buffer.
-#ifdef ESP8266
-                        subscription[i].client.flush(); // make sure previous data all sent.
-                        // ESP8266 keeps the framework printf fallback (see
-                        // matching LOG_MESSAGE branch for rationale).
-                        size_t pwrote = subscription[i].client.printf("event: message\ndata: %s\n\n", data);
-                        if (pwrote > 0)
-                            subscription[i].lastActivity = (uint32_t)_millis();
-#else
-                        // log-audit-004: route oversized status payloads through
-                        // clientWriteEx (direct lwip_send) instead of the framework's
-                        // log_e-on-EAGAIN-noisy NetworkClient::write retry loop.
-                        // jsonPeak observed at 2312 B — this is the dominant
-                        // oversize-broadcast path; killing the noise here is the
-                        // primary errno-11-recurrence fix.
-                        int needed = snprintf_P(NULL, 0, PSTR("event: message\ndata: %s\n\n"), data);
-                        if (needed > 0)
-                        {
-                            char *bigBuf = (char *)malloc((size_t)needed + 1);
-                            if (bigBuf)
-                            {
-                                snprintf_P(bigBuf, (size_t)needed + 1, PSTR("event: message\ndata: %s\n\n"), data);
-                                SseWriteResult r = clientWriteEx(subscription[i].client, bigBuf);
-                                free(bigBuf);
-                                if (r == SseWriteResult::OK)
-                                {
-                                    subscription[i].lastActivity = (uint32_t)_millis();
-                                    __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);
-                                    __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);
-                                }
-                                else if (r == SseWriteResult::BUFFER_FULL)
-                                {
-                                    subscription[i].lastActivity = (uint32_t)_millis();
-                                    uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);
-                                    if (prev == 0)
-                                    {
-                                        __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
-                                    }
-                                }
-                            }
-                            // malloc failure: skip this broadcast — silent drop
-                            // beats the framework noise path.
-                        }
-#endif
-                    }
-                    else
-                    {
-                        // v29: tri-state — stamp on OK or BUFFER_FULL, only skip
-                        // on FAILED (real wedge). Same rationale as LOG_MESSAGE.
-                        // v47: also reset/increment consecutiveBufferFull for sweep 5d.
-                        SseWriteResult r = clientWriteEx(subscription[i].client, wb);
-                        if (r == SseWriteResult::OK)
-                        {
-                            subscription[i].lastActivity = (uint32_t)_millis(); // v27
-                            __atomic_store_n(&subscription[i].consecutiveBufferFull, 0, __ATOMIC_RELAXED);  // v47: reset on real drain
-                            __atomic_store_n(&subscription[i].firstBufferFullAt, 0, __ATOMIC_RELAXED);      // log-audit-003: clear streak start
-                        }
-                        else if (r == SseWriteResult::BUFFER_FULL)
-                        {
-                            subscription[i].lastActivity = (uint32_t)_millis();  // unchanged: BUFFER_FULL still stamps activity (v29)
-                            // log-audit-003: stamp streak-start on 0->1 transition (see SSEheartbeat for rationale).
-                            uint32_t prev = __atomic_fetch_add(&subscription[i].consecutiveBufferFull, 1, __ATOMIC_RELAXED);  // v47
-                            if (prev == 0)
-                            {
-                                __atomic_store_n(&subscription[i].firstBufferFullAt, (uint32_t)_millis(), __ATOMIC_RELAXED);
-                            }
-                        }
-                        // FAILED: existing path unchanged (no stamp, no counter; slot is being reaped)
-                    }
+                    // #151: shared per-channel send body (see LOG_MESSAGE above).
+                    sseSendToChannel(i, PSTR("event: message\ndata: %s\n\n"), wb, wbSize, data);
                 }
             }
             else
