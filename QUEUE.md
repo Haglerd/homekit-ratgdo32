@@ -4,14 +4,21 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active
 
-### [P2] log-audit-20260527-001 — lwIP `tiT` sys_timeout heap-OOM (#156) — instrumentation shipped, leak-family decision OPEN
-**Status:** PANIC NON-RECURRING since .92 — the original .91 `tiT → sys_check_timeouts → sys_timeout_abs` heap-OOM panic has NOT fired across .92/.93/.94 (~4 days continuous, crashCount=0). The instrumentation that was tracking it (`minFreeEver`/`minFreeDelta` on diag-hk + `tcp_active`/`tcp_time_wait` on /heap + `heap-at-panic` snapshot) SHIPPED in .93 and is carried forward in .94 (see Recently completed below). **Downgraded P0→P2:** device is self-stable, heap floor bounded + flat (.93 stabilized at 184B, delta=0), zero availability impact. Full .91/.92 panic forensics + 7-audit .93 soak history archived to `audit-notes/deferred-archive.md`.
-**Issue:** Haglerd/homekit-ratgdo32#156
-**OPEN DECISION (the only remaining work on #156):** does .95 ship a leak-family fix, or do we declare no-fix-warranted?
-- TCP-TIME-WAIT leak = **FALSIFIED + LOCKED** (overnight heap-poll trail: tcp_time_wait flat 5–8, zero climb). Not the cause.
-- Dead-end fix paths (verified vs the precompiled framework): (a) `CONFIG_LWIP_MAX_TIMEOUTS`/`MEMP_NUM_SYS_TIMEOUT` fictional + inert under `MEMP_MEM_MALLOC=1`; (b) `LWIP_STATS`/`memp_malloc` wrapper not compiled in / not `--wrap`-able; (c) TCP-cleanup audit ruled out.
-- (e) only live candidate: instrument/audit non-TCP lwIP timer families (mDNS / DHCP / IGMP renewal timers). **But** with the floor bounded + stable and zero panic in ~4 days across 3 firmware revs, "no-fix-warranted — keep instrumentation live, treat as latent" is the leading call. **Needs user decision: pursue mDNS/DHCP instrumentation in .95, or close as latent.**
-**Acceptance:** if pursued — identify the leaking non-TCP timer family from the new .94 soak's heap-poll + diag-hk trail, then a targeted cleanup. If closed — keep instrumentation, re-open only if a panic recurs (the `heap-at-panic` line is then diagnostic).
+### [P3] code-audit-20260524-148 (#148) — SSE write-result accounting block duplicated at 6 call sites in `web.cpp`
+**Status:** IN PIPELINE 2026-05-31 (plan→build→review→audit→test). **Source:** GH #148.
+**Acceptance:** extract the OK/BUFFER_FULL tri-state accounting (stamps `lastActivity`, resets/increments `consecutiveBufferFull`, stamps `firstBufferFullAt` on the 0→1 streak transition) — copy-pasted verbatim at 6 sites in `src/web.cpp` (`SSEheartbeat` ~2863-2884, `SSEBroadcastState` LOG_MESSAGE oversized/malloc ~3485-3499, LOG_MESSAGE in-buffer ~3516-3531, + RATGDO_STATUS counterparts) — into one helper. **BEHAVIOR-PRESERVING; SSE counter desync is a P1 bug class, so review must prove the accounting is byte-identical.** Clean build all 3 ESP32 envs.
+
+### [P3] code-audit-20260524-149 (#149) — `json.h`: 4 identical `add_int` overloads collapse to one template
+**Status:** IN PIPELINE 2026-05-31. **Source:** GH #149.
+**Acceptance:** `src/json.h:38-92` has 4 byte-for-byte-identical `add_int` overloads (int64/uint64/int32/uint32); all emit `"key": ` + `std::to_string(v)` + `,\n` + NUL. `std::to_string` already overloads every one of these types → collapse to a single function template, zero behavior change. Clean build. ESP8266 heap delta 0.
+
+### [P3] code-audit-20260524-150 (#150) — dead `reapedThisTick` counter masked by `(void)` cast in SSE orphan sweep
+**Status:** IN PIPELINE 2026-05-31. **Source:** GH #150.
+**Acceptance:** `uint32_t reapedThisTick` (`src/web.cpp` ~2627) is incremented at 4 reap sites (~2657/2670/2738/2758) but never read — only consumer is `(void)reapedThisTick;` (~2775). Decide during plan: either (a) restore the intended per-tick summary log line (if a useful signal), or (b) remove the write-only var + the 4 increments + the void cast. Reviewer picks based on whether the count is worth logging. Clean build.
+
+### [P3] code-audit-20260524-151 (#151) — `SSEBroadcastState` LOG_MESSAGE/RATGDO_STATUS branches ~80 lines duplicated
+**Status:** IN PIPELINE 2026-05-31. **Source:** GH #151.
+**Acceptance:** in `SSEBroadcastState` (`src/web.cpp`), the `LOG_MESSAGE` branch (~3451-3534) and `RATGDO_STATUS` branch (~3536-3612) are structurally near-identical (~80 lines): snprintf_P event header + overflow test → `#ifdef ESP8266` printf fallback `#else` malloc+re-snprintf+clientWriteEx+free+account `#endif` → else clientWriteEx+account. Factor the shared body into one helper parameterized by event name. **BEHAVIOR-PRESERVING + must keep the ESP8266/ESP32 `#ifdef` split intact.** Clean build all 3 ESP32 envs (and ESP8266 path must still compile-gate correctly).
 ### [P1] door-autoclose-20260530-001 — auto-close 15-min countdown anchored off Ticker bootstrap, not physical open — SHIPPED in .94, on-device verify pending
 **Status:** SHIPPED IN .94 + LIVE ON OTA 2026-05-31 (manifest bump `feadd52` → auto-release `v3.4.4-forceclose.94`, bins built from that commit, firmware.md5 `0d9ae1e8e5b40e3e8b7ea090dff41f02` recomputed-match, GitHub Pages serves .94). **.94 = .93 instrumentation + THIS auto-close fix and NOTHING else** — verified the only src/ delta from the .93 release tag to the .94 commit is the comms.cpp prev_current_state snapshot (no lwIP leak-family change; that hunt stays open under #156). All 3 ESP32 envs built clean, no new warnings vs .93. AWAITING: OTA-flash device → on-device reproduction confirm (open door OUTSIDE window → change window in → save → firing logs `door open N min` reflecting physical-open, not 15-from-save).
 **Issue:** (not filed — fork-internal)
@@ -27,6 +34,7 @@ _Two deferred conditional P3s (code-review-20260519-001 TWDT ISR `IRAM_ATTR`, co
 
 ## Recently completed (.94 ship + closure, 2026-05-31)
 
+- **log-audit-20260527-001 / GH #156** (P0→P2→**closed no-fix/latent**) — the lwIP `tiT` sys_timeout heap-OOM panic did NOT recur across .92/.93/.94 (~4 days, 3 revs); heap floor bounded+flat; TCP-TIME-WAIT leak FALSIFIED. Closed as no-fix-warranted: instrumentation (`minFreeEver`/`minFreeDelta`, `tcp_active`/`tcp_time_wait`, `heap-at-panic`) stays live indefinitely; **re-open only if a panic recurs** (the `heap-at-panic` line is then diagnostic). GH #156 closed 2026-05-31. Forensics in `audit-notes/`.
 - **log-audit-20260527-001-impl** (P0 → done) — .93 lwIP-leak slope instrumentation SHIPPED + accepted-effective, carried forward into .94. Added `minFreeDelta` to diag-hk + `tcp_active`/`tcp_time_wait` to /heap (walked under `LOCK_TCPIP_CORE()`) + `heap-at-panic` snapshot. Code-review clean; md5-verified releases (.93 `bfbff20b…`, .94 `0d9ae1e8…`). 44.19h clean .93 soak (TCP-leak FALSIFIED, floor stable 184B) before the .94 OTA. The open leak-family decision folds back into the parent log-audit-20260527-001 (now P2). Full 7-audit soak history in `audit-notes/`.
 
 ## Recently completed (closure pass, 2026-05-28)
