@@ -10,6 +10,20 @@ ESP32 firmware fork that exposes a ratgdo garage-door controller as a HomeKit ac
 - **Web UI**: gzipped + CRC'd into firmware flash, files under `src/www/`
 - **CI/CD**: GitHub Actions builds firmware and webcontent
 
+## OTA release procedure (DO IT THIS WAY — the device pulls from Pages, not the release)
+
+The device's "Update from GitHub" button (`src/www/functions.js` ~1071-1268) does **NOT** download from the GitHub release assets. It queries the releases API for the latest non-prerelease, then downloads `firmware.bin` + `firmware.md5` from **GitHub Pages** `docs/firmware/`. `release.yml` commits the 4 bins to `docs/firmware/` on `main`, then Pages redeploys — which **lags the release build by ~1-2 min**. So a release can exist with all assets attached while the device still 404s. During that window the UI shows "no firmware binary attached yet" and "Firmware MD5 checksum file not found on GitHub. Continue anyway?" — i.e. "it isn't there / the md5 files are fucked". **Verifying the release asset md5 is NOT enough** — that's why past ships looked "done" but weren't.
+
+**Steps to ship `vN`:**
+1. Verify the firmware delta is only what you intend: `git diff <prev-tag>..HEAD --stat -- src/`.
+2. Build all 3 ESP32 envs clean (see pio path below).
+3. Bump `docs/manifest.json` (version + 3 download URLs), commit, push to `main` → auto-release.yml tags + creates the release + dispatches release.yml (builds bins, attaches to release, commits the 4 bins to `docs/firmware/`, pushes; Pages then redeploys).
+4. **MANDATORY done-gate — do NOT tell the user it's ready until this exits 0:**
+   ```bash
+   ./tools/verify-ota.sh vN          # polls the DEVICE-FACING Pages URLs until live, or times out
+   ```
+   It checks: all 4 `docs/firmware/` Pages URLs are 200, the `.md5` is exactly 32 hex chars, the md5 matches the **Pages-served** bin (not just the release asset), the releases API lists `vN` as latest non-prerelease, and the Pages `manifest.json` version matches. Only announce "safe to flash" after it passes.
+
 ## Hard constraints (real pain — not theoretical)
 
 - **ESP8266 heap is *very* tight.** Every buffer-size bump is a budget question. Use `#ifdef ESP32` to gate heavy features off ESP8266.
