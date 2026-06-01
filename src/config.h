@@ -162,6 +162,7 @@ constexpr char cfg_vehicleDepartingHomeKit[] PROGMEM = "vehicleDepartingHomeKit"
 constexpr char cfg_laserEnabled[] PROGMEM = "laserEnabled";
 constexpr char cfg_laserHomeKit[] PROGMEM = "laserHomeKit";
 constexpr char cfg_assistDuration[] PROGMEM = "assistDuration";
+constexpr char cfg_TTCsound[] PROGMEM = "TTCsound";
 constexpr char cfg_occupancyDuration[] PROGMEM = "occupancyDuration";
 constexpr char cfg_enableIPv6[] PROGMEM = "enableIPv6";
 constexpr char cfg_homespanCLI[] PROGMEM = "homespanCLI";
@@ -311,6 +312,7 @@ public:
     bool getVehicleArrivingHomeKit() { return std::get<bool>(get(cfg_vehicleArrivingHomeKit)); };
     bool getVehicleDepartingHomeKit() { return std::get<bool>(get(cfg_vehicleDepartingHomeKit)); };
     uint32_t getAssistDuration() { return std::get<int>(get(cfg_assistDuration)); };
+    bool getTTCsound() { return std::get<bool>(get(cfg_TTCsound)); };
 #endif
 #ifndef ESP8266
     bool getUseSWserial() { return std::get<bool>(get(cfg_useSWserial)); };
