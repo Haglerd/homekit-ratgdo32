@@ -216,9 +216,19 @@ bool helperNTPServer(const std::string &key, const char *value, configSetting *a
 
 bool helperTimeZone(const std::string &key, const char *value, configSetting *action)
 {
-    userConfig->set(key, value);
-    applyTimezoneWithNTP(userConfig->getNTPServer());
-    ESP_LOGI(TAG, "Local time: %s", timeString());
+    // Validate that timezone value is non-empty and does not contain whitespace
+    // or line breaks (a malformed POSIX TZ string can wedge configTzTime). Reject
+    // and keep the prior timezone rather than clobbering it. (upstream 926ec9d1, #158)
+    if (value == nullptr || strlen(value) == 0 || strpbrk(value, " \t\r\n"))
+    {
+        ESP_LOGW(TAG, "Invalid timezone value [%s], ignoring change", value ? value : "(null)");
+    }
+    else
+    {
+        userConfig->set(key, value);
+        applyTimezoneWithNTP(userConfig->getNTPServer());
+        ESP_LOGI(TAG, "Local time: %s", timeString());
+    }
     return true;
 }
 
