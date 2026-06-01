@@ -10,6 +10,15 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.96 (2026-05-31) — Upstream adoption: HomeSpan 2.1.8 + TTC beep-disable + timezone/JSON hardening (upstream-adopt-20260531)
+
+Adopted 4 upstream `ratgdo/homekit-ratgdo32` commits into the fork (audit: `audit-notes/upstream-adopt-20260531.md`; all 4 "major" criteria cleared). Upstream's own version bump (`38045c1a`) was NOT copied — replaced by this `.96`.
+
+- **HomeSpan 2.1.7 → 2.1.8** (`eb66428f`, upstream-adopt-20260531-001). One-line pin bump. Our sole vendored-lib patch (`hap_heap_gate.patch` against `HomeSpan/src/HAP.cpp::processRequest()`) was verified to still apply against the fetched 2.1.8 source: `patch --dry-run -N -p0` → `Hunk #1 succeeded at 111 with fuzz 2 (offset -6 lines)`, exit 0 (the anchor context lines are byte-identical in 2.1.8, shifted −6 lines by an unrelated `LOG0` removal). 2.1.8 inserts a new `HS_CONNECTED` enum after `HS_PAIRED` and redefines `HS_PAIRED` (paired-but-no-secure-connection); our `statusCallback`'s `HS_PAIRED → isPaired=true` is a redundant boot-time set — the authoritative `isPaired` writer is `hap_pair_cb` (`setPairCallback`), unaffected. No firmware code change; enum referenced by name, not ordinal. **Note: flash usage rose to 96.7%** (1,964,568 / 2,031,616 B) with 2.1.8.
+- **TTC beep-disable toggle** (`84693a52`, upstream-adopt-20260531-003, disco only). New `cfg_TTCsound` (default `true` = beep ON = prior behavior). Hand-ported into the fork's diverged TTC machinery; state-transition review confirmed the `sound` flag gates ONLY `tone(BEEPER_PIN,...)` and touches none of the `.95` force-close state (`delayFnCall`'s `preempt_force_close`, `request_force_close_clear`, iteration/detach/dispatch all preserved).
+- **Timezone / status-JSON hardening** (`926ec9d1` #158, upstream-adopt-20260531-002). `helperTimeZone` now rejects empty/whitespace TZ values (keeps prior TZ instead of clobbering); `checkStatus()` wraps `JSON.parse` in try/catch. Declined upstream's `helperNTPServer` set-dedup (conflicts with our diverged disabled-NTP branch, no functional gain).
+- **README wording** (`079d60bd`, upstream-adopt-20260531-004) was already present in the fork — no-op.
+
 ### v3.4.4-forceclose.87 (2026-05-18) — Revert .86 failed-alloc callback (caused reboot storm); keep HAP gate (log-audit-20260518-004)
 
 `.86`'s `heap_caps_register_failed_alloc_callback` portion was a regression: 25 fires in 27 min post-OTA (2026-05-18T06:23 → 06:50 CDT), each on a recoverable 2308B HAP TempBuffer alloc → graceful restart → reboot → same 2308B alloc fails on next boot → loop. The threshold I picked (`>=1KB triggers restart`) was wrong — HomeSpan routinely allocates 1-2KB chunks for HAP request processing and OOM at those sizes is recoverable, not structural. iOS retries the request on TCP timeout; pre-`.86` behavior under the same transient class was zero crashes.
