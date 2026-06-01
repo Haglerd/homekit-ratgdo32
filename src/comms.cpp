@@ -3634,7 +3634,7 @@ GarageDoorCurrentState open_door()
     return GarageDoorCurrentState::CURR_OPENING;
 }
 
-void TTCtimerFn(void (*callback)(), bool light)
+void TTCtimerFn(void (*callback)(), bool light, bool sound)
 {
     if (TTCiterations > 0)
     {
@@ -3659,7 +3659,10 @@ void TTCtimerFn(void (*callback)(), bool light)
             }
         }
 #ifdef RATGDO32_DISCO
-        tone(BEEPER_PIN, 1300, 125);
+        if (sound)
+        {
+            tone(BEEPER_PIN, 1300, 125);
+        }
 #endif
         TTCiterations--;
     }
@@ -3730,6 +3733,11 @@ void TTCtimerFn(void (*callback)(), bool light)
 void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close)
 {
     bool light = userConfig->getTTClight(); // Whether to flash light during delay
+#ifdef RATGDO32_DISCO
+    bool sound = userConfig->getTTCsound(); // Whether to beep during delay (disco beeper)
+#else
+    bool sound = false; // No beeper on non-disco boards; tone() is DISCO-gated anyway
+#endif
 
     // detach TTCtimer: arm-fresh — clobber any prior TTC delay before re-arming.
     TTCtimer.detach();                 // Terminate existing timer if any
@@ -3743,17 +3751,17 @@ void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close)
     TTCwasLightOn = garage_door.light; // Current state of light
     ESP_LOGI(TAG, "Start function delay timer for %lums (%d iterations)", ms, TTCiterations);
     TTCendTime = _millis() + (_millis_t)ms;
-    TTCtimer.attach_ms(TTCinterval, [callback, light]()
+    TTCtimer.attach_ms(TTCinterval, [callback, light, sound]()
                        {
 #ifdef ESP8266
-                           schedule_recurrent_function_us([callback, light]()
+                           schedule_recurrent_function_us([callback, light, sound]()
                                                           {
-                                                              TTCtimerFn(callback, light);
+                                                              TTCtimerFn(callback, light, sound);
                                                               return false; // run the fn only once
                                                           },
                                                           0); // zero micro seconds (run asap)
 #else
-                           TTCtimerFn(callback, light);
+                           TTCtimerFn(callback, light, sound);
 #endif
                        });
 }
