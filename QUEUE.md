@@ -4,6 +4,18 @@ Priority-ordered. Top = next. Detailed analysis lives in `audit-notes/` (gitigno
 
 ## Active
 
+### Upstream adoption → .96 (APPLIED 2026-05-31, awaiting OTA flash + on-device verify; audit: `audit-notes/upstream-adopt-20260531.md`)
+
+Adopted 4 upstream `ratgdo/homekit-ratgdo32` commits into the fork. Upstream was read-only reference — ALL work in `Haglerd/homekit-ratgdo32` only. Audit cleared all 4 "major" criteria. Upstream `38045c1a` (their version bump) NOT copied — replaced by our `.96`. **All 3 code items committed as discrete revertable commits; `ratgdo_esp32dev` builds clean (SUCCESS, 116s); HomeSpan 2.1.8 fetched + HAP patch dry-run verified against the fetched source. Bundled into `.96` (manifest + changelog bumped).**
+
+- **upstream-adopt-20260531-001** (P2, `eb66428f`) — **DONE (commit `0e912c7`), pending on-device verify.** HomeSpan 2.1.7 → 2.1.8, `platformio.ini`. **Patch-gate EMPIRICALLY CONFIRMED:** `patch --dry-run -N -p0` against the fetched 2.1.8 `HAP.cpp` → `Hunk #1 succeeded at 111 with fuzz 2 (offset -6 lines)`, exit 0. `monitor_filters` left active (not taken). HS_PAIRED semantic shift = redundant-set only (authoritative writer `hap_pair_cb` unaffected); no code change. **Flash rose to 96.7%** (1,964,568/2,031,616 B) — tight, watch on future bumps. **On-device verify:** HomeKit responsive, `paired:yes`, controllers count, no No-Response; clean status-log transition.
+
+- **upstream-adopt-20260531-002** (P3, `926ec9d1`) — **DONE (commit `41a69e2`), pending on-device verify.** Took: `helperTimeZone` whitespace/empty rejection (`config.cpp`) + try/catch around `JSON.parse` in `checkStatus` (`functions.js`). Declined the NTP-dedup half (our `helperNTPServer` diverged). **On-device verify:** POST a whitespace-only TZ via /setgdo → syslog logs "Invalid timezone value, ignoring change" + prior TZ retained; web UI renders without console parse throw.
+
+- **upstream-adopt-20260531-003** (P3, `84693a52`) — **DONE (commit `7572146`), pending on-device verify.** `cfg_TTCsound` beep-disable (disco), 7 files (comms/config.h/config.cpp/web/functions.js/index.html/status.json). State-transition review confirmed state-neutral — `sound` gates only `tone()`; `.95` force-close divergence (`preempt_force_close`, `request_force_close_clear`, iteration/detach/dispatch) preserved. Default ON = current behavior. **On-device verify (TTC-zone change):** default beep sounds each tick; uncheck "Beep during time-to-close" + save → light still flashes, NO beep; **force-close (HK-FC tile) 2-attempt sequence still completes unaffected.**
+
+- **upstream-adopt-20260531-004** (P3, `079d60bd`) — **DONE (no-op).** README "Some Security+ 2.0 doors" already present at `README.md:247`. No commit.
+
 _Two deferred conditional P3s (code-review-20260519-001 TWDT ISR `IRAM_ATTR`, code-review-20260519-002 `setup_homekit` healthTickerMux guard) archived to `audit-notes/deferred-archive.md` on 2026-05-29 — not drain-actionable; re-promote only if their trigger conditions fire._
 
 ---
