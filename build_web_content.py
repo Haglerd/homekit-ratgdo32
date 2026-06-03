@@ -60,6 +60,10 @@ for file in filenames:
     if file.endswith(".js.map"):
         continue
 
+    # skip markdown docs (e.g. icons/README.md) - not served, saves flash
+    if file.endswith(".md"):
+        continue
+
     with open(sourcepath + "/" + file, "rb") as f:
         # read contents of the file
         data = f.read()
@@ -84,7 +88,7 @@ for file in filenames:
 for _pass in range(8):
     changed = False
     for file in filenames:
-        if file[0] == "." or file == "status.json" or file.endswith(".js.map"):
+        if file[0] == "." or file == "status.json" or file.endswith(".js.map") or file.endswith(".md"):
             continue
         t = file.rpartition(".")[-1]
         if t not in ("html", "htm", "js"):
@@ -130,6 +134,10 @@ for file in filenames:
 
     # skip js.map files
     if file.endswith(".js.map"):
+        continue
+
+    # skip markdown docs (e.g. icons/README.md) - not served, saves flash
+    if file.endswith(".md"):
         continue
 
     # create gzip file name

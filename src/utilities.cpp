@@ -175,6 +175,12 @@ char *toHHMMSSmmm(_millis_t t)
 }
 
 #ifdef CONFIG_FREERTOS_USE_TRACE_FACILITY
+static const char *taskStateName(eTaskState s)
+{
+    static const char *const names[] = {"eRunning", "eReady", "eBlocked", "eSuspended", "eDeleted", "eInvalid"};
+    return ((unsigned)s < (sizeof(names) / sizeof(names[0]))) ? names[(unsigned)s] : "eUnknown";
+}
+
 void printTaskInfo(const char *buf)
 {
     int count = uxTaskGetNumberOfTasks();
@@ -191,7 +197,7 @@ void printTaskInfo(const char *buf)
                           (int)(tasks[i].xCoreID < 16) ? tasks[i].xCoreID : -1,
                           (int)tasks[i].uxBasePriority,
                           (int)tasks[i].usStackHighWaterMark,
-                          (magic_enum::enum_name(tasks[i].eCurrentState)).data());
+                          taskStateName(tasks[i].eCurrentState));
         }
         Serial.print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\n\n");
     }

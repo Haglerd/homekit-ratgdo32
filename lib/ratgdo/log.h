@@ -37,9 +37,13 @@
 // On ESP32 we save reboot and crash logs in RTC noinit memory, which is approx 8KB,
 // But we have two of them and some other things so..
 #define LOG_SAVE_BUFFER_SIZE (512 * 7)
-// But we have way more regular RAM for volatile log buffer. 16KB allows us to keep
-// all logs from startup until a point where user can request a copy of the log.
-#define LOG_BUFFER_SIZE (1024 * 16)
+// Heap-floor reclamation (audit: runtime min-free dipped to ~64B on .96).
+// Trimmed the ESP32 volatile ring from 16KB -> 8KB to reclaim ~8KB direct
+// heap (msgBuffer is malloc'd in log.cpp). 8KB still keeps a generous span
+// of post-init logs, and stays well above LOG_SAVE_BUFFER_SIZE (3584) so the
+// panic/reboot RTC crash snapshot (which copies min(available, ringsize))
+// remains fully intact. ESP8266 values above are untouched.
+#define LOG_BUFFER_SIZE (1024 * 8)
 #endif
 
 #define LINE_BUFFER_SIZE 256

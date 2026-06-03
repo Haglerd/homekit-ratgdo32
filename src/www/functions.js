@@ -265,6 +265,36 @@ async function loadTZinfo(list) {
     }
 }
 
+// Minimal markdown -> HTML renderer. Replaces the ~40KB marked.umd.js
+// library (only used to render GitHub release notes) to reclaim firmware
+// flash. Handles the subset GitHub changelogs use: headings, bold, italic,
+// inline + fenced code, links, lists. HTML is escaped first so the release
+// body cannot inject markup (parity with marked's default sanitization).
+function mdToHtml(md) {
+    const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    let s = esc(String(md));
+    // fenced code blocks first; stash so inline rules below don't touch them
+    const blocks = [];
+    s = s.replace(/```[\s\S]*?```/g, (m) => {
+        blocks.push("<pre><code>" + m.slice(3, -3).replace(/^\n/, "") + "</code></pre>");
+        // NUL-delimited placeholder: NUL cannot occur in a UTF-8 release body,
+        // so this never collides with prose (a bare " 4 " would have).
+        return "\x00" + (blocks.length - 1) + "\x00";
+    });
+    s = s.replace(/^(#{1,6})\s+(.*)$/gm, (m, h, t) => "<h" + h.length + ">" + t + "</h" + h.length + ">");
+    s = s.replace(/^[ \t]*[-*+]\s+(.*)$/gm, "<li>$1</li>");
+    s = s.replace(/(?:<li>.*<\/li>\n?)+/g, (m) => "<ul>" + m.replace(/\n/g, "") + "</ul>");
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+    // href allows one level of balanced parens (Wikipedia/GitHub URLs) so the
+    // markdown link's closing ) isn't mistaken for a paren inside the URL.
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/\n{2,}/g, "<br><br>").replace(/\n/g, "<br>");
+    s = s.replace(/\x00(\d+)\x00/g, (m, i) => blocks[+i] ?? m);
+    return s;
+}
+
 function showQrCode(payload) {
     if (serverStatus.paired)
         return;
@@ -1117,7 +1147,7 @@ async function checkVersion(progress = "dotdot1") {
             }
         });
         if (latest?.body) {
-            document.getElementById("firmwareDescription").innerHTML = marked.parse(latest.body);
+            document.getElementById("firmwareDescription").innerHTML = mdToHtml(latest.body);
         }
         if (asset?.name) {
             // v37 (CORS hotfix): use Pages URL, not the github.com release

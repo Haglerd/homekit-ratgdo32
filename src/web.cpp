@@ -227,7 +227,11 @@ constexpr char gitTaggedURL[] = "https://raw.githubusercontent.com/" _GITUSER "/
 // For Server Sent Events (SSE) support
 // Just reloading page causes register on new channel.  So we need a reasonable number
 // to accommodate "extra" until old one is detected as disconnected.
-#define SSE_MAX_CHANNELS 8
+// Heap-floor reclamation (audit: runtime min-free dipped to ~64B on .96).
+// Reduced from 8 -> 4 to reclaim ~0.7KB .bss across the two arrays sized by
+// this (subscription[] and recentReaps[]). 4 channels still covers a page
+// reload registering a fresh channel before the stale one is reaped.
+#define SSE_MAX_CHANNELS 4
 // Orphan-slot sweep timeouts. Run from service_timer_loop independent
 // of the per-slot heartbeat Ticker (which doesn't fire when heartbeat=0).
 //   PREHANDSHAKE: subscribed but EventSource never came back to /events/N.
@@ -326,7 +330,7 @@ SSESubscription subscription[SSE_MAX_CHANNELS];
 // transient wedge events (a single reap then a clean reconnect after
 // >60s) are unaffected.
 //
-// Heap budget: SSE_MAX_CHANNELS (8) slots * 40 bytes = 320 bytes BSS.
+// Heap budget: SSE_MAX_CHANNELS (4) slots * 40 bytes = 160 bytes BSS.
 // Zero heap allocation — uuid is fixed char[40] (UUID = 36 chars + null +
 // slack), not String. Acceptable on ESP8266.
 //
@@ -340,6 +344,23 @@ struct RecentReap
 };
 static RecentReap recentReaps[SSE_MAX_CHANNELS];
 constexpr uint32_t SSE_DAMPENER_WINDOW_MS = 60000;
+
+// Heap-floor reclamation (audit: runtime min-free dipped to ~64B on .96).
+// Merged web_loop's `localJson` and handle_status's `status_json_send`
+// (both STATUS_JSON_BUFFER_SIZE) into one shared file-scope buffer, saving
+// ~2.5KB .bss. SAFE because both former buffers were loopTask-only,
+// each filled under jsonMutex via strncpy from the global `status_json`
+// then consumed AFTER GIVE_MUTEX, and they are strictly sequential within
+// one web_loop iteration (the SSEBroadcastState fan-out fully completes
+// before server.handleClient() can dispatch handle_status). No other task
+// touches this buffer. NOTE: the global malloc'd `status_json` scratch is
+// deliberately NOT folded in here — it's read cross-task under the mutex,
+// so sharing it back would reintroduce a torn-buffer race.
+// ESP8266 holds the mutex across server.send_P in handle_status and never
+// used status_json_send, so this is ESP32-only and costs ESP8266 nothing.
+#ifndef ESP8266
+static char statusJsonCopy[STATUS_JSON_BUFFER_SIZE];
+#endif
 // During firmware update note which subscribed client is updating.
 // v38 (audit W5): `volatile` qualifier added. Pointer is written by
 // handle_firmware_upload (loopTask) and read by the HK watchdog Ticker
@@ -957,11 +978,19 @@ void web_loop()
         // so a static buffer here is single-writer/single-reader and
         // safe — no race even though it's now shared across iterations.
         bool doFanout = !firmwareUpdateSub;
+        // Heap-floor reclamation: ESP32 shares one file-scope copy buffer
+        // (statusJsonCopy) with handle_status — see its declaration. ESP8266
+        // keeps a private local static (it has no handle_status send buffer
+        // to merge with, so a shared buffer would only add .bss there).
+#ifdef ESP8266
         static char localJson[STATUS_JSON_BUFFER_SIZE];
+#else
+        char *const localJson = statusJsonCopy;
+#endif
         if (doFanout)
         {
-            strncpy(localJson, json, sizeof(localJson) - 1);
-            localJson[sizeof(localJson) - 1] = '\0';
+            strncpy(localJson, json, STATUS_JSON_BUFFER_SIZE - 1);
+            localJson[STATUS_JSON_BUFFER_SIZE - 1] = '\0';
         }
         mdnsUpdatePending = true;
         GIVE_MUTEX();
@@ -2162,9 +2191,10 @@ void handle_status()
     // stall mitigation isn't load-bearing on ESP8266 (SSE path
     // can't sustain enough concurrent subscribers to expose the
     // deadlock surface anyway).
-#ifndef ESP8266
-    static char status_json_send[STATUS_JSON_BUFFER_SIZE];
-#endif
+    // Heap-floor reclamation: ESP32 reuses the shared file-scope
+    // statusJsonCopy buffer (merged with web_loop's former localJson).
+    // loopTask-only and strictly sequential with the web_loop fan-out, so
+    // the merge is behavior-neutral. See statusJsonCopy declaration.
     size_t jsonLen;
 
     TAKE_MUTEX();
@@ -2176,7 +2206,7 @@ void handle_status()
     // Defense-in-depth: belt-and-suspenders if build_status_json ever
     // regresses (buffer overflow truncating before the close brace, or
     // a refactor that loses the terminator). Symmetry with the ESP32
-    // branch's explicit `status_json_send[sizeof - 1] = '\0'`. Safe
+    // branch's explicit `statusJsonCopy[STATUS_JSON_BUFFER_SIZE - 1] = '\0'`. Safe
     // here because we hold the mutex (only writer at a time) and we're
     // writing the last byte of a buffer meant to be a C-string.
     json[STATUS_JSON_BUFFER_SIZE - 1] = '\0';
@@ -2185,10 +2215,10 @@ void handle_status()
     server.send_P(200, type_json, json);
     GIVE_MUTEX();
 #else
-    strncpy(status_json_send, json, sizeof(status_json_send) - 1);
-    status_json_send[sizeof(status_json_send) - 1] = '\0';
+    strncpy(statusJsonCopy, json, sizeof(statusJsonCopy) - 1);
+    statusJsonCopy[sizeof(statusJsonCopy) - 1] = '\0';
     GIVE_MUTEX();
-    jsonLen = strlen(status_json_send);
+    jsonLen = strlen(statusJsonCopy);
     // MH6 instrumentation: track peak across the health-log window.
     {
         uint32_t prev = __atomic_load_n(&statusJsonPeakLen, __ATOMIC_RELAXED);
@@ -2198,7 +2228,7 @@ void handle_status()
     }
 
     server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
-    server.send_P(200, type_json, status_json_send);
+    server.send_P(200, type_json, statusJsonCopy);
 #endif
     response_time = _millis() - startTime;
     max_response_time = std::max(max_response_time, response_time);
@@ -3332,11 +3362,11 @@ void handle_subscribe()
         // NOT when it's INADDR_NONE (0xFFFFFFFF, the marker that
         // setup_web + removeSSEsubscription assign to "free" the slot).
         //
-        // Effect: the very first 8 subscribes worked (initial slots have
+        // Effect: the very first SSE_MAX_CHANNELS subscribes worked (initial slots have
         // dword=0 from struct init, so !clientIP was true). Every slot
         // subsequently freed via removeSSEsubscription was set to
         // INADDR_NONE — at which point the scan never saw it as free
-        // again. After all 8 slots had been used + freed once, the device
+        // again. After all SSE_MAX_CHANNELS slots had been used + freed once, the device
         // permanently rejected new subscribes with 503 "no free slots
         // available," even though the sweep correctly reported
         // sseSlotsAlloc=0. The sweep and the scan disagreed about what

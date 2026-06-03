@@ -19,7 +19,6 @@
 #ifndef ESP8266
 #include <time.h>
 #include <esp_timer.h>
-#include <magic_enum.hpp>
 #endif
 
 #ifdef ESP8266
