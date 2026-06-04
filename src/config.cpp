@@ -782,6 +782,65 @@ std::variant<bool, int, configStr> userSettings::get(const std::string &key)
     return v;
 }
 
+// W42 (deferred): torn-read-safe string getter. The previous string
+// getters copied the variant under the lock but then dereferenced the
+// live configStr.str pointer AFTER GIVE_MUTEX(), racing a concurrent
+// set(key, const char*) that strlcpy()'s into that same buffer.
+//
+// ESP32: copy the live string into a stable PER-KEY snapshot slot while
+// still holding the mutex, then return the slot pointer. Per-key slots
+// (one per string key, lazily allocated to that key's configured max)
+// guarantee two readers of different keys can't tear each other, and
+// the returned pointer stays valid until at least the next getStr() for
+// that same key. Total ~292 B across the 10 string keys, allocated once.
+//
+// A well-formed concurrent state always yields the exact bytes a correct
+// read would: the snapshot is taken atomically w.r.t. set() because both
+// hold the same mutex.
+#ifndef ESP8266
+const char *userSettings::getStr(const std::string &key)
+{
+    TAKE_MUTEX();
+    const char *result = "";
+    auto it = settings.find(key);
+    if (it != settings.end() && std::holds_alternative<configStr>(it->second.value))
+    {
+        const configStr &cs = std::get<configStr>(it->second.value);
+        // Lazily allocate this key's snapshot slot, sized to its max.
+        char *&slot = strSnapshots[key];
+        if (slot == nullptr)
+        {
+            slot = static_cast<char *>(malloc(cs.max));
+            if (slot == nullptr)
+            {
+                // Allocation failed (should never happen at steady state;
+                // slots total ~292 B). Fall back to the live pointer — no
+                // worse than the pre-fix behaviour.
+                GIVE_MUTEX();
+                return cs.str;
+            }
+            slot[0] = '\0';
+        }
+        strlcpy(slot, cs.str, cs.max);
+        result = slot;
+    }
+    GIVE_MUTEX();
+    return result;
+}
+#else
+// ESP8266: single-threaded (no mutex, no race). Return the live pointer
+// directly — zero extra heap, no snapshot map allocated at all.
+const char *userSettings::getStr(const std::string &key)
+{
+    auto it = settings.find(key);
+    if (it != settings.end() && std::holds_alternative<configStr>(it->second.value))
+    {
+        return std::get<configStr>(it->second.value).str;
+    }
+    return "";
+}
+#endif
+
 configSetting userSettings::getDetail(const std::string &key)
 {
     TAKE_MUTEX();

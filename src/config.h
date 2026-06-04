@@ -232,6 +232,28 @@ private:
     void toFile(Print &file);
 #ifndef ESP8266
     SemaphoreHandle_t mutex;
+    // W42 (deferred): close the torn-read race in the string getters.
+    // get() returns a copy of the variant under the mutex, but the
+    // string getters then deref the live configStr.str pointer AFTER
+    // the lock is released — a concurrent set(key, const char*) does
+    // strlcpy() into that same live buffer, so a reader could observe a
+    // half-overwritten string. Latent today (all readers run on
+    // loopTask) but future-proofed here.
+    //
+    // getStr() snapshots the live string into a STABLE PER-KEY slot
+    // while holding the mutex, then returns the slot pointer. Per-key
+    // (not one shared slot) so two readers of DIFFERENT keys never
+    // tear each other; the slot stays valid until at least the next
+    // getStr() for that same key. Slots are lazily allocated, sized to
+    // each key's configured max (~292 B total across the 10 string
+    // keys). ESP8266 is exempt entirely (see config.cpp): single-
+    // threaded, no race, and its tight heap must not pay for snapshots.
+    std::map<std::string, char *> strSnapshots;
+    const char *getStr(const std::string &key);
+#else
+    // ESP8266: single-threaded, no mutex, no race. Return the live
+    // pointer with zero extra storage.
+    const char *getStr(const std::string &key);
 #endif
 
 public:
@@ -256,18 +278,18 @@ public:
 #define ESP8266_SAVE_CONFIG()
 #endif
 
-    const char *getDeviceName() { return (std::get<configStr>(get(cfg_deviceName)).str); };
+    const char *getDeviceName() { return getStr(cfg_deviceName); };
     bool getWifiChanged() { return std::get<bool>(get(cfg_wifiChanged)); };
     uint32_t getWifiPower() { return std::get<int>(get(cfg_wifiPower)); };
     uint32_t getWifiPhyMode() { return std::get<int>(get(cfg_wifiPhyMode)); };
     bool getStaticIP() { return std::get<bool>(get(cfg_staticIP)); };
-    const char *getLocalIP() { return (std::get<configStr>(get(cfg_localIP)).str); };
-    const char *getSubnetMask() { return (std::get<configStr>(get(cfg_subnetMask)).str); };
-    const char *getGatewayIP() { return (std::get<configStr>(get(cfg_gatewayIP)).str); };
-    const char *getNameserverIP() { return (std::get<configStr>(get(cfg_nameserverIP)).str); };
+    const char *getLocalIP() { return getStr(cfg_localIP); };
+    const char *getSubnetMask() { return getStr(cfg_subnetMask); };
+    const char *getGatewayIP() { return getStr(cfg_gatewayIP); };
+    const char *getNameserverIP() { return getStr(cfg_nameserverIP); };
     bool getPasswordRequired() { return std::get<bool>(get(cfg_passwordRequired)); };
-    const char *getwwwUsername() { return (std::get<configStr>(get(cfg_wwwUsername)).str); };
-    const char *getwwwCredentials() { return (std::get<configStr>(get(cfg_wwwCredentials)).str); };
+    const char *getwwwUsername() { return getStr(cfg_wwwUsername); };
+    const char *getwwwCredentials() { return getStr(cfg_wwwCredentials); };
     uint32_t getGDOSecurityType() { return std::get<int>(get(cfg_GDOSecurityType)); };
     uint32_t getTTCseconds() { return std::get<int>(get(cfg_TTCseconds)); };
     bool getTTClight() { return std::get<bool>(get(cfg_TTClight)); };
@@ -275,14 +297,14 @@ public:
     uint32_t getLEDidle() { return std::get<int>(get(cfg_LEDidle)); };
     uint32_t getMotionTriggers() { return std::get<int>(get(cfg_motionTriggers)); };
     bool getEnableNTP() { return std::get<bool>(get(cfg_enableNTP)); };
-    const char *getNTPServer() { return (std::get<configStr>(get(cfg_ntpServer)).str); };
+    const char *getNTPServer() { return getStr(cfg_ntpServer); };
     uint32_t getDoorUpdateAt() { return std::get<int>(get(cfg_doorUpdateAt)); };
     uint32_t getDoorOpenAt() { return std::get<int>(get(cfg_doorOpenAt)); };
     uint32_t getDoorCloseAt() { return std::get<int>(get(cfg_doorCloseAt)); };
-    const char *getTimeZone() { return (std::get<configStr>(get(cfg_timeZone)).str); };
+    const char *getTimeZone() { return getStr(cfg_timeZone); };
     bool getSoftAPmode() { return std::get<bool>(get(cfg_softAPmode)); };
     bool getSyslogEn() { return std::get<bool>(get(cfg_syslogEn)); };
-    const char *getSyslogIP() { return (std::get<configStr>(get(cfg_syslogIP)).str); };
+    const char *getSyslogIP() { return getStr(cfg_syslogIP); };
     uint32_t getSyslogPort() { return std::get<int>(get(cfg_syslogPort)); };
     uint32_t getSyslogFacility() { return std::get<int>(get(cfg_syslogFacility)); };
     uint32_t getLogLevel() { return std::get<int>(get(cfg_logLevel)); };

@@ -13,6 +13,8 @@ import shutil
 import base64
 import zlib
 import gzip
+import subprocess
+import tempfile
 
 #platformio
 Import("env")
@@ -23,6 +25,179 @@ if env.GetOption("clean"):
 
 # source files
 sourcepath = "src/www"
+
+# ---------------------------------------------------------------------------
+# Build-time minification of hand-written web assets.
+#
+# The device is at ~96% flash and the UI is gzipped into flash. Minifying the
+# source BEFORE the CRC is computed and BEFORE gzip shrinks the embedded bytes
+# without touching the readable/commented source files on disk.
+#
+# CRITICAL ORDERING: every consumer below (CRC32 computation, the ?v= fixed-
+# point substitution loop, and the final gzip emit) must read the SAME bytes.
+# If CRC were computed on the raw source but gzip emitted minified bytes, the
+# `?v=<crc>` cache-busting key would not match the served body and browsers
+# would hold stale assets. We therefore minify once, cache the result, and
+# route ALL reads through get_asset_bytes().
+#
+# FAIL-SAFE: if a minifier tool is missing (not installed in this environment),
+# we must NEVER break the build. We probe each tool once; if absent we embed
+# the raw source bytes (today's behavior) and print a clear WARNING. Local and
+# CI builds only produce identical (minified) bins when BOTH have the Node
+# tools installed -- see .github/workflows note in the handoff.
+# ---------------------------------------------------------------------------
+
+# Assets we minify, keyed by the tool family. Anything not listed here (images,
+# svg, qrframe, site.webmanifest, wifinets, auth, etc.) is embedded verbatim.
+MINIFY_JS = {"functions.js", "logs.js", "qrcode.js"}
+MINIFY_HTML = {"index.html", "logs.html", "wifiap.html"}
+MINIFY_CSS = {"style.css", "wifiap.css"}
+
+
+def _probe(cmd):
+    """Return True if the given npx tool responds to --version."""
+    try:
+        r = subprocess.run(cmd + ["--version"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=20)  # --version only; keep short so a slow npx can't stall the build for minutes
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+# npx is shell-resolved on Windows, so invoke via shell=False with the resolved
+# launcher. "npx --yes" auto-installs the tool from the package.json/registry if
+# not cached, keeping CI hermetic once Node is set up.
+_NPX = "npx.cmd" if os.name == "nt" else "npx"
+
+# Probe each tool family exactly once.
+_have_terser = _probe([_NPX, "--yes", "terser"])
+_have_htmlmin = _probe([_NPX, "--yes", "html-minifier-terser"])
+_have_cleancss = _probe([_NPX, "--yes", "clean-css-cli"])
+
+if not _have_terser:
+    print("WARNING: terser not available -- JS assets will be embedded UNMINIFIED")
+if not _have_htmlmin:
+    print("WARNING: html-minifier-terser not available -- HTML assets will be embedded UNMINIFIED")
+if not _have_cleancss:
+    print("WARNING: clean-css-cli not available -- CSS assets will be embedded UNMINIFIED")
+
+# If node_modules/ is absent, `npx --yes` fetches whatever version is current in
+# the registry instead of the pinned ones in package-lock.json -> minified bytes
+# (and thus the ?v= CRCs) can diverge from a CI `npm ci` build. Warn loudly.
+if (_have_terser or _have_htmlmin or _have_cleancss) and not os.path.isdir("node_modules"):
+    print("WARNING: node_modules/ not found -- npx may use UNPINNED minifier "
+          "versions, producing CRCs that differ from CI. Run `npm ci` for "
+          "reproducible, CI-matching output.")
+
+# Cache of minified (or raw, on fallback) bytes, keyed by filename.
+_asset_cache = {}
+
+
+def _run_minifier(make_argv, src_path, raw):
+    """Run a minifier. `make_argv(src, out)` returns the full argv with input
+    and output positioned correctly for that specific tool (terser requires the
+    input file BEFORE its --compress/--mangle flags, otherwise the filename is
+    swallowed as a flag value). Returns minified bytes, or raw on any failure
+    (fail-safe)."""
+    out_fd, out_path = tempfile.mkstemp(suffix=os.path.basename(src_path))
+    os.close(out_fd)
+    try:
+        r = subprocess.run(make_argv(src_path, out_path),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           timeout=300)
+        if r.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            print("WARNING: minify failed for %s (%s) -- embedding raw"
+                  % (src_path, (r.stderr or b"").decode(errors="replace")[:200]))
+            return raw
+        with open(out_path, "rb") as fo:
+            return fo.read()
+    except Exception as e:
+        print("WARNING: minify error for %s: %s -- embedding raw" % (src_path, e))
+        return raw
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+
+def _node_check(data):
+    """Verify JS still parses (guards against ASI breakage in terse/vendored
+    code). Returns True if `node --check` passes, False otherwise."""
+    fd, p = tempfile.mkstemp(suffix=".js")
+    os.close(fd)
+    try:
+        with open(p, "wb") as f:
+            f.write(data)
+        node = "node.exe" if os.name == "nt" else "node"
+        r = subprocess.run([node, "--check", p],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=120)
+        return r.returncode == 0
+    except Exception:
+        return False  # if node itself is missing, be conservative
+    finally:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _sane_minify(out, raw, file):
+    """Catch catastrophic minifier output (truncated-but-nonzero) that the
+    zero-byte guard in _run_minifier misses. The JS path has node --check;
+    HTML/CSS have no parse gate, so guard against an implausibly small result
+    (which would silently embed a blank/broken page). <10% of source = bogus."""
+    if out is not raw and len(out) < max(1, len(raw) // 10):
+        print("WARNING: %s minified output implausibly small (%d << %d) -- embedding raw"
+              % (file, len(out), len(raw)))
+        return raw
+    return out
+
+
+def get_asset_bytes(file):
+    """Return the bytes to embed for `file`: minified when a suitable tool is
+    available and the result is safe, otherwise the raw source bytes.
+    Result is cached so CRC / fixed-point loop / gzip all see identical bytes."""
+    if file in _asset_cache:
+        return _asset_cache[file]
+
+    src_path = sourcepath + "/" + file
+    with open(src_path, "rb") as f:
+        raw = f.read()
+    result = raw
+
+    if file in MINIFY_JS and _have_terser:
+        # Safe options only: no --compress 'unsafe*', no eval. mangle of local
+        # names is semantics-preserving. Input file MUST precede the flags
+        # (terser treats "--compress <next-token>" as the compress options value).
+        out = _run_minifier(
+            lambda s, o: [_NPX, "--yes", "terser", s, "--compress", "--mangle", "-o", o],
+            src_path, raw)
+        # Conservative gate for terse/vendored code (qrcode.js, inlined MD5):
+        # only accept the minified output if it still parses.
+        if out is not raw and _node_check(out):
+            result = out
+        elif out is not raw:
+            print("WARNING: %s failed node --check after minify -- embedding raw" % file)
+    elif file in MINIFY_HTML and _have_htmlmin:
+        out = _run_minifier(
+            lambda s, o: [_NPX, "--yes", "html-minifier-terser",
+                          "--collapse-whitespace", "--remove-comments",
+                          "--minify-css", "true", "--minify-js", "true", s, "-o", o],
+            src_path, raw)
+        result = _sane_minify(out, raw, file)
+    elif file in MINIFY_CSS and _have_cleancss:
+        out = _run_minifier(
+            lambda s, o: [_NPX, "--yes", "clean-css-cli", "-O2", s, "-o", o],
+            src_path, raw)
+        result = _sane_minify(out, raw, file)
+
+    if result is not raw:
+        print("minified %s: %d -> %d bytes (pre-gzip)" % (file, len(raw), len(result)))
+    _asset_cache[file] = result
+    return result
 # compress .gz files into build folder (build/{env name}/www)
 targetpath = os.path.join(env["PROJECT_BUILD_DIR"], env["PIOENV"], "www")
 # final built include file subfolder
@@ -64,17 +239,17 @@ for file in filenames:
     if file.endswith(".md"):
         continue
 
-    with open(sourcepath + "/" + file, "rb") as f:
-        # read contents of the file
-        data = f.read()
-        crc32 = (
-            base64.urlsafe_b64encode(zlib.crc32(data).to_bytes(4, byteorder="big"))
-            .decode()
-            .replace("=", "")
-        )
-        f.close()
-        file_crc[file] = crc32
-        print("CRC: " + crc32 + " (" + file + ")")
+    # Read the bytes we will actually embed (minified when available). The CRC
+    # MUST be computed on these post-minify bytes so the ?v=<crc> cache key
+    # matches the served body.
+    data = get_asset_bytes(file)
+    crc32 = (
+        base64.urlsafe_b64encode(zlib.crc32(data).to_bytes(4, byteorder="big"))
+        .decode()
+        .replace("=", "")
+    )
+    file_crc[file] = crc32
+    print("CRC: " + crc32 + " (" + file + ")")
 
 # An HTML/JS file's URL hash (`?v=<crc>`) is the browser's cache key.
 # Below we substitute every `<file>?v=CRC-32` placeholder with the real
@@ -93,8 +268,8 @@ for _pass in range(8):
         t = file.rpartition(".")[-1]
         if t not in ("html", "htm", "js"):
             continue
-        with open(sourcepath + "/" + file, "rb") as f:
-            data = f.read()
+        # Use the same (cached) minified bytes the CRC was computed from.
+        data = get_asset_bytes(file)
         for f_name, c in file_crc.items():
             data = data.replace(
                 bytes(f_name + "?v=CRC-32", "utf-8"),
@@ -149,9 +324,9 @@ for file in filenames:
     t = file.rpartition(".")[-1]
     # if file matches, add true crc to ?v=CRC-32 marker and create the gzip
     if (t == "html") or (t == "htm") or (t == "js"):
-        with open(sourcepath + "/" + file, 'rb') as f_in, gzip.open(gzfile, 'wb') as f_out:
-            # read contents of the file
-            data = f_in.read()
+        with gzip.open(gzfile, 'wb') as f_out:
+            # use the same (cached) minified bytes the CRC was computed from
+            data = get_asset_bytes(file)
             # loop through each file that could be referenced
             for f_name, crc32 in file_crc.items():
                 # Replace the target string with real crc
@@ -159,8 +334,10 @@ for file in filenames:
             f_out.write(data)
             f_out.close()
     else :
-        with open(sourcepath + "/" + file, 'rb') as f_in, gzip.open(gzfile, 'wb') as f_out:
-            f_out.writelines(f_in)
+        # Non-html/js assets: still routed through get_asset_bytes so CSS gets
+        # minified; images / svg / etc. fall through to raw bytes.
+        with gzip.open(gzfile, 'wb') as f_out:
+            f_out.write(get_asset_bytes(file))
             f_out.close()
    
     # create the 'c' code

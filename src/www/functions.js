@@ -1107,12 +1107,28 @@ async function checkVersion(progress = "dotdot1") {
     versionElem2.innerHTML = msg;
     const spanDots = document.getElementById(progress);
     const aniDots = dotDotDot(spanDots);
-    const response = await fetch("https://api.github.com/repos/" + gitUser + "/" + gitRepo + "/releases", {
-        method: "GET",
-        cache: "no-cache",
-        redirect: "follow"
-    });
-    const releases = await response.json();
+    let response;
+    let releases;
+    try {
+        response = await fetch("https://api.github.com/repos/" + gitUser + "/" + gitRepo + "/releases", {
+            method: "GET",
+            cache: "no-cache",
+            redirect: "follow"
+        });
+        releases = await response.json();
+    } catch (e) {
+        // Network failure (device offline from GitHub, DNS failure, CORS
+        // block, etc.) rejects the fetch/json promise. Without this guard the
+        // dot animation interval spins forever and the rejection goes
+        // unhandled. Mirror the status-error path below.
+        clearInterval(aniDots);
+        spanDots.innerHTML = "";
+        const errMsg = "Unable to check (offline)";
+        versionElem.innerHTML = errMsg;
+        versionElem2.innerHTML = errMsg;
+        console.warn(`Error retrieving releases from GitHub: ${e.message || e}`);
+        return;
+    }
     if (response.status !== 200) {
         // 403/429 = rate-limited (60 req/hr unauthenticated, easy to hit
         // right after a release). Other statuses = network / outage.
@@ -1304,6 +1320,16 @@ async function firmwareUpdate(github = true) {
                     "Accept": "application/octet-stream",
                 },
             });
+            // Guard against the documented Pages-lag window: a release tag can
+            // exist while docs/firmware/firmware.bin still 404s on Pages for
+            // 1-2 min. Without this check the 404 HTML body would be MD5'd and
+            // compared, producing a confusing mismatch. Abort with a clear
+            // message instead of hashing the error page.
+            if (!response.ok || response.status !== 200) {
+                console.error(`Firmware binary fetch failed (status ${response.status})`);
+                alert("Firmware binary is not available yet (the release may still be publishing). Wait a minute and try again.");
+                return;
+            }
             bin = await response.arrayBuffer();
             binMD5 = MD5(new Uint8Array(bin));
             if ((expectedMD5 != "") && (expectedMD5 != binMD5)) {

@@ -2408,19 +2408,44 @@ bool helperCredentials(const std::string &key, const char *value, configSetting 
         return false;
 
     // JSON string passed in.
-    // Very basic parsing, not using library functions to save memory
+    // Very basic parsing, not using library functions to save memory.
+    // Each strchr() may return NULL if the expected delimiter is missing
+    // from a malformed (but authenticated) POST; guard every result before
+    // dereferencing to avoid a NULL+1 deref / write-to-0x1 crash.
     // find the colon after the key string
-    newUsername = strchr(newUsername, ':') + 1;
-    newCredentials = strchr(newCredentials, ':') + 1;
-    newPassword = strchr(newPassword, ':') + 1;
-    // for strings find the double quote
-    newUsername = strchr(newUsername, '"') + 1;
-    newCredentials = strchr(newCredentials, '"') + 1;
-    newPassword = strchr(newPassword, '"') + 1;
+    if (!(newUsername = strchr(newUsername, ':')) ||
+        !(newCredentials = strchr(newCredentials, ':')) ||
+        !(newPassword = strchr(newPassword, ':')))
+    {
+        ESP_LOGW(TAG, "Malformed credentials payload (missing ':')");
+        return false;
+    }
+    newUsername++;
+    newCredentials++;
+    newPassword++;
+    // for strings find the opening double quote
+    if (!(newUsername = strchr(newUsername, '"')) ||
+        !(newCredentials = strchr(newCredentials, '"')) ||
+        !(newPassword = strchr(newPassword, '"')))
+    {
+        ESP_LOGW(TAG, "Malformed credentials payload (missing opening '\"')");
+        return false;
+    }
+    newUsername++;
+    newCredentials++;
+    newPassword++;
     // null terminate the strings (at closing quote).
-    *strchr(newUsername, '"') = (char)0;
-    *strchr(newCredentials, '"') = (char)0;
-    *strchr(newPassword, '"') = (char)0;
+    char *endUsername = strchr(newUsername, '"');
+    char *endCredentials = strchr(newCredentials, '"');
+    char *endPassword = strchr(newPassword, '"');
+    if (!endUsername || !endCredentials || !endPassword)
+    {
+        ESP_LOGW(TAG, "Malformed credentials payload (missing closing '\"')");
+        return false;
+    }
+    *endUsername = (char)0;
+    *endCredentials = (char)0;
+    *endPassword = (char)0;
     // save values...
     ESP_LOGI(TAG, "Set credentials for user: %s", newUsername);
     userConfig->set(cfg_wwwUsername, newUsername);
@@ -2445,17 +2470,39 @@ bool helperUpdateUnderway(const std::string &key, const char *value, configSetti
         return false;
 
     // JSON string of passed in.
-    // Very basic parsing, not using library functions to save memory
+    // Very basic parsing, not using library functions to save memory.
+    // Each strchr() may return NULL on malformed JSON; guard every result
+    // before dereferencing to avoid a NULL+1 deref / write-to-0x1 crash.
     // find the colon after the key string
-    md5 = strchr(md5, ':') + 1;
-    size = strchr(size, ':') + 1;
-    uuid = strchr(uuid, ':') + 1;
-    // for strings find the double quote
-    md5 = strchr(md5, '"') + 1;
-    uuid = strchr(uuid, '"') + 1;
+    if (!(md5 = strchr(md5, ':')) ||
+        !(size = strchr(size, ':')) ||
+        !(uuid = strchr(uuid, ':')))
+    {
+        ESP_LOGW(TAG, "Malformed updateUnderway payload (missing ':')");
+        return false;
+    }
+    md5++;
+    size++;
+    uuid++;
+    // for strings find the opening double quote
+    if (!(md5 = strchr(md5, '"')) ||
+        !(uuid = strchr(uuid, '"')))
+    {
+        ESP_LOGW(TAG, "Malformed updateUnderway payload (missing opening '\"')");
+        return false;
+    }
+    md5++;
+    uuid++;
     // null terminate the strings (at closing quote).
-    *strchr(md5, '"') = (char)0;
-    *strchr(uuid, '"') = (char)0;
+    char *endMd5 = strchr(md5, '"');
+    char *endUuid = strchr(uuid, '"');
+    if (!endMd5 || !endUuid)
+    {
+        ESP_LOGW(TAG, "Malformed updateUnderway payload (missing closing '\"')");
+        return false;
+    }
+    *endMd5 = (char)0;
+    *endUuid = (char)0;
     // ESP_LOGI(TAG,"MD5: %s, UUID: %s, Size: %d", md5, uuid, atoi(size));
     // save values...
     strlcpy(firmwareMD5, md5, sizeof(firmwareMD5));

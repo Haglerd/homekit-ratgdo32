@@ -136,6 +136,18 @@ jobs:
             pip install --upgrade pip
             pip install --upgrade platformio
 
+      # Web-asset minifiers (terser/html-minifier-terser/clean-css-cli) used by
+      # build_web_content.py. Without these, the pre-build script hits its
+      # fail-safe and embeds UNMINIFIED assets -> released bins would diverge
+      # from local (minified) builds. Must run before "Build PlatformIO Project".
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install web-asset minifiers
+        run: npm ci
+
       - name: Build PlatformIO Project
         run: pio run -e ratgdo_esp32dev
 

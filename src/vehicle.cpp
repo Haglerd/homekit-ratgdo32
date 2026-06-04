@@ -266,7 +266,8 @@ void calculatePresence(int32_t distance)
     {
         off_counter++;
         ESP_LOGV(TAG, "Vehicle distance off_counter: %d", off_counter);
-        if (off_counter / distanceInRange.size() >= PRESENCE_DETECTION_OFF_DEBOUNCE)
+        // Clear after PRESENCE_DETECTION_OFF_DEBOUNCE consecutive 0%% iterations (off_counter reset on any percent change below)
+        if (off_counter >= PRESENCE_DETECTION_OFF_DEBOUNCE)
         {
             off_counter = 0;
             vehicleDetected = false;
