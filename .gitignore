@@ -20,4 +20,6 @@ sdkconfig.ratgdo_esp32dev
 src/CMakeLists.txt
 audit-notes/
 .claude/.log_audit_state
+.claude/.device_creds
+.claude/settings.local.json
 node_modules/
