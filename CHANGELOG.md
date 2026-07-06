@@ -10,6 +10,14 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.99 (2026-07-06) — HomeKit lock/unlock fix (dropped on idle door) + dry-contact lock null-deref guard
+
+Two fixes in the Security+ remote-lockout ("Lock") path. HomeKit-only; force-close/auto-close FSM untouched. Built clean on all 3 ESP32 envs; logic-only change, negligible flash delta (~96%). Code-reviewed against the vendored HomeSpan source.
+
+- **HomeKit lock/unlock was silently dropped while the door was idle.** In HomeSpan the Lock (`LockCurrentState`/`LockTargetState`) is a characteristic on the `GarageDoorOpener` service, so a lock/unlock press routes through the same `DEV_GarageDoor::update()` as the door target. The iOS-dispatch-storm dedup (`hk_target_is_redundant`) early-returns whenever the *door* command is redundant (requested target already == current state) — which is always the case for an idle/closed door. The `set_lock()` call lived *after* that early-return, so every Home/Eve lock or unlock press on a non-moving door updated the HomeKit tile but never drove the opener. Fixed by moving the lock write to the **top** of `update()`, before the redundancy guard, gated on `lockTarget->updated()` (true only when the controller included the lock in this HAP write). The web-UI path (`helperGarageLockState` → `set_lock`) was unaffected and already worked. Side benefit: the old trailing block re-ran `set_lock()` on *every* non-redundant door open/close (harmless thanks to `set_lock`'s own verify no-op) — removed, dropping a spurious lock packet per door command.
+- **Null-deref guard on the lock notify path (dry-contact configs).** `notify_homekit_target_lock` / `notify_homekit_current_lock` unconditionally queued `door->lockTarget` / `lockCurrent`, which are `nullptr` on `GDOSecurityType==3` (dry contact); `DEV_GarageDoor::loop()` then dereferenced the null characteristic at `e.c->setVal()`. Pre-existing latent crash (not reachable on Sec+1.0/2.0 units, which have the lock characteristic) — now guarded at the source (bail if the characteristic is null).
+- **Files**: `src/homekit.cpp`, `CHANGELOG.md`, `docs/manifest.json`.
+
 ### v3.4.4-forceclose.98 (2026-06-03) — Flash headroom (web-asset minification) + hardening (config-string race, crash/error guards)
 
 Quality + headroom bundle. All items code-reviewed and built clean across all 3 ESP32 envs. No force-close/auto-close FSM code touched. **Flash 96.0% → 95.0%** (~101 KB free in the OTA slot).

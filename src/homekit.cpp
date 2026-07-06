@@ -2249,6 +2249,19 @@ static bool hk_target_is_redundant(uint8_t requestedTarget, const char *tag)
 
 boolean DEV_GarageDoor::update()
 {
+    // The remote-lockout Lock is a characteristic on THIS GarageDoorOpener
+    // service, so a HomeKit lock/unlock press routes through the same update()
+    // as the door target. Apply it FIRST — before the door-target redundancy
+    // guard below can early-return. Otherwise a lock/unlock issued while the
+    // door is idle (its target already matches current state) is silently
+    // dropped, which is why Home/Eve lock presses did nothing on a closed door.
+    // lockTarget is null for Sec type 3 (dry contact) which can't drive the lock,
+    // and updated() gates this so a pure door command doesn't churn the lock.
+    if (lockTarget && lockTarget->updated())
+    {
+        set_lock(lockTarget->getNewVal() == lockTarget->LOCK);
+    }
+
     ESP_LOGI(TAG, "Garage Door Characteristics Update, door target: %s", DOOR_STATE(target->getNewVal()));
     if (hk_target_is_redundant(target->getNewVal(), "primary tile")) return true;
     GarageDoorCurrentState state;
@@ -2288,11 +2301,9 @@ boolean DEV_GarageDoor::update()
     obstruction->setVal(false);
     current->setVal(state);
 
-    if (userConfig->getGDOSecurityType() != 3)
-    {
-        // Dry contact cannot control lock
-        set_lock(lockTarget->getNewVal() == lockTarget->LOCK);
-    }
+    // NOTE: lock is handled at the top of update() (before the redundancy
+    // early-return), gated on lockTarget->updated(). It is intentionally NOT
+    // re-applied here — a door open/close command must not touch lock state.
     return true;
 }
 
@@ -2622,6 +2633,12 @@ void notify_homekit_target_lock(LockTargetState state)
     if (!isPaired)
         return;
 
+    // lockTarget is null on dry-contact (GDOSecurityType==3) configs, which have
+    // no lock characteristic. Queuing a null e.c would null-deref in
+    // DEV_GarageDoor::loop() at e.c->setVal(). Nothing to notify — bail.
+    if (!door->lockTarget)
+        return;
+
     GDOEvent e;
     e.c = door->lockTarget;
     e.value.u = (uint8_t)garage_door.target_lock;
@@ -2642,6 +2659,12 @@ void notify_homekit_current_lock(LockCurrentState state)
         return;
 #ifdef ESP32
     if (!isPaired)
+        return;
+
+    // lockCurrent is null on dry-contact (GDOSecurityType==3) configs, which have
+    // no lock characteristic. Queuing a null e.c would null-deref in
+    // DEV_GarageDoor::loop() at e.c->setVal(). Nothing to notify — bail.
+    if (!door->lockCurrent)
         return;
 
     GDOEvent e;

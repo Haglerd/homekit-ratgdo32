@@ -37,18 +37,27 @@ The device's "Update from GitHub" button (`src/www/functions.js` ~1071-1268) doe
 PlatformIO Core is installed via `pip install --user platformio`. The binary lives at:
 
 ```
-C:\Users\Dakot\AppData\Roaming\Python\Python310\Scripts\pio.exe
+C:\Users\Dakot\AppData\Roaming\Python\Python314\Scripts\pio.exe
 ```
 
-That directory is NOT on bash PATH, so call by full path:
+(Python was upgraded 3.10 → 3.14 as of 2026-07-06; the old `Python310` path and the previous `~/.platformio` install are gone. Reinstall if missing: `C:/Python314/python.exe -m pip install --user platformio`.)
 
-```bash
-/c/Users/Dakot/AppData/Roaming/Python/Python310/Scripts/pio.exe run -e ratgdo_esp32dev
+**Do NOT invoke pio directly from the Bash tool (git-bash).** A fresh `.platformio` created under git-bash makes ESP-IDF's `idf_tools.py` abort with `ERROR: MSys/Mingw is not supported` (it detects the MSys PATH `/usr/bin` + `/mingw64`), so the xtensa compiler never lands on PATH and the build fails at link. Run pio from a **clean cmd.exe env** instead — scrub the MSys markers and use a native Windows PATH. Wrapper batch (what worked 2026-07-06):
+
+```bat
+@echo off
+set "MSYSTEM=" & set "MSYS=" & set "MINGW_PREFIX="
+set "PATH=C:\Python314;C:\Python314\Scripts;C:\Users\Dakot\AppData\Roaming\Python\Python314\Scripts;C:\Windows\System32;C:\Windows;C:\Users\Dakot\AppData\Local\Programs\PortableGit\cmd"
+cd /d C:\Users\Dakot\dev\homekit-ratgdo32
+"C:\Users\Dakot\AppData\Roaming\Python\Python314\Scripts\pio.exe" run -e ratgdo_esp32dev
 ```
 
-Both forward-slash and Windows-style paths are pre-allowed in `.claude/settings.json`. **Never invoke `pwsh.exe` / `powershell.exe`** to wrap pio — they're in the deny list and will pause the session.
+Invoke it from Bash with path-conversion disabled (git-bash mangles `/c` → `C:\`):
+`MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' /c/Windows/System32/cmd.exe /c "C:\\...\\build.bat"`. **Never** `pwsh.exe`/`powershell.exe` (deny list). Note PortableGit's `cmd` (native git) must be on PATH or pio errors `Git not found`.
 
-All autonomous build verification (W45 -Wshadow flag triage, W42 mutex build-check, W44 DST build-check, etc.) now works locally — no CI-only blockers.
+**`secplus` is a git submodule** (`lib/secplus`, from `argilo/secplus`). A fresh clone leaves it empty → `fatal error: secplus.h: No such file or directory`. Run `git submodule update --init --recursive` before the first build.
+
+Note: this git-bash (Bash tool) is stripped — no `curl`/`ls`/`grep`/`tail` coreutils on PATH. Use the dedicated Read/Grep/Glob tools, or PortableGit's `usr/bin` + System32 `curl.exe` when a script needs them (e.g. `tools/verify-ota.sh`).
 
 ## Pi log access
 
