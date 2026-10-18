@@ -10,6 +10,18 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.100 (2026-10-18) — Low-risk upstream ports (v3.4.5..v3.5.5 triage): RX pullup, platform pin, SSID/name XSS escaping, bounded JSON builder
+
+Content-based triage of upstream `ratgdo/homekit-ratgdo32` v3.4.5 through v3.5.5 (our history has no common ancestor, so each commit was compared against this tree). This release takes only the isolated fixes; nothing in the force-close/auto-close/door-command paths is touched. The door/light/lock debounce set (upstream 1ebbd8f/d99b8df/882ab3d) and stop-then-reverse (e92b8a5) are deferred to a separate PR with a state diagram because they land in `open_door`/`close_door` next to the force-close logic.
+
+- **Sec+1.0 UART RX pullup** (upstream a585a54, ratgdo#192). `gpio_pulldown_dis` + `gpio_pullup_en` on `UART_RX_PIN` right after `Sec1Serial.begin()`; upstream hit a flood of receive errors without it after a platform update.
+- **pioarduino platform pinned** (upstream 1eaa9a6). `platformio.ini` moves from the floating `stable` zip to `55.03.311` (Arduino core 3.3.11, was 3.3.8 on the fielded .98/.99 builds). The `stable` line is kept commented for reference.
+- **SSID HTML escaping in the soft-AP network picker** (upstream 8a387f7 + 893008d). Scanned SSIDs and the previously-connected SSID are run through `htmlEscape()` into a 192-byte scratch before being `snprintf`'d into the table rows (an AP named `<script>...` was reflected verbatim). Also takes the upstream fix for the `previousBSSID != ssid` compare in `set_new_ssid()` (BSSID string compared to an SSID, so the "network changed" reset fired on every save).
+- **`textContent` for untrusted strings in the web UI** (upstream d5233bf, widened). `deviceName`, `mdnsName`, the logs page name, the soft-AP help text, and the `default:` status branch (which renders `wifiSSID` and any other unhandled string key) now use `textContent` instead of `innerHTML`. Cases that intentionally emit `&nbsp;`/markup keep `innerHTML`.
+- **Bounds-checked JSON builder** (upstream 87f1940, adapted). `json.h` writers take an `end` pointer and refuse any field that would not fit, keeping room for the closing `
+}` so a truncated status object is still valid JSON instead of a silent heap overrun. `JSON_BUFFER_SIZE` maps to `STATUS_JSON_BUFFER_SIZE`; every `JSON_START()` in this tree builds into that buffer. Our `#149` single-template `add_int` and the `_C` change-only macros are preserved. The header now `#error`s if used without `STATUS_JSON_BUFFER_SIZE` in scope.
+- **Files**: `platformio.ini`, `src/comms.cpp`, `src/softAP.cpp`, `src/json.h`, `src/www/functions.js`, `src/www/logs.js`, `CHANGELOG.md`, `docs/manifest.json`.
+
 ### v3.4.4-forceclose.99 (2026-07-06) — HomeKit lock/unlock fix (dropped on idle door) + dry-contact lock null-deref guard
 
 Two fixes in the Security+ remote-lockout ("Lock") path. HomeKit-only; force-close/auto-close FSM untouched. Built clean on all 3 ESP32 envs; logic-only change, negligible flash delta (~96%). Code-reviewed against the vendored HomeSpan source.

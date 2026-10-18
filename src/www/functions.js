@@ -547,11 +547,11 @@ function setElementsFromStatus(status) {
                 document.getElementById("sec1emulation").style.display = (value == true) ? "" : "none";
                 break;
             case "deviceName":
-                document.getElementById(key).innerHTML = value;
+                document.getElementById(key).textContent = value;
                 document.title = value;
                 document.getElementById("newDeviceName").placeholder = value;
                 let mdnsName = makeRfc952(value) + ".local";
-                document.getElementById("mdnsName").innerHTML = mdnsName;
+                document.getElementById("mdnsName").textContent = mdnsName;
                 break;
             case "userName":
                 document.getElementById("newUserName").placeholder = value;
@@ -932,8 +932,9 @@ function setElementsFromStatus(status) {
             default:
                 try {
                     if (setGDOcmds[key] == undefined) {
-                        // Only try and set if the key is not a setGDO command
-                        document.getElementById(key).innerHTML = value;
+                        // Only try and set if the key is not a setGDO command.
+                        // textContent: values here (wifiSSID etc.) are untrusted strings.
+                        document.getElementById(key).textContent = value;
                     }
                 } catch (error) {
                     console.warn(`Server sent unrecognized status: ${key} : ${value}`);
@@ -1885,7 +1886,7 @@ async function setSSID() {
 async function bootSoftAP() {
     if (confirm('This will reboot RATGDO device into Soft Access Point mode from where you can '
         + 'select a WiFi network SSID.\n\nYou must connect your laptop or mobile device to '
-        + 'WiFi Network: "' + document.getElementById("deviceName").innerHTML.replace(/\s/g, '-') + '" and then connect your browser to IP address: '
+        + 'WiFi Network: "' + document.getElementById("deviceName").textContent.replace(/\s/g, '-') + '" and then connect your browser to IP address: '
         + '192.168.4.1\n\nAre you sure?')) {
         await setGDO("softAPmode", true);
         countdown(rebootSeconds, "RATGDO device rebooting...&nbsp;");

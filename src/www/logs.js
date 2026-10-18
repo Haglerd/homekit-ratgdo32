@@ -223,7 +223,7 @@ async function loadLogPages() {
             }
             const text = await response.text();
             msgJson = JSON.parse(text);
-            document.getElementById("deviceName").innerHTML = msgJson.deviceName;
+            document.getElementById("deviceName").textContent = msgJson.deviceName;
             document.title = msgJson.deviceName;
             document.getElementById("statusjson").innerText = text;
         } catch (error) {
