@@ -34,26 +34,31 @@ The device's "Update from GitHub" button (`src/www/functions.js` ~1071-1268) doe
 
 ## Build tools — pio.exe location
 
-PlatformIO Core is installed via `pip install --user platformio`. The binary lives at:
+PlatformIO Core (6.1.19 as of 2026-10-18) is installed via `pip install --user platformio` under **Python 3.10** (`C:\Python310\python.exe`; there is no Python 3.14 on this machine). The binary:
 
 ```
-C:\Users\Dakot\AppData\Roaming\Python\Python314\Scripts\pio.exe
+C:\Users\Dakot\AppData\Roaming\Python\Python310\Scripts\pio.exe
 ```
 
-(Python was upgraded 3.10 → 3.14 as of 2026-07-06; the old `Python310` path and the previous `~/.platformio` install are gone. Reinstall if missing: `C:/Python314/python.exe -m pip install --user platformio`.)
+Reinstall/upgrade if missing: `/c/Python310/python.exe -m pip install -U --user platformio`.
 
-**Do NOT invoke pio directly from the Bash tool (git-bash).** A fresh `.platformio` created under git-bash makes ESP-IDF's `idf_tools.py` abort with `ERROR: MSys/Mingw is not supported` (it detects the MSys PATH `/usr/bin` + `/mingw64`), so the xtensa compiler never lands on PATH and the build fails at link. Run pio from a **clean cmd.exe env** instead — scrub the MSys markers and use a native Windows PATH. Wrapper batch (what worked 2026-07-06):
+**Core dir must be `C:\pio`** (`PLATFORMIO_CORE_DIR`). The default `~/.platformio` fails on first install with `FileNotFoundError ... esp32-arduino-libs\esp32c6\include\espressif__esp_matter\connectedhomeip\...` because the unpacked paths exceed Windows MAX_PATH; the short prefix is what made it fit (2026-10-18). Long-path support is not enabled in the registry.
+
+**Do NOT invoke pio directly from the Bash tool (git-bash).** A fresh core dir created under git-bash makes ESP-IDF's `idf_tools.py` abort with `ERROR: MSys/Mingw is not supported` (it detects the MSys PATH `/usr/bin` + `/mingw64`). Run pio from a **clean cmd.exe env** instead. Wrapper batch (what worked 2026-10-18, all 3 ESP32 envs):
 
 ```bat
 @echo off
 set "MSYSTEM=" & set "MSYS=" & set "MINGW_PREFIX="
-set "PATH=C:\Python314;C:\Python314\Scripts;C:\Users\Dakot\AppData\Roaming\Python\Python314\Scripts;C:\Windows\System32;C:\Windows;C:\Users\Dakot\AppData\Local\Programs\PortableGit\cmd"
+set "PATH=C:\Python310;C:\Python310\Scripts;C:\Users\Dakot\AppData\Roaming\Python\Python310\Scripts;C:\Windows\System32;C:\Windows;C:\Program Files\Git\cmd"
+set "PLATFORMIO_CORE_DIR=C:\pio"
 cd /d C:\Users\Dakot\dev\homekit-ratgdo32
-"C:\Users\Dakot\AppData\Roaming\Python\Python314\Scripts\pio.exe" run -e ratgdo_esp32dev
+"C:\Users\Dakot\AppData\Roaming\Python\Python310\Scripts\pio.exe" run -e %1
 ```
 
 Invoke it from Bash with path-conversion disabled (git-bash mangles `/c` → `C:\`):
-`MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' /c/Windows/System32/cmd.exe /c "C:\\...\\build.bat"`. **Never** `pwsh.exe`/`powershell.exe` (deny list). Note PortableGit's `cmd` (native git) must be on PATH or pio errors `Git not found`.
+`MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' /c/Windows/System32/cmd.exe /c "C:\\...\\build.bat ratgdo_esp32dev"`. **Never** `pwsh.exe`/`powershell.exe` (deny list). Native git (`C:\Program Files\Git\cmd`) must be on PATH or pio errors `Git not found`. First build ~13 min (toolchain download); incremental ~40 s.
+
+Local builds embed web assets **unminified** unless `npm ci` has been run (`WARNING: terser not available`), so local Flash % reads ~1% higher than the CI release bins. The platform is pinned in `platformio.ini` (`55.03.311`, Arduino core 3.3.11) as of .100; the `MJS_dev32*` envs `extends` `ratgdo_esp32dev`, so the pin covers all three.
 
 **`secplus` is a git submodule** (`lib/secplus`, from `argilo/secplus`). A fresh clone leaves it empty → `fatal error: secplus.h: No such file or directory`. Run `git submodule update --init --recursive` before the first build.
 
