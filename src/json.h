@@ -190,29 +190,39 @@ inline char *add_bool(char *s, const char *end, const char *k, bool v)
 #define JSON_START_ARRAY(k) _json_p = add_str(_json_p, _json_end, k, "[\n", true, false)   // added without surrounding quotes and no comma newline
 #define JSON_END_ARRAY() _json_p = add_str(_json_p, _json_end, nullptr, "\n]", true)       // close array without quotes and with comma newline
 
-#define JSON_ADD_INT_C(k, v, ov) \
-    {                            \
-        if (v != ov)             \
-        {                        \
-            ov = v;              \
-            JSON_ADD_INT(k, v);  \
-        }                        \
+// Change-only variants used by the SSE delta path. The cached "old value"
+// is committed only if the write actually landed (the bounded writers
+// return the same pointer when a field is dropped for lack of room), so a
+// dropped delta is retried on the next pass instead of being lost.
+#define JSON_ADD_INT_C(k, v, ov)       \
+    {                                  \
+        if (v != ov)                   \
+        {                              \
+            const char *_p0 = _json_p; \
+            JSON_ADD_INT(k, v);        \
+            if (_json_p != _p0)        \
+                ov = v;                \
+        }                              \
     }
-#define JSON_ADD_BOOL_C(k, v, ov) \
-    {                             \
-        if (v != ov)              \
-        {                         \
-            ov = v;               \
-            JSON_ADD_BOOL(k, v);  \
-        }                         \
+#define JSON_ADD_BOOL_C(k, v, ov)      \
+    {                                  \
+        if (v != ov)                   \
+        {                              \
+            const char *_p0 = _json_p; \
+            JSON_ADD_BOOL(k, v);       \
+            if (_json_p != _p0)        \
+                ov = v;                \
+        }                              \
     }
-#define JSON_ADD_STR_C(k, v, nv, ov) \
-    {                                \
-        if (nv != ov)                \
-        {                            \
-            ov = nv;                 \
-            JSON_ADD_STR(k, v);      \
-        }                            \
+#define JSON_ADD_STR_C(k, v, nv, ov)   \
+    {                                  \
+        if (nv != ov)                  \
+        {                              \
+            const char *_p0 = _json_p; \
+            JSON_ADD_STR(k, v);        \
+            if (_json_p != _p0)        \
+                ov = nv;               \
+        }                              \
     }
 
 #define JSON_REMOVE_NL(s)                        \
