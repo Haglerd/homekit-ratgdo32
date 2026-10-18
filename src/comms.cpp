@@ -3662,7 +3662,10 @@ void door_command_close()
     // detach checkDoorMoving: defensive kill before re-arming the close-moving
     // watchdog. Distinct from TTCtimer.
     checkDoorMoving.detach(); // just in case!
-    checkDoorMoving.once_ms(2000, []()
+    // 3000 (was 2000, from upstream e92b8a5): the Sec+1.0 home unit measures
+    // 1.65-1.93 s from press to the first Opening/Closing report, within 70 ms
+    // of the old limit. Only the constant changes; same esp_timer callback.
+    checkDoorMoving.once_ms(3000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is closing) then
                                 // it is likely that there is an error and door did not move from its open state.
@@ -3708,7 +3711,10 @@ void door_command_open()
     // detach checkDoorMoving: defensive kill before re-arming the open-moving
     // watchdog. Distinct from TTCtimer.
     checkDoorMoving.detach(); // just in case!
-    checkDoorMoving.once_ms(2000, []()
+    // 3000 (was 2000, from upstream e92b8a5): the Sec+1.0 home unit measures
+    // 1.65-1.93 s from press to the first Opening/Closing report, within 70 ms
+    // of the old limit. Only the constant changes; same esp_timer callback.
+    checkDoorMoving.once_ms(3000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is opening) then
                                 // it is likely that there is an error and door did not move from its closed state.
