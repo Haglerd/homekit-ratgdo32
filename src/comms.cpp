@@ -398,6 +398,20 @@ static _millis_t stopSentClosePending = 0;
 static constexpr uint32_t LIGHT_LOCK_CMD_DEBOUNCE_MS = 3000;
 static volatile uint32_t lightCmdPending = 0;
 static volatile uint32_t lockCmdPending = 0;
+// Door: millis() stamp of the last door_command() that went out, 0 = none.
+// A second door command is dropped until the door reports a real current-state
+// change (cleared in update_door_state) or DOOR_CMD_DEBOUNCE_MS elapses.
+// 3000 > the 1.65-1.93 s press->transition measured on the Sec+1.0 home unit.
+// door_command() runs on three tasks (HomeSpan, loopTask, esp_timer), so this
+// word is only ever touched through __atomic_* (CAS to claim on ESP32).
+static constexpr uint32_t DOOR_CMD_DEBOUNCE_MS = 3000;
+static volatile uint32_t doorCmdPendingAtMs = 0;
+
+static inline uint32_t now_ms_nz()
+{
+    uint32_t t = (uint32_t)_millis();
+    return t ? t : 1u; // 0 means "none"
+}
 
 static inline uint32_t enc_pending(bool v)
 {
@@ -1269,6 +1283,15 @@ void update_door_state(GarageDoorCurrentState current_state)
         // anchored by checkAutoClose's bootstrap (countdown started at the first
         // tick, not the physical open — log-audit door auto-close countdown bug).
         GarageDoorCurrentState prev_current_state = garage_door.current_state;
+        // Door command debounce: the door visibly reacted, allow the next command.
+        // Deliberately NOT at the top of this function (where upstream clears):
+        // Sec+1.0 calls update_door_state on every ~1 s poll, which would shrink
+        // the window below the measured press->transition time. Target-only
+        // changes do not clear it.
+        if (current_state != prev_current_state)
+        {
+            __atomic_store_n(&doorCmdPendingAtMs, 0u, __ATOMIC_RELEASE);
+        }
         notify_homekit_current_door_state_change(current_state);
         notify_homekit_target_door_state_change(target_state);
 
@@ -2689,6 +2712,68 @@ void door_command(DoorAction action)
 {
     if (doorControlType != 3)
     {
+        // upstream d99b8df (issue 177), adapted: debounce door commands.
+        // Upstream clears its flag on every status poll (~1 s on Sec+1.0),
+        // which is shorter than the door takes to start moving; ours clears
+        // on a real state change or after DOOR_CMD_DEBOUNCE_MS.
+        // Not applied to dry contact (doorControlType 3), as upstream.
+        // Sec+1.0 force-close never comes through here (direct txQueuePush),
+        // so this cannot swallow a force-close attempt or retry.
+        uint32_t prev = __atomic_load_n(&doorCmdPendingAtMs, __ATOMIC_ACQUIRE);
+        const uint32_t nowMs = now_ms_nz();
+        bool drop = false;
+        if (prev != 0 && (uint32_t)(nowMs - prev) < DOOR_CMD_DEBOUNCE_MS)
+        {
+            drop = true;
+        }
+#ifdef ESP8266
+        else
+        {
+            // ESP8266 Tickers run in loop context: single-threaded, plain store.
+            doorCmdPendingAtMs = nowMs;
+        }
+#else
+        else if (!__atomic_compare_exchange_n(&doorCmdPendingAtMs, &prev, nowMs, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        {
+            // Lost the claim to a concurrent caller on another task. Two
+            // simultaneous door commands are exactly the duplicate case.
+            drop = true;
+        }
+#endif
+        if (drop)
+        {
+            // Rate-limited: log the first drop, then one summary per 5 s window.
+            static uint32_t lastDoorDebounceLogMs = 0;
+            static uint32_t doorDebounceSuppressed = 0;
+            const uint32_t ageMs = (uint32_t)(nowMs - prev);
+            const uint32_t sinceLogMs = (lastDoorDebounceLogMs == 0) ? UINT32_MAX : (uint32_t)(nowMs - lastDoorDebounceLogMs);
+            const char *actionName = (action == DoorAction::Open) ? "Open" : (action == DoorAction::Close) ? "Close"
+                                                                         : (action == DoorAction::Stop)    ? "Stop"
+                                                                                                           : "Toggle";
+            if (sinceLogMs > 5000UL)
+            {
+                if (doorDebounceSuppressed > 0)
+                {
+                    ESP_LOGW(TAG, "DOOR DEBOUNCE: dropped %s command, previous door command %ums ago and no state change yet [+%u suppressed in last %ums]",
+                             actionName, (unsigned)ageMs, (unsigned)doorDebounceSuppressed, (unsigned)sinceLogMs);
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "DOOR DEBOUNCE: dropped %s command, previous door command %ums ago and no state change yet",
+                             actionName, (unsigned)ageMs);
+                }
+                lastDoorDebounceLogMs = nowMs;
+                doorDebounceSuppressed = 0;
+            }
+            else
+            {
+                doorDebounceSuppressed++;
+            }
+            // Make the web UI re-read the real state (it may have gone optimistic).
+            last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
+            return;
+        }
+
         // SECURITY1.0/2.0 commands
         PacketData data;
         data.type = PacketDataType::DoorAction;
@@ -2703,6 +2788,9 @@ void door_command(DoorAction action)
         if (!txQueuePush(&pkt_ac))
         {
             ESP_LOGE(TAG, "packet queue full, dropping door command pressed pkt");
+            // Nothing went out: release the debounce so the user's retry is not blocked.
+            // (If a later release push fails we keep it: a press already went out.)
+            __atomic_store_n(&doorCmdPendingAtMs, 0u, __ATOMIC_RELEASE);
             return;
         }
 
