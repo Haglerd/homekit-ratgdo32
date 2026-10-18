@@ -390,6 +390,34 @@ uint32_t last_saved_code = 0;
 
 static _millis_t stopSentClosePending = 0;
 
+// ---- command debounce (ported from upstream 882ab3d / d99b8df, adapted) ----
+// Upstream uses plain bools that never expire; one lost TX would then block
+// every later same-value request. Ours are 32-bit words (atomic on Xtensa)
+// carrying a millis() stamp so they expire, and all age math is unsigned.
+//   light/lock word: (ms & ~1u) | requestedValue, 0 = none.
+static constexpr uint32_t LIGHT_LOCK_CMD_DEBOUNCE_MS = 3000;
+static volatile uint32_t lightCmdPending = 0;
+static volatile uint32_t lockCmdPending = 0;
+
+static inline uint32_t enc_pending(bool v)
+{
+    uint32_t t = ((uint32_t)_millis()) & ~1u;
+    if (t == 0)
+        t = 2u; // never encode as "none"
+    return t | (v ? 1u : 0u);
+}
+// Age of a pending word in ms (caller has checked w != 0). Wrap-safe.
+static inline uint32_t pending_age_ms(uint32_t w)
+{
+    return (uint32_t)(((uint32_t)_millis()) - (w & ~1u));
+}
+static inline bool is_pending(uint32_t w, bool v, uint32_t windowMs)
+{
+    if (w == 0 || ((w & 1u) != (v ? 1u : 0u)))
+        return false;
+    return pending_age_ms(w) < windowMs;
+}
+
 /******************************* SECURITY 1.0 *********************************/
 #ifndef USE_GDOLIB
 // time stamping
@@ -1210,7 +1238,7 @@ void update_door_state(GarageDoorCurrentState current_state)
             ESP_LOGW(TAG, "Ignoring implausibly short or long close duration: %lums (%s)", (uint32_t)duration, timeString());
         }
     }
-    else if ((current_state == CURR_STOPPED) ||
+    else if ((current_state == CURR_STOPPED && (start_opening > 0 || start_closing > 0)) ||
              (current_state == CURR_OPENING && garage_door.current_state == CURR_CLOSING) ||
              (current_state == CURR_CLOSING && garage_door.current_state == CURR_OPENING))
     {
@@ -1575,6 +1603,7 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             ESP_LOGI(TAG, "Light: %s (%s)", lightState ? "On" : "Off", timeString());
             lastLightState = lightState;
             notify_homekit_light((bool)lightState);
+            __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE);
             // Force the web UI (SSE delta) to pick up the real light state.
             last_reported_garage_door.light = !garage_door.light;
             if (motionTriggers.bit.lightKey)
@@ -1603,6 +1632,7 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             }
             notify_homekit_target_lock(garage_door.target_lock);
             notify_homekit_current_lock(garage_door.current_lock);
+            __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE);
             // Force the web UI (SSE delta) to pick up the real lock state.
             last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
             if (motionTriggers.bit.lockKey)
@@ -1971,6 +2001,9 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Light: %s (%s)", pkt.m_data.value.status.light ? "On" : "Off", timeString());
                 notify_homekit_light(pkt.m_data.value.status.light);
+                // Our own set_light() is normally confirmed by this status reply
+                // (send_get_status), not by a Light packet.
+                __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE);
             }
 
             LockCurrentState current_lock;
@@ -1990,6 +2023,7 @@ void comms_loop_sec2()
                 ESP_LOGD(TAG, "Remotes lock: %s (%s)", LOCK_STATE(current_lock), timeString());
                 notify_homekit_target_lock(target_lock);
                 notify_homekit_current_lock(current_lock);
+                __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE);
                 // Force the web UI (SSE delta) to pick up the real lock state.
                 last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
             }
@@ -2091,6 +2125,7 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Lock Cmd %d", lock);
                 notify_homekit_target_lock(lock);
+                __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE);
                 if (motionTriggers.bit.lockKey)
                 {
                     notify_homekit_motion(true);
@@ -2122,6 +2157,7 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Light Cmd %s", l ? "On" : "Off");
                 notify_homekit_light(l);
+                __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE);
                 if (motionTriggers.bit.lightKey)
                 {
                     notify_homekit_motion(true);
@@ -4039,6 +4075,19 @@ bool set_lock(bool value, bool verify)
         last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
         return false;
     }
+    if (verify)
+    {
+        // upstream 882ab3d (issue 159): a duplicate request while the first is
+        // still in flight would, on Sec+1.0, press the toggle button twice.
+        const uint32_t w = __atomic_load_n(&lockCmdPending, __ATOMIC_ACQUIRE);
+        if (is_pending(w, value, LIGHT_LOCK_CMD_DEBOUNCE_MS))
+        {
+            ESP_LOGI(TAG, "Lock %s command already pending (%ums); ignored duplicate request",
+                     (value) ? "on" : "off", (unsigned)pending_age_ms(w));
+            last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
+            return false;
+        }
+    }
 
     PacketData data;
     data.type = PacketDataType::Lock;
@@ -4085,6 +4134,8 @@ bool set_lock(bool value, bool verify)
             return false;
         }
     }
+    if (verify)
+        __atomic_store_n(&lockCmdPending, enc_pending(value), __ATOMIC_RELEASE);
     return true;
 }
 #endif // USE_GDOLIB
@@ -4154,6 +4205,21 @@ bool set_light(bool value, bool verify)
         last_reported_garage_door.light = !value;
         return false;
     }
+    if (verify)
+    {
+        // upstream 882ab3d (issue 159): on Sec+1.0 set_light is a toggle whatever
+        // value was asked for, so a duplicate ON while the first is in flight
+        // turns the light back off. verify=false callers (TTC flash on the
+        // esp_timer task, serial CLI) neither check nor set this.
+        const uint32_t w = __atomic_load_n(&lightCmdPending, __ATOMIC_ACQUIRE);
+        if (is_pending(w, value, LIGHT_LOCK_CMD_DEBOUNCE_MS))
+        {
+            ESP_LOGI(TAG, "Light %s command already pending (%ums); ignored duplicate request",
+                     (value) ? "on" : "off", (unsigned)pending_age_ms(w));
+            last_reported_garage_door.light = !value;
+            return false;
+        }
+    }
 
     ESP_LOGI(TAG, "Set Garage Door Light: %s", (value) ? "on" : "off");
 
@@ -4180,6 +4246,8 @@ bool set_light(bool value, bool verify)
         if (verify)
             send_get_status();
     }
+    if (verify)
+        __atomic_store_n(&lightCmdPending, enc_pending(value), __ATOMIC_RELEASE);
     return true;
 }
 
