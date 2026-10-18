@@ -1575,6 +1575,8 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             ESP_LOGI(TAG, "Light: %s (%s)", lightState ? "On" : "Off", timeString());
             lastLightState = lightState;
             notify_homekit_light((bool)lightState);
+            // Force the web UI (SSE delta) to pick up the real light state.
+            last_reported_garage_door.light = !garage_door.light;
             if (motionTriggers.bit.lightKey)
             {
                 notify_homekit_motion(true);
@@ -1601,6 +1603,8 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             }
             notify_homekit_target_lock(garage_door.target_lock);
             notify_homekit_current_lock(garage_door.current_lock);
+            // Force the web UI (SSE delta) to pick up the real lock state.
+            last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
             if (motionTriggers.bit.lockKey)
             {
                 notify_homekit_motion(true);
@@ -1986,6 +1990,8 @@ void comms_loop_sec2()
                 ESP_LOGD(TAG, "Remotes lock: %s (%s)", LOCK_STATE(current_lock), timeString());
                 notify_homekit_target_lock(target_lock);
                 notify_homekit_current_lock(current_lock);
+                // Force the web UI (SSE delta) to pick up the real lock state.
+                last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
             }
 
             // Handle obstruction from status packet if pin-based detection not available
@@ -3614,16 +3620,28 @@ GarageDoorCurrentState open_door()
         return GarageDoorCurrentState::CURR_OPEN;
     }
 
-    // safety
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN)
+    // safety. Snapshot once: loopTask (status parser) and esp_timer (watchdog
+    // lambdas) can change garage_door.current_state while we run here on the
+    // HomeSpan task.
+    const GarageDoorCurrentState cur = garage_door.current_state;
+    if (cur == GarageDoorCurrentState::CURR_OPEN || cur == GarageDoorCurrentState::CURR_OPENING)
     {
-        ESP_LOGI(TAG, "Door already open; ignored request");
+        // upstream 1ebbd8f (issue 159): on Sec+1.0 an "open" while already
+        // opening is a wall-button press, which STOPS the door. Ignore it.
+        ESP_LOGI(TAG, "Door already %s; ignored request", DOOR_STATE(cur));
         // Reset last reported to we will update browser with actual state.
         last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
-        return GarageDoorCurrentState::CURR_OPEN;
+        if (doorControlType == 2 && cur == GarageDoorCurrentState::CURR_OPENING)
+        {
+            // Sec+2.0 is event driven; a missed packet can leave a stale
+            // OPENING that would now refuse every open. Ask for status so
+            // it heals instead of silently sticking.
+            send_get_status();
+        }
+        return cur;
     }
 
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING)
+    if (cur == GarageDoorCurrentState::CURR_CLOSING)
     {
         ESP_LOGI(TAG, "Door is closing; do stop");
 #ifdef USE_GDOLIB
@@ -3772,17 +3790,27 @@ void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close)
 
 GarageDoorCurrentState close_door(bool bypass_ttc)
 {
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSED)
+    // Snapshot once (see open_door). Note: the force-close path never comes
+    // through here on Sec+1.0 (door_command_force_close -> send_force_close_press),
+    // so this guard cannot swallow a force-close attempt or retry.
+    const GarageDoorCurrentState cur = garage_door.current_state;
+    if (cur == GarageDoorCurrentState::CURR_CLOSED || cur == GarageDoorCurrentState::CURR_CLOSING)
     {
-        ESP_LOGI(TAG, "Door already closed; ignored request");
+        // upstream 1ebbd8f (issue 159): on Sec+1.0 a "close" while already
+        // closing is a wall-button press, which STOPS the door. Ignore it.
+        ESP_LOGI(TAG, "Door already %s; ignored request", DOOR_STATE(cur));
         // Reset last reported to we will update browser with actual state.
         last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
-        return GarageDoorCurrentState::CURR_CLOSED;
+        if (doorControlType == 2 && cur == GarageDoorCurrentState::CURR_CLOSING)
+        {
+            send_get_status(); // heal a stale CLOSING from a missed Sec+2.0 packet
+        }
+        return cur;
     }
 
     cancel_builtin_TTC_countdown();
 
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_OPENING)
+    if (cur == GarageDoorCurrentState::CURR_OPENING)
     {
         ESP_LOGI(TAG, "Door already opening; do stop");
 #ifdef USE_GDOLIB
