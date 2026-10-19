@@ -75,7 +75,7 @@ extern void send_set_ttc(uint16_t seconds);
 extern bool set_lock(bool value, bool verify = true);
 extern bool set_light(bool value, bool verify = true);
 extern void toggle_light();
-extern void sec1_light_press(uint32_t delay = 0);
+extern bool sec1_light_press(uint32_t delay = 0); // false = press not queued
 extern void sec1_light_release(uint8_t howManyReleases = 2, uint32_t delay = 0);
 
 extern void save_rolling_code();

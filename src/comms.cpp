@@ -390,6 +390,104 @@ uint32_t last_saved_code = 0;
 
 static _millis_t stopSentClosePending = 0;
 
+#ifndef USE_GDOLIB // the GDOLIB set_light/set_lock/door paths do not use these
+// ---- command debounce (ported from upstream 882ab3d / d99b8df, adapted) ----
+// Upstream uses plain bools that never expire; one lost TX would then block
+// every later same-value request. Ours are 32-bit words (atomic on Xtensa)
+// carrying a millis() stamp so they expire, and all age math is unsigned.
+//   light/lock word: (ms & ~1u) | requestedValue, 0 = none.
+static constexpr uint32_t LIGHT_LOCK_CMD_DEBOUNCE_MS = 3000;
+static volatile uint32_t lightCmdPending = 0;
+static volatile uint32_t lockCmdPending = 0;
+// Door: millis() stamp of the last door_command() that went out, 0 = none.
+// A second door command is dropped until the door reports a real current-state
+// change (cleared in update_door_state) or DOOR_CMD_DEBOUNCE_MS elapses.
+// 3000 > the 1.65-1.93 s press->transition measured on the Sec+1.0 home unit.
+// door_command() runs on three tasks (HomeSpan, loopTask, esp_timer), so this
+// word is only ever touched through __atomic_* (CAS to claim on ESP32).
+static constexpr uint32_t DOOR_CMD_DEBOUNCE_MS = 3000;
+static volatile uint32_t doorCmdPendingAtMs = 0;
+
+static inline uint32_t now_ms_nz()
+{
+    uint32_t t = (uint32_t)_millis();
+    return t ? t : 1u; // 0 means "none"
+}
+
+static inline uint32_t enc_pending(bool v)
+{
+    uint32_t t = ((uint32_t)_millis()) & ~1u;
+    if (t == 0)
+        t = 2u; // never encode as "none"
+    return t | (v ? 1u : 0u);
+}
+// Age of a pending word in ms (caller has checked w != 0). Wrap-safe.
+static inline uint32_t pending_age_ms(uint32_t w)
+{
+    return (uint32_t)(((uint32_t)_millis()) - (w & ~1u));
+}
+static inline bool is_pending(uint32_t w, bool v, uint32_t windowMs)
+{
+    if (w == 0 || ((w & 1u) != (v ? 1u : 0u)))
+        return false;
+    return pending_age_ms(w) < windowMs;
+}
+// Claim a pending word: succeeds only if *w still equals *expected; on
+// failure *expected is refreshed with the current value (CAS semantics).
+static inline bool claim_word(volatile uint32_t *w, uint32_t *expected, uint32_t desired)
+{
+#ifdef ESP8266
+    // ESP8266 Tickers run in loop context: single-threaded, plain compare+store.
+    if (*w != *expected)
+    {
+        *expected = *w;
+        return false;
+    }
+    *w = desired;
+    return true;
+#else
+    return __atomic_compare_exchange_n(w, expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+#endif
+}
+// Light/lock: claim the slot for `value` before sending. Returns false if a
+// same-value request is still pending (age in *ageMs). On a lost race the
+// loser is treated as the duplicate. Caller releases (store 0) if nothing
+// was queued.
+static bool claim_pending(volatile uint32_t *pword, bool value, uint32_t *ageMs)
+{
+    uint32_t w = __atomic_load_n(pword, __ATOMIC_ACQUIRE);
+    const uint32_t desired = enc_pending(value);
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        if (is_pending(w, value, LIGHT_LOCK_CMD_DEBOUNCE_MS))
+        {
+            *ageMs = pending_age_ms(w);
+            return false;
+        }
+        if (claim_word(pword, &w, desired))
+            return true;
+    }
+    *ageMs = 0;
+    return false;
+}
+// Sweep expired stamps back to 0 so a stamp that is never cleared (no door
+// activity at all) cannot look fresh again after the 2^32 ms millis wrap.
+// Called from update_door_state (loopTask, every status poll).
+static inline void sweep_expired_pending()
+{
+    const uint32_t now = (uint32_t)_millis();
+    uint32_t w = __atomic_load_n(&doorCmdPendingAtMs, __ATOMIC_ACQUIRE);
+    if (w != 0 && (uint32_t)(now - w) >= DOOR_CMD_DEBOUNCE_MS)
+        claim_word(&doorCmdPendingAtMs, &w, 0u);
+    w = __atomic_load_n(&lightCmdPending, __ATOMIC_ACQUIRE);
+    if (w != 0 && (uint32_t)(now - (w & ~1u)) >= LIGHT_LOCK_CMD_DEBOUNCE_MS)
+        claim_word(&lightCmdPending, &w, 0u);
+    w = __atomic_load_n(&lockCmdPending, __ATOMIC_ACQUIRE);
+    if (w != 0 && (uint32_t)(now - (w & ~1u)) >= LIGHT_LOCK_CMD_DEBOUNCE_MS)
+        claim_word(&lockCmdPending, &w, 0u);
+}
+#endif // not USE_GDOLIB
+
 /******************************* SECURITY 1.0 *********************************/
 #ifndef USE_GDOLIB
 // time stamping
@@ -450,7 +548,7 @@ enum secplus1Codes : uint8_t
 
 // prototypes
 bool process_PacketAction(PacketAction &pkt_ac);
-void door_command(DoorAction action);
+bool door_command(DoorAction action); // false = dropped (debounce) or not queued
 bool transmitSec1(byte toSend);
 bool transmitSec2(PacketAction &pkt_ac);
 void obstruction_timer();
@@ -1057,6 +1155,7 @@ void update_door_state(GarageDoorCurrentState current_state)
     static _millis_t start_opening = 0;
     static _millis_t start_closing = 0;
     _millis_t now = _millis();
+    sweep_expired_pending();
 
     GarageDoorTargetState target_state = garage_door.target_state;
 
@@ -1210,7 +1309,7 @@ void update_door_state(GarageDoorCurrentState current_state)
             ESP_LOGW(TAG, "Ignoring implausibly short or long close duration: %lums (%s)", (uint32_t)duration, timeString());
         }
     }
-    else if ((current_state == CURR_STOPPED) ||
+    else if ((current_state == CURR_STOPPED && (start_opening > 0 || start_closing > 0)) ||
              (current_state == CURR_OPENING && garage_door.current_state == CURR_CLOSING) ||
              (current_state == CURR_CLOSING && garage_door.current_state == CURR_OPENING))
     {
@@ -1241,6 +1340,15 @@ void update_door_state(GarageDoorCurrentState current_state)
         // anchored by checkAutoClose's bootstrap (countdown started at the first
         // tick, not the physical open — log-audit door auto-close countdown bug).
         GarageDoorCurrentState prev_current_state = garage_door.current_state;
+        // Door command debounce: the door visibly reacted, allow the next command.
+        // Deliberately NOT at the top of this function (where upstream clears):
+        // Sec+1.0 calls update_door_state on every ~1 s poll, which would shrink
+        // the window below the measured press->transition time. Target-only
+        // changes do not clear it.
+        if (current_state != prev_current_state)
+        {
+            __atomic_store_n(&doorCmdPendingAtMs, 0u, __ATOMIC_RELEASE);
+        }
         notify_homekit_current_door_state_change(current_state);
         notify_homekit_target_door_state_change(target_state);
 
@@ -1575,6 +1683,9 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             ESP_LOGI(TAG, "Light: %s (%s)", lightState ? "On" : "Off", timeString());
             lastLightState = lightState;
             notify_homekit_light((bool)lightState);
+            __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE);
+            // Force the web UI (SSE delta) to pick up the real light state.
+            last_reported_garage_door.light = !garage_door.light;
             if (motionTriggers.bit.lightKey)
             {
                 notify_homekit_motion(true);
@@ -1601,6 +1712,9 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             }
             notify_homekit_target_lock(garage_door.target_lock);
             notify_homekit_current_lock(garage_door.current_lock);
+            __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE);
+            // Force the web UI (SSE delta) to pick up the real lock state.
+            last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
             if (motionTriggers.bit.lockKey)
             {
                 notify_homekit_motion(true);
@@ -1967,6 +2081,9 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Light: %s (%s)", pkt.m_data.value.status.light ? "On" : "Off", timeString());
                 notify_homekit_light(pkt.m_data.value.status.light);
+                // Our own set_light() is normally confirmed by this status reply
+                // (send_get_status), not by a Light packet.
+                __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE);
             }
 
             LockCurrentState current_lock;
@@ -1986,6 +2103,9 @@ void comms_loop_sec2()
                 ESP_LOGD(TAG, "Remotes lock: %s (%s)", LOCK_STATE(current_lock), timeString());
                 notify_homekit_target_lock(target_lock);
                 notify_homekit_current_lock(current_lock);
+                __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE);
+                // Force the web UI (SSE delta) to pick up the real lock state.
+                last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
             }
 
             // Handle obstruction from status packet if pin-based detection not available
@@ -2085,6 +2205,7 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Lock Cmd %d", lock);
                 notify_homekit_target_lock(lock);
+                __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE);
                 if (motionTriggers.bit.lockKey)
                 {
                     notify_homekit_motion(true);
@@ -2116,6 +2237,7 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Light Cmd %s", l ? "On" : "Off");
                 notify_homekit_light(l);
+                __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE);
                 if (motionTriggers.bit.lightKey)
                 {
                     notify_homekit_motion(true);
@@ -2643,10 +2765,72 @@ bool process_PacketAction(PacketAction &pkt_ac)
     return false;
 }
 
-void door_command(DoorAction action)
+bool door_command(DoorAction action)
 {
     if (doorControlType != 3)
     {
+        // upstream d99b8df (issue 177), adapted: debounce door commands.
+        // Upstream clears its flag on every status poll (~1 s on Sec+1.0),
+        // which is shorter than the door takes to start moving; ours clears
+        // on a real state change or after DOOR_CMD_DEBOUNCE_MS.
+        // Not applied to dry contact (doorControlType 3), as upstream.
+        // Sec+1.0 force-close never comes through here (direct txQueuePush),
+        // so this cannot swallow a force-close attempt or retry.
+        uint32_t prev = __atomic_load_n(&doorCmdPendingAtMs, __ATOMIC_ACQUIRE);
+        const uint32_t nowMs = now_ms_nz();
+        bool drop = false;
+        if (prev != 0 && (uint32_t)(nowMs - prev) < DOOR_CMD_DEBOUNCE_MS)
+        {
+            drop = true;
+        }
+        else
+        {
+            // Claim the slot. If the claim fails because a state-change clear
+            // (0) or an expiry landed between the load and the CAS, retry once;
+            // otherwise a concurrent caller on another task won the claim, and
+            // two simultaneous door commands are exactly the duplicate case.
+            bool claimed = claim_word(&doorCmdPendingAtMs, &prev, nowMs);
+            if (!claimed && (prev == 0 || (uint32_t)(nowMs - prev) >= DOOR_CMD_DEBOUNCE_MS))
+                claimed = claim_word(&doorCmdPendingAtMs, &prev, nowMs);
+            if (!claimed)
+                drop = true;
+        }
+        if (drop)
+        {
+            // Rate-limited: log the first drop, then one summary per 5 s window.
+            static uint32_t lastDoorDebounceLogMs = 0;
+            static uint32_t doorDebounceSuppressed = 0;
+            uint32_t ageMs = (uint32_t)(nowMs - prev);
+            if (ageMs > DOOR_CMD_DEBOUNCE_MS)
+                ageMs = 0; // lost the claim to a stamp newer than nowMs
+            const uint32_t sinceLogMs = (lastDoorDebounceLogMs == 0) ? UINT32_MAX : (uint32_t)(nowMs - lastDoorDebounceLogMs);
+            const char *actionName = (action == DoorAction::Open) ? "Open" : (action == DoorAction::Close) ? "Close"
+                                                                         : (action == DoorAction::Stop)    ? "Stop"
+                                                                                                           : "Toggle";
+            if (sinceLogMs > 5000UL)
+            {
+                if (doorDebounceSuppressed > 0)
+                {
+                    ESP_LOGW(TAG, "DOOR DEBOUNCE: dropped %s command, previous door command %ums ago and no state change yet [+%u suppressed in last %ums]",
+                             actionName, (unsigned)ageMs, (unsigned)doorDebounceSuppressed, (unsigned)sinceLogMs);
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "DOOR DEBOUNCE: dropped %s command, previous door command %ums ago and no state change yet",
+                             actionName, (unsigned)ageMs);
+                }
+                lastDoorDebounceLogMs = nowMs;
+                doorDebounceSuppressed = 0;
+            }
+            else
+            {
+                doorDebounceSuppressed++;
+            }
+            // Make the web UI re-read the real state (it may have gone optimistic).
+            last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
+            return false;
+        }
+
         // SECURITY1.0/2.0 commands
         PacketData data;
         data.type = PacketDataType::DoorAction;
@@ -2661,7 +2845,10 @@ void door_command(DoorAction action)
         if (!txQueuePush(&pkt_ac))
         {
             ESP_LOGE(TAG, "packet queue full, dropping door command pressed pkt");
-            return;
+            // Nothing went out: release the debounce so the user's retry is not blocked.
+            // (If a later release push fails we keep it: a press already went out.)
+            __atomic_store_n(&doorCmdPendingAtMs, 0u, __ATOMIC_RELEASE);
+            return false;
         }
 
         /* Removing this section as testing with 398LM (a 0x37 wall panel) was never successful.
@@ -2682,7 +2869,7 @@ void door_command(DoorAction action)
         if (!txQueuePush(&pkt_ac))
         {
             ESP_LOGE(TAG, "packet queue full, dropping door command release pkt");
-            return;
+            return false;
         }
 
         // if sec+1.0, repeat the release
@@ -2691,7 +2878,7 @@ void door_command(DoorAction action)
             if (!txQueuePush(&pkt_ac))
             {
                 ESP_LOGE(TAG, "packet queue full, dropping door command release pkt");
-                return;
+                return false;
             }
         }
         send_get_status();
@@ -2704,6 +2891,7 @@ void door_command(DoorAction action)
         delay(500);
         digitalWrite(UART_TX_PIN, LOW);
     }
+    return true;
 }
 
 // ---- Force-close (wall-button hold-to-close emulation) ----
@@ -3484,31 +3672,39 @@ void comms_refresh_force_close_single_hold() {}
 
 #endif // not USE_GDOLIB
 
-void door_command_close()
+// Returns false when nothing went out (debounce drop or queue full); the
+// watchdogs are then not armed and callers report the real door state.
+// door_command_close() below is the void wrapper used as a TTC callback.
+static bool door_command_close_impl()
 {
 #ifdef USE_GDOLIB
     gdo_door_close();
+    return true;
 #else
+    bool sent = false;
     if (garage_door.pinModeObstructionSensor && !userConfig->getUseToggle())
     {
-        door_command(DoorAction::Close);
+        sent = door_command(DoorAction::Close);
     }
     else
     {
         ESP_LOGI(TAG, "Toggle from current state: %s, target state: %s", DOOR_STATE(garage_door.current_state), DOOR_STATE(garage_door.target_state));
         if (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN)
         {
-            door_command(DoorAction::Toggle);
+            sent = door_command(DoorAction::Toggle);
         }
         else if (garage_door.current_state == GarageDoorCurrentState::CURR_STOPPED)
         {
-            door_command(DoorAction::Toggle);
+            sent = door_command(DoorAction::Toggle);
         }
         else
         {
             ESP_LOGI(TAG, "Ignoring close request for current and target state");
         }
     }
+
+    if (!sent)
+        return false; // nothing went out: do not arm the watchdogs
 
     if (doorControlType == 2 && garage_door.closeDuration > 0)
     {
@@ -3532,7 +3728,10 @@ void door_command_close()
     // detach checkDoorMoving: defensive kill before re-arming the close-moving
     // watchdog. Distinct from TTCtimer.
     checkDoorMoving.detach(); // just in case!
-    checkDoorMoving.once_ms(2000, []()
+    // 3000 (was 2000, from upstream e92b8a5): the Sec+1.0 home unit measures
+    // 1.65-1.93 s from press to the first Opening/Closing report, within 70 ms
+    // of the old limit. Only the constant changes; same esp_timer callback.
+    checkDoorMoving.once_ms(3000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is closing) then
                                 // it is likely that there is an error and door did not move from its open state.
@@ -3543,18 +3742,24 @@ void door_command_close()
                                 notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_OPEN);
                                 notify_homekit_target_door_state_change(GarageDoorTargetState::TGT_OPEN); });
 #endif
-    return;
+    return true;
+}
+void door_command_close()
+{
+    (void)door_command_close_impl();
 }
 
-void door_command_open()
+static bool door_command_open_impl()
 {
 #ifdef USE_GDOLIB
     if (doorControlType == 2 && userConfig->getBuiltInTTC())
         gdo_set_time_to_close(0);
 
     gdo_door_open();
+    return true;
 #else
-    door_command(DoorAction::Open);
+    if (!door_command(DoorAction::Open))
+        return false; // nothing went out: do not arm the watchdogs
 
     if (doorControlType == 2 && garage_door.openDuration > 0)
     {
@@ -3578,7 +3783,10 @@ void door_command_open()
     // detach checkDoorMoving: defensive kill before re-arming the open-moving
     // watchdog. Distinct from TTCtimer.
     checkDoorMoving.detach(); // just in case!
-    checkDoorMoving.once_ms(2000, []()
+    // 3000 (was 2000, from upstream e92b8a5): the Sec+1.0 home unit measures
+    // 1.65-1.93 s from press to the first Opening/Closing report, within 70 ms
+    // of the old limit. Only the constant changes; same esp_timer callback.
+    checkDoorMoving.once_ms(3000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is opening) then
                                 // it is likely that there is an error and door did not move from its closed state.
@@ -3589,7 +3797,11 @@ void door_command_open()
                                 notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_CLOSED);
                                 notify_homekit_target_door_state_change(GarageDoorTargetState::TGT_CLOSED); });
 #endif
-    return;
+    return true;
+}
+void door_command_open()
+{
+    (void)door_command_open_impl();
 }
 
 GarageDoorCurrentState open_door()
@@ -3614,27 +3826,41 @@ GarageDoorCurrentState open_door()
         return GarageDoorCurrentState::CURR_OPEN;
     }
 
-    // safety
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN)
+    // safety. Snapshot once: loopTask (status parser) and esp_timer (watchdog
+    // lambdas) can change garage_door.current_state while we run here on the
+    // HomeSpan task.
+    const GarageDoorCurrentState cur = garage_door.current_state;
+    if (cur == GarageDoorCurrentState::CURR_OPEN || cur == GarageDoorCurrentState::CURR_OPENING)
     {
-        ESP_LOGI(TAG, "Door already open; ignored request");
+        // upstream 1ebbd8f (issue 159): on Sec+1.0 an "open" while already
+        // opening is a wall-button press, which STOPS the door. Ignore it.
+        ESP_LOGI(TAG, "Door already %s; ignored request", DOOR_STATE(cur));
         // Reset last reported to we will update browser with actual state.
         last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
-        return GarageDoorCurrentState::CURR_OPEN;
+        if (doorControlType == 2 && cur == GarageDoorCurrentState::CURR_OPENING)
+        {
+            // Sec+2.0 is event driven; a missed packet can leave a stale
+            // OPENING that would now refuse every open. Ask for status so
+            // it heals instead of silently sticking.
+            send_get_status();
+        }
+        return cur;
     }
 
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING)
+    if (cur == GarageDoorCurrentState::CURR_CLOSING)
     {
         ESP_LOGI(TAG, "Door is closing; do stop");
 #ifdef USE_GDOLIB
         gdo_door_stop();
 #else
-        door_command(DoorAction::Stop);
+        if (!door_command(DoorAction::Stop))
+            return garage_door.current_state; // dropped: report the real state
 #endif
         return GarageDoorCurrentState::CURR_STOPPED;
     }
     ESP_LOGI(TAG, "Opening door");
-    door_command_open();
+    if (!door_command_open_impl())
+        return garage_door.current_state; // dropped (debounce) or queue full
     return GarageDoorCurrentState::CURR_OPENING;
 }
 
@@ -3772,23 +3998,34 @@ void delayFnCall(uint32_t ms, void (*callback)(), bool preempt_force_close)
 
 GarageDoorCurrentState close_door(bool bypass_ttc)
 {
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSED)
+    // Snapshot once (see open_door). Note: the force-close path never comes
+    // through here on Sec+1.0 (door_command_force_close -> send_force_close_press),
+    // so this guard cannot swallow a force-close attempt or retry.
+    const GarageDoorCurrentState cur = garage_door.current_state;
+    if (cur == GarageDoorCurrentState::CURR_CLOSED || cur == GarageDoorCurrentState::CURR_CLOSING)
     {
-        ESP_LOGI(TAG, "Door already closed; ignored request");
+        // upstream 1ebbd8f (issue 159): on Sec+1.0 a "close" while already
+        // closing is a wall-button press, which STOPS the door. Ignore it.
+        ESP_LOGI(TAG, "Door already %s; ignored request", DOOR_STATE(cur));
         // Reset last reported to we will update browser with actual state.
         last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
-        return GarageDoorCurrentState::CURR_CLOSED;
+        if (doorControlType == 2 && cur == GarageDoorCurrentState::CURR_CLOSING)
+        {
+            send_get_status(); // heal a stale CLOSING from a missed Sec+2.0 packet
+        }
+        return cur;
     }
 
     cancel_builtin_TTC_countdown();
 
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_OPENING)
+    if (cur == GarageDoorCurrentState::CURR_OPENING)
     {
         ESP_LOGI(TAG, "Door already opening; do stop");
 #ifdef USE_GDOLIB
         gdo_door_stop();
 #else
-        door_command(DoorAction::Stop);
+        if (!door_command(DoorAction::Stop))
+            return garage_door.current_state; // dropped: no stop went out, so no follow-up close
 #endif
         stopSentClosePending = _millis();
         return GarageDoorCurrentState::CURR_STOPPED;
@@ -3816,7 +4053,8 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
             ESP_LOGI(TAG, "Bypassing time-to-close delay for hardwired control");
         }
         ESP_LOGI(TAG, "Closing door");
-        door_command_close();
+        if (!door_command_close_impl())
+            return garage_door.current_state; // dropped (debounce) or queue full
     }
     else
     {
@@ -4011,6 +4249,21 @@ bool set_lock(bool value, bool verify)
         last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
         return false;
     }
+    if (verify)
+    {
+        // upstream 882ab3d (issue 159): a duplicate request while the first is
+        // still in flight would, on Sec+1.0, press the toggle button twice.
+        // Claim the slot BEFORE sending (CAS, so two tasks cannot both pass);
+        // released below if the press never made it onto the queue.
+        uint32_t ageMs = 0;
+        if (!claim_pending(&lockCmdPending, value, &ageMs))
+        {
+            ESP_LOGI(TAG, "Lock %s command already pending (%ums); ignored duplicate request",
+                     (value) ? "on" : "off", (unsigned)ageMs);
+            last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
+            return false;
+        }
+    }
 
     PacketData data;
     data.type = PacketDataType::Lock;
@@ -4029,9 +4282,12 @@ bool set_lock(bool value, bool verify)
         if (!txQueuePush(&pkt_ac))
         {
             ESP_LOGE(TAG, "packet queue full, dropping lock pkt");
+            if (verify)
+                __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE); // nothing went out
             return false;
         }
-        // button release
+        // button release. If a release push fails the press already went
+        // out, so the pending claim is kept (same policy as door_command).
         pkt_ac.pkt.m_data.value.lock.pressed = false;
         pkt_ac.pkt.m_data.value.cmd = secplus1Codes::LockButtonRelease;
         if (!txQueuePush(&pkt_ac))
@@ -4054,6 +4310,8 @@ bool set_lock(bool value, bool verify)
         if (!txQueuePush(&pkt_ac))
         {
             ESP_LOGE(TAG, "packet queue full, dropping lock pkt");
+            if (verify)
+                __atomic_store_n(&lockCmdPending, 0u, __ATOMIC_RELEASE); // nothing went out
             return false;
         }
     }
@@ -4075,7 +4333,7 @@ bool set_light(bool value, bool verify)
 }
 #else
 
-void sec1_light_press(uint32_t delay)
+bool sec1_light_press(uint32_t delay)
 {
     PacketData data;
     data.type = PacketDataType::Light;
@@ -4088,13 +4346,14 @@ void sec1_light_press(uint32_t delay)
     if (!txQueuePush(&pkt_ac))
     {
         ESP_LOGE(TAG, "packet queue full, dropping light press pkt");
-        return;
+        return false;
     }
     // this better emulates wall panel
     if (garage_door.wallPanelEmulated)
     {
         sec1_poll_status(secplus1Codes::QueryLightLockStatus);
     }
+    return true;
 }
 
 void sec1_light_release(uint8_t howManyReleases, uint32_t delay)
@@ -4126,6 +4385,23 @@ bool set_light(bool value, bool verify)
         last_reported_garage_door.light = !value;
         return false;
     }
+    if (verify)
+    {
+        // upstream 882ab3d (issue 159): on Sec+1.0 set_light is a toggle whatever
+        // value was asked for, so a duplicate ON while the first is in flight
+        // turns the light back off. verify=false callers (TTC flash on the
+        // esp_timer task, serial CLI) neither check nor set this.
+        // Claim the slot BEFORE sending (CAS, so two tasks cannot both pass);
+        // released below if the press never made it onto the queue.
+        uint32_t ageMs = 0;
+        if (!claim_pending(&lightCmdPending, value, &ageMs))
+        {
+            ESP_LOGI(TAG, "Light %s command already pending (%ums); ignored duplicate request",
+                     (value) ? "on" : "off", (unsigned)ageMs);
+            last_reported_garage_door.light = !value;
+            return false;
+        }
+    }
 
     ESP_LOGI(TAG, "Set Garage Door Light: %s", (value) ? "on" : "off");
 
@@ -4133,7 +4409,12 @@ bool set_light(bool value, bool verify)
     if (doorControlType == 1)
     {
         // only can toggle the light
-        sec1_light_press();
+        if (!sec1_light_press())
+        {
+            if (verify)
+                __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE); // nothing went out
+            return false;
+        }
         sec1_light_release();
     }
     // SECURITY+2.0
@@ -4147,6 +4428,8 @@ bool set_light(bool value, bool verify)
         if (!txQueuePush(&pkt_ac))
         {
             ESP_LOGE(TAG, "packet queue full, dropping light pkt");
+            if (verify)
+                __atomic_store_n(&lightCmdPending, 0u, __ATOMIC_RELEASE); // nothing went out
             return false;
         }
         if (verify)
