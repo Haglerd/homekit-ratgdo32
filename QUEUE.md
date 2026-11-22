@@ -84,3 +84,66 @@ Queue-hygiene pass after the .92 OTA. Code-verified each item's claimed status a
 The fork's bug fixes (R1-R4 in `audit-notes/UPSTREAM_CHERRY_PICK_PLAN.md`) are already shipped in the fork. Their upstream-applicability is tracked in audit-notes/ for awareness only — **fork work proceeds regardless of upstream interest**.
 
 **Hard rule:** No upstream PRs, no upstream issue filings, no cherry-picks to upstream. Issue #170 was filed historically; do not let it set precedent. Future agents reading this queue: if you find yourself drafting a `gh pr create --repo ratgdo/...`, STOP — that's not how this fork operates.
+
+### [P2] codebase-audit-2026-11-22-01 - comms.cpp: checkAutoClose fires force-close with hardcoded 3500ms, ignoring user-configured hold duration
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#188
+**Acceptance:** When cfg_forceCloseHoldMs is set to a value other than 3500 and auto-close fires, the actual button-hold duration must match the user-configured value.
+**Notes:** `src/comms.cpp`. Line 3647: checkAutoClose calls door_command_force_close(3500). Inside that function (line 3372) forceCloseHoldMsCached = hold_ms overwrites the user-configured cached value with 3500. All HK-tile (homekit.cpp:2292,2367) and /setgdo paths read the config; only the auto-close path hardcodes the literal. Fix: pass __atomic_load_n(&forceCloseHoldMsCached, __ATOMIC_RELAXED) instead of 3500.
+
+### [P3] codebase-audit-2026-11-22-02 - homekit.cpp: three triplicated deferred-flag C++ quadruples (reconnect/refreshMdns/dumpState)
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#189
+**Acceptance:** A single parameterised deferred-action helper replaces the three volatile reason, volatile bool flag, request_fn, drain_fn quadruples at lines 1316-1376.
+**Notes:** `src/homekit.cpp`. Lines 1316-1376: reconnectHK Reason,Requested , refreshMdns Reason,Requested , dumpState Reason,Requested plus 6 functions (3 request, 3 drain) are structurally identical, differing only in the action they invoke. The JS-side triplication was already filed (functions.js hkRefreshMDNS/hkReconnect/hkDumpState); this is the C++ implementation side.
+
+### [P3] codebase-audit-2026-11-22-03 - comms.cpp: magic literal 1000000000 as NTP-sync epoch guard used raw at 3 sites
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#190
+**Acceptance:** The literal 1000000000 is replaced by a named constant (e.g. NTP_EPOCH_MIN) in all three uses.
+**Notes:** `src/comms.cpp`. Lines 3398, 3515, 3619 all test `now 1000000000` or `now = 1000000000` to detect whether SNTP has set the system clock. No named constant exists for this sentinel. If the threshold ever changes (or a reviewer reads the code cold) the meaning is not self-evident.
+
+### [P3] codebase-audit-2026-11-22-04 - vehicle.cpp: Arriving and Departing clear-timer blocks are byte-identical except for flag and notify call
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#191
+**Acceptance:** A single helper function replaces both clear-timer blocks, taking the motion direction as a parameter.
+**Notes:** `src/vehicle.cpp`. vehicle_loop() lines 187-193 (vehicleArriving clear) and 196-203 (vehicleDeparting clear) share identical guard ( MOTION_TIMER_DURATION), strlcpy, vehicleStatusChange assignment, and ESP_LOGI call. They differ only in the flag variable (vehicleArriving/vehicleDeparting) and the final notify_homekit_vehicle_arriving/departing(false) call.
+
+### [P3] codebase-audit-2026-11-22-05 - config.h: WIFI_POWER_MAX defined identically in both #ifdef ESP8266 and #else branches
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#192
+**Acceptance:** Dead #ifdef is removed; a single unconditional #define WIFI_POWER_MAX 20 replaces the two-branch definition, with the TODO resolved or deleted.
+**Notes:** `src/config.h`. Lines 37-40: both #ifdef ESP8266 and #else branches define WIFI_POWER_MAX as 20. The else branch carries a TODO comment 'support WiFi TX Power adjust max value if necessary'. Both branches resolve to the same constant, making the conditional dead relative to this symbol.
+
+### [P3] codebase-audit-2026-11-22-06 - log.cpp: rtcSize const is dead code defined but never referenced
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#193
+**Acceptance:** rtcSize is either removed or converted to a static_assert that enforces the 8 KB RTC_NOINIT budget.
+**Notes:** `src/log.cpp`. Line 169: `const int rtcSize = sizeof(rtcRebootLog) + ... + sizeof(resetMagic)` manually sums sizeof of 10 RTC_NOINIT fields. Grep finds zero uses outside its own definition. As dead code it will silently diverge whenever a new RTC_NOINIT field is added; a static_assert would make it a build-time guard instead.
+
+### [P3] codebase-audit-2026-11-22-07 - log.cpp: LOG::logToBuffer() is 255 lines recursion guard and network-task filter inlined
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#194
+**Acceptance:** logToBuffer is refactored to under 200 lines by extracting the per-task slot guard and network-task exclusion logic into named helpers.
+**Notes:** `src/log.cpp`. Function spans lines 337-592 ( 255 lines). The 2-pass task-handle recursion guard (LOG_RECURSION_SLOTS, pass 1 recursion check, pass 2 slot claim), 5-way strcmp network-task filter, heap-floor short-circuit, and logMtxMaxWaitMs CAS are all inlined. Each subsystem has its own rationale comments but extracting them would improve readability and testability.
+
+### [P3] codebase-audit-2026-11-22-08 - comms.cpp, homekit.cpp: rate-limited burst-log pattern copy-pasted at 4 sites
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#195
+**Acceptance:** A shared inline helper encapsulates the last*Ms, *Suppressed, 5000UL window state machine; all 4 sites use it.
+**Notes:** `src/comms.cpp`. Structurally identical block at comms.cpp:1813 (sec1Fail), comms.cpp:2801 (doorDebounce), comms.cpp:3338 (forceClose ignore), and homekit.cpp:2227 (HK dedup): two statics (lastMs, suppressed), deltaMs computed with UINT32_MAX sentinel for first call, if (deltaMs 5000UL) log+reset else count++ . Differs only in the ESP_LOGx message text.
+
+### [P3] codebase-audit-2026-11-22-09 - homekit.cpp: hkRecoverAttempts/hkLastHintLevel/hkConsecutiveHealthyTicks not volatile, inconsistent with adjac
+**Status:** queued
+**Source:** codebase-audit 2026-11-22 (Pi cron)
+**Issue:** Haglerd/homekit-ratgdo32#196
+**Acceptance:** All three cross-task watchdog counters are marked volatile (or accessed via __atomic_*), consistent with the adjacent hkCfg* volatile declarations.
+**Notes:** `src/homekit.cpp`. Lines 608-619: hkRecoverAttempts (uint8_t), hkLastHintLevel (uint8_t), hkConsecutiveHealthyTicks (uint32_t) are plain non-volatile statics. Written from loopTask in homekit_refresh_watchdog_config (lines 676-678), read on esp_timer Ticker in homekit_health_log. Adjacent hkCfg* vars are all volatile; these three are not, inconsistent with the codebase's cross-task convention documented in the same comment block.
