@@ -10,6 +10,11 @@ All notable changes to `homekit-ratgdo32` will be documented in this file. This 
 
 This section documents changes specific to the `Haglerd/homekit-ratgdo32` fork. Upstream changes are listed in the `v3.x.x` section below; the fork tracks upstream and adds these on top.
 
+### v3.4.4-forceclose.102 (2026-11-23) — /status.json without heap-allocated headers (#198)
+
+- **loopTask OOM panic on `/status.json`** (#198, log-audit-20261123-001). A .101 coredump showed `operator new` throwing `bad_alloc` inside `WebServer::sendHeader` <- `send_P` <- `handle_status()` during a sub-sample heap transient (`minFreeEver` 112-192 B per boot). On ESP32, `handle_status()` now `snprintf`s the same response head (Content-Type, Cache-Control, Content-Length, Connection: close) into a 160 B stack buffer and writes the head and body with `sendContent(ptr, len)`. The busiest web handler no longer makes heap allocations on its send path; each request saves 6-10 malloc/free pairs and ~300-500 B of transient heap. The ESP8266 branch is unchanged.
+- **Files**: `src/web.cpp`, `CHANGELOG.md`, `docs/manifest.json`.
+
 ### v3.4.4-forceclose.101 (2026-10-18) — Door/light/lock command debounce (upstream 1ebbd8f, 882ab3d, d99b8df ports) + 3 s door-start watchdog
 
 Content port of the upstream door-command fixes that were deferred from .100, adapted to our force-close/auto-close tree after a state-diagram review (planner, 2026-10-18). All changes are in `src/comms.cpp`; `homekit.cpp`, `web.cpp`, the web UI and the force-close FSM are untouched. Four independently revertible commits. **Soaked on both units before the manifest bump** (see PR).
