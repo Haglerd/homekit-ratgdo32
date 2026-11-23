@@ -16,6 +16,20 @@ Adopted 4 upstream `ratgdo/homekit-ratgdo32` commits into the fork. Upstream was
 
 - **upstream-adopt-20260531-004** (P3, `079d60bd`) — **DONE (no-op).** README "Some Security+ 2.0 doors" already present at `README.md:247`. No commit.
 
+### [P0] log-audit-20261123-001 — loopTask OOM panic (bad_alloc -> std::terminate) in WebServer::sendHeader via handle_status on .101
+**Status:** queued
+**Source:** log-audit 2026-11-23 07:04Z (device /crashlog + /heap + Pi syslog 2026-11-19..23)
+**Issue:** Haglerd/homekit-ratgdo32#198
+**Acceptance:** 7-day+ soak with crashCount=0, empty /crashlog coredump, no `restart reason: 4`; minFreeEver transients survived without reset; no #154/#155-style stranded-accept regression.
+**Notes:** Coredump on flash (crashCount=-1 -> shown as 1) decodes coherently against the .101 release ELF: `operator new` (new_op.cc:54) <- `WebServer::sendHeader` (WebServer.cpp:528) <- `send_P` <- `handle_status()` src/web.cpp:2231 <- `handle_everything()` web.cpp:1816 <- `handleClient` (loopTask). It isn't dated: the RTC log was wiped by the 21-Nov power-on reset (-002). The heap-near-zero transients are still live. Per-boot `minFreeEver` ratchets to 112-192B (e.g. `2026-11-22T16:14:17 minFreeEver=112B minFreeDelta=-36B`, `2026-11-21T07:58:20 minFreeEver=192B minFreeDelta=-788B`). Guard fired `2026-11-19T19:37:58 skipping fast-cadence re-arm (largest_free=164B < 256B)`. This is the panic-recurrence trigger for #156 (tiT family, "re-open only if a panic recurs"), now in loopTask. It also resembles the closed -20260524-001 web_loop terminate class. The .90 guard on this path regressed (#154/#155), so any mitigation must not gate accept(). **needs-human-planning** (investigation-shaped). Not force-close/auto-close.
+
+### [P2] log-audit-20261123-002 — unexplained power-on reset (reason 1) 2026-11-21 02:24 CST
+**Status:** queued
+**Source:** log-audit 2026-11-23 07:04Z (Pi syslog)
+**Issue:** Haglerd/homekit-ratgdo32#199
+**Acceptance:** Power event confirmed (close no-fix) OR 7-day window with no further unexplained reason-1 resets.
+**Notes:** 1 occurrence. Healthy sample `02:23:59 heap=49320 uptime=73897s paired=yes controllers=4`, then ~61s silence, then `02:25:08 System restart reason: 1` (boot 02:25:00). No warn/error lines preceded it. The Pi did not reboot then. Likely environmental (power blip / supply / EN line), so the user needs to confirm. **needs-human-planning**. No firmware file is confirmed (optional: src/ratgdo.cpp reset-reason NVS persistence). Not force-close/auto-close.
+
 _Two deferred conditional P3s (code-review-20260519-001 TWDT ISR `IRAM_ATTR`, code-review-20260519-002 `setup_homekit` healthTickerMux guard) archived to `audit-notes/deferred-archive.md` on 2026-05-29 — not drain-actionable; re-promote only if their trigger conditions fire._
 
 ---
