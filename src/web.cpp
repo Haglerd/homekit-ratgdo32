@@ -2227,8 +2227,30 @@ void handle_status()
                                             false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
     }
 
-    server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
-    server.send_P(200, type_json, statusJsonCopy);
+    // #198: write the response head raw from a stack buffer instead of
+    // sendHeader + send_P. WebServer 3.3.x heap-allocates a RequestArgument
+    // per sendHeader and builds the head in a heap String (_prepareHeader);
+    // under fragmentation that `new` threw bad_alloc on loopTask (panic).
+    // Same header set send_P emitted (CORS is off); _chunked is reset per
+    // request in _parseRequest, so sendContent writes these bytes verbatim.
+    char hdr[160];
+    int hdrLen = snprintf(hdr, sizeof(hdr),
+                          "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: %s\r\n"
+                          "Cache-Control: no-cache, no-store\r\n"
+                          "Content-Length: %u\r\n"
+                          "Connection: close\r\n"
+                          "\r\n",
+                          type_json, (unsigned)jsonLen);
+    if (hdrLen > 0 && (size_t)hdrLen < sizeof(hdr))
+    {
+        server.sendContent(hdr, (size_t)hdrLen);
+        server.sendContent(statusJsonCopy, jsonLen);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "status.json header snprintf failed (%d)", hdrLen);
+    }
 #endif
     response_time = _millis() - startTime;
     max_response_time = std::max(max_response_time, response_time);
